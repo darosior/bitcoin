@@ -248,6 +248,17 @@ void WalletView::encryptWallet(bool status)
     updateEncryptionStatus();
 }
 
+void WalletView::decryptWallet(bool status)
+{
+    if (!walletModel)
+        return;
+    AskPassphraseDialog dlg(status ? AskPassphraseDialog::Decrypt : AskPassphraseDialog::Encrypt, this);
+    dlg.setModel(walletModel);
+    dlg.exec();
+
+    updateEncryptionStatus();
+}
+
 void WalletView::backupWallet()
 {
     QString filename = GUIUtil::getSaveFileName(this,

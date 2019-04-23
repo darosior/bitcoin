@@ -347,8 +347,8 @@ bool WalletModel::setWalletEncrypted(bool encrypted, const SecureString &passphr
     }
     else
     {
-        // Decrypt -- TODO; not supported yet
-        return false;
+        // Decrypt
+        return m_wallet->unlock(passphrase);
     }
 }
 
