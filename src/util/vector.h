@@ -48,4 +48,22 @@ inline V Cat(V v1, const V& v2)
     return v1;
 }
 
+/** Concatenate any number of vectors into the first one, moving elements. */
+template<typename V, typename... Vs>
+inline V CatMany(V v, const Vs&&... vs)
+{
+    v.reserve(v.size() + (vs.size() + ...));
+    (v.insert(v.end(), std::make_move_iterator(vs.begin()), std::make_move_iterator(vs.end())), ...);
+    return v;
+}
+
+/** Concatenate any number of vectors into the first one. */
+template<typename V, typename... Vs>
+inline V CatMany(V v, const Vs&... vs)
+{
+    v.reserve(v.size() + (vs.size() + ...));
+    (v.insert(v.end(), vs.begin(), vs.end()), ...);
+    return v;
+}
+
 #endif // BITCOIN_UTIL_VECTOR_H
