@@ -9,25 +9,25 @@
 
 const std::string CURRENCY_UNIT = "BTC";
 
-CFeeRate::CFeeRate(const CAmount& nFeePaid, size_t nBytes_)
+CFeeRate::CFeeRate(const CAmount& nFeePaid, size_t nWeight_)
 {
-    assert(nBytes_ <= uint64_t(std::numeric_limits<int64_t>::max()));
-    int64_t nSize = int64_t(nBytes_);
+    assert(nWeight_ <= uint64_t(std::numeric_limits<int64_t>::max()));
+    int64_t nWU = int64_t(nWeight_);
 
-    if (nSize > 0)
-        nSatoshisPerK = nFeePaid * 1000 / nSize;
+    if (nWU > 0)
+        nSatoshisPerK = nFeePaid * 1000 / nWU;
     else
         nSatoshisPerK = 0;
 }
 
-CAmount CFeeRate::GetFee(size_t nBytes_) const
+CAmount CFeeRate::GetFee(size_t nWeight_) const
 {
-    assert(nBytes_ <= uint64_t(std::numeric_limits<int64_t>::max()));
-    int64_t nSize = int64_t(nBytes_);
+    assert(nWeight_ <= uint64_t(std::numeric_limits<int64_t>::max()));
+    int64_t nWU = int64_t(nWeight_);
 
-    CAmount nFee = nSatoshisPerK * nSize / 1000;
+    CAmount nFee = nSatoshisPerK * nWU / 1000;
 
-    if (nFee == 0 && nSize != 0) {
+    if (nFee == 0 && nWeight_ != 0) {
         if (nSatoshisPerK > 0)
             nFee = CAmount(1);
         if (nSatoshisPerK < 0)
