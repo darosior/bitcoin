@@ -139,6 +139,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "keypoolrefill", 0, "newsize" },
     { "getrawmempool", 0, "verbose" },
     { "estimatesmartfee", 0, "conf_target" },
+    { "estimatesmartfee", 2, "legacy" },
     { "estimaterawfee", 0, "conf_target" },
     { "estimaterawfee", 1, "threshold" },
     { "prioritisetransaction", 1, "dummy" },
