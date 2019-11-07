@@ -879,7 +879,7 @@ static UniValue estimatesmartfee(const JSONRPCRequest& request)
     FeeCalculation feeCalc;
     CFeeRate feeRate = ::feeEstimator.estimateSmartFee(conf_target, &feeCalc, conservative);
     if (feeRate != CFeeRate(0)) {
-        result.pushKV("feerate", ValueFromAmount(feeRate.GetFeePerK()));
+        result.pushKV("feerate", ValueFromAmount(feeRate.GetFeePerK() * WITNESS_SCALE_FACTOR));
     } else {
         errors.push_back("Insufficient data or no feerate found");
         result.pushKV("errors", errors);
@@ -973,7 +973,7 @@ static UniValue estimaterawfee(const JSONRPCRequest& request)
 
         // CFeeRate(0) is used to indicate error as a return value from estimateRawFee
         if (feeRate != CFeeRate(0)) {
-            horizon_result.pushKV("feerate", ValueFromAmount(feeRate.GetFeePerK()));
+            horizon_result.pushKV("feerate", ValueFromAmount(feeRate.GetFeePerK() / WITNESS_SCALE_FACTOR));
             horizon_result.pushKV("decay", buckets.decay);
             horizon_result.pushKV("scale", (int)buckets.scale);
             horizon_result.pushKV("pass", passbucket);
