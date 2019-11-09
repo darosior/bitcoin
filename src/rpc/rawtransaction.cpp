@@ -1646,7 +1646,8 @@ UniValue analyzepsbt(const JSONRPCRequest& request)
             RPCHelpMan{"analyzepsbt",
             "\nAnalyzes and provides information about the current status of a PSBT and its inputs\n",
             {
-                {"psbt", RPCArg::Type::STR, RPCArg::Optional::NO, "A base64 string of a PSBT"}
+                {"psbt", RPCArg::Type::STR, RPCArg::Optional::NO, "A base64 string of a PSBT"},
+                {"feerate_weight", RPCArg::Type::BOOL, "false", "Show feerate in " + CURRENCY_UNIT + "/kWU."}
             },
             RPCResult {
                 "{\n"
@@ -1686,6 +1687,10 @@ UniValue analyzepsbt(const JSONRPCRequest& request)
     std::string error;
     if (!DecodeBase64PSBT(psbtx, request.params[0].get_str(), error)) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("TX decode failed %s", error));
+    }
+    bool feerate_kwu = false;
+    if (!request.params[1].isNull()) {
+        feerate_kwu = request.params[1].get_bool();
     }
 
     PSBTAnalysis psbta = AnalyzePSBT(psbtx);
@@ -1734,7 +1739,9 @@ UniValue analyzepsbt(const JSONRPCRequest& request)
         result.pushKV("estimated_weight", (int)*psbta.estimated_weight);
     }
     if (psbta.estimated_feerate != nullopt) {
-        result.pushKV("estimated_feerate", ValueFromAmount(psbta.estimated_feerate->GetFeePerK()));
+        CAmount fees = psbta.estimated_feerate->GetFeePerK();
+        if (!feerate_kwu) fees *= WITNESS_SCALE_FACTOR;
+        result.pushKV("estimated_feerate", ValueFromAmount(fees));
     }
     if (psbta.fee != nullopt) {
         result.pushKV("fee", ValueFromAmount(*psbta.fee));
@@ -1763,7 +1770,7 @@ static const CRPCCommand commands[] =
     { "rawtransactions",    "converttopsbt",                &converttopsbt,             {"hexstring","permitsigdata","iswitness"} },
     { "rawtransactions",    "utxoupdatepsbt",               &utxoupdatepsbt,            {"psbt", "descriptors"} },
     { "rawtransactions",    "joinpsbts",                    &joinpsbts,                 {"txs"} },
-    { "rawtransactions",    "analyzepsbt",                  &analyzepsbt,               {"psbt"} },
+    { "rawtransactions",    "analyzepsbt",                  &analyzepsbt,               {"psbt", "feerate_weight"} },
 
     { "blockchain",         "gettxoutproof",                &gettxoutproof,             {"txids", "blockhash"} },
     { "blockchain",         "verifytxoutproof",             &verifytxoutproof,          {"proof"} },
