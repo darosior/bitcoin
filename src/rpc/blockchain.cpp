@@ -1699,6 +1699,7 @@ static UniValue getblockstats(const JSONRPCRequest& request)
                             {"time", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Selected statistic"},
                         },
                         "stats"},
+                    {"feerate_weight", RPCArg::Type::BOOL, "false", "Show feerate values in satoshis per weight unit instead of satoshis per virtual byte."},
                 },
                 RPCResult{
             "{                           (json object)\n"
@@ -1779,6 +1780,11 @@ static UniValue getblockstats(const JSONRPCRequest& request)
             const std::string stat = stats_univalue[i].get_str();
             stats.insert(stat);
         }
+    }
+
+    bool feerate_in_wu = false;
+    if (!request.params[2].isNull()) {
+        feerate_in_wu = request.params[2].get_bool();
     }
 
     const CBlock block = GetBlockChecked(pindex);
@@ -1878,8 +1884,13 @@ static UniValue getblockstats(const JSONRPCRequest& request)
             minfee = std::min(minfee, txfee);
             totalfee += txfee;
 
-            // New feerate uses satoshis per virtual byte instead of per serialized byte
-            CAmount feerate = weight ? (txfee * WITNESS_SCALE_FACTOR) / weight : 0;
+            // New feerate uses satoshis per weight instead of per serialized byte
+            CAmount feerate;
+            if (feerate_in_wu) {
+                feerate = weight ? txfee / weight : 0;
+            } else {
+                feerate = weight ? (txfee * WITNESS_SCALE_FACTOR) / weight : 0;
+            }
             if (do_feerate_percentiles) {
                 feerate_array.emplace_back(std::make_pair(feerate, weight));
             }
@@ -1898,7 +1909,11 @@ static UniValue getblockstats(const JSONRPCRequest& request)
 
     UniValue ret_all(UniValue::VOBJ);
     ret_all.pushKV("avgfee", (block.vtx.size() > 1) ? totalfee / (block.vtx.size() - 1) : 0);
-    ret_all.pushKV("avgfeerate", total_weight ? (totalfee * WITNESS_SCALE_FACTOR) / total_weight : 0); // Unit: sat/vbyte
+    if (feerate_in_wu) {
+        ret_all.pushKV("avgfeerate", total_weight ? totalfee / total_weight : 0); // Unit: sat/weight unit
+    } else {
+        ret_all.pushKV("avgfeerate", total_weight ? (totalfee * WITNESS_SCALE_FACTOR) / total_weight : 0); // Unit: sat/vbyte
+    }
     ret_all.pushKV("avgtxsize", (block.vtx.size() > 1) ? total_size / (block.vtx.size() - 1) : 0);
     ret_all.pushKV("blockhash", pindex->GetBlockHash().GetHex());
     ret_all.pushKV("feerate_percentiles", feerates_res);
@@ -2356,7 +2371,7 @@ static const CRPCCommand commands[] =
   //  --------------------- ------------------------  -----------------------  ----------
     { "blockchain",         "getblockchaininfo",      &getblockchaininfo,      {} },
     { "blockchain",         "getchaintxstats",        &getchaintxstats,        {"nblocks", "blockhash"} },
-    { "blockchain",         "getblockstats",          &getblockstats,          {"hash_or_height", "stats"} },
+    { "blockchain",         "getblockstats",          &getblockstats,          {"hash_or_height", "stats", "feerate_weight"} },
     { "blockchain",         "getbestblockhash",       &getbestblockhash,       {} },
     { "blockchain",         "getblockcount",          &getblockcount,          {} },
     { "blockchain",         "getblock",               &getblock,               {"blockhash","verbosity|verbose"} },
