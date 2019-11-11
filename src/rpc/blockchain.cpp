@@ -410,7 +410,7 @@ static void entryToJSON(const CTxMemPool& pool, UniValue& info, const CTxMemPool
     fees.pushKV("descendant", ValueFromAmount(e.GetModFeesWithDescendants()));
     info.pushKV("fees", fees);
 
-    info.pushKV("vsize", (int)e.GetTxSize());
+    info.pushKV("vsize", (int)e.GetTxSize() / WITNESS_SCALE_FACTOR);
     if (IsDeprecatedRPCEnabled("size")) info.pushKV("size", (int)e.GetTxSize());
     info.pushKV("weight", (int)e.GetTxWeight());
     info.pushKV("fee", ValueFromAmount(e.GetFee()));
@@ -1410,8 +1410,8 @@ UniValue MempoolInfoToJSON(const CTxMemPool& pool)
     ret.pushKV("usage", (int64_t)pool.DynamicMemoryUsage());
     size_t maxmempool = gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
     ret.pushKV("maxmempool", (int64_t) maxmempool);
-    ret.pushKV("mempoolminfee", ValueFromAmount(std::max(pool.GetMinFee(maxmempool), ::minRelayTxFee).GetFeePerK()));
-    ret.pushKV("minrelaytxfee", ValueFromAmount(::minRelayTxFee.GetFeePerK()));
+    ret.pushKV("mempoolminfee", ValueFromAmount(std::max(pool.GetMinFee(maxmempool), ::minRelayTxFee).GetFeePerK() * WITNESS_SCALE_FACTOR));
+    ret.pushKV("minrelaytxfee", ValueFromAmount(::minRelayTxFee.GetFeePerK() * WITNESS_SCALE_FACTOR));
 
     return ret;
 }
