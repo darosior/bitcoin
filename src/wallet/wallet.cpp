@@ -1467,7 +1467,7 @@ int64_t CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *wall
         // implies that we can sign for every input.
         return -1;
     }
-    return GetVirtualTransactionSize(CTransaction(txNew));
+    return GetTransactionWeight(CTransaction(txNew));
 }
 
 int CalculateMaximumSignedInputSize(const CTxOut& txout, const CWallet* wallet, bool use_max_sig)
@@ -1477,7 +1477,7 @@ int CalculateMaximumSignedInputSize(const CTxOut& txout, const CWallet* wallet, 
     if (!wallet->DummySignInput(txn.vin[0], txout, use_max_sig)) {
         return -1;
     }
-    return GetVirtualTransactionInputSize(txn.vin[0]);
+    return GetTransactionInputWeight(txn.vin[0]);
 }
 
 void CWalletTx::GetAmounts(std::list<COutputEntry>& listReceived,
@@ -2546,7 +2546,7 @@ bool CWallet::CreateTransaction(interfaces::Chain::Lock& locked_chain, const std
 
     FeeCalculation feeCalc;
     CAmount nFeeNeeded;
-    int nBytes;
+    int nWeightUnits;
     {
         std::set<CInputCoin> setCoins;
         auto locked_chain = chain().lock();
@@ -2589,7 +2589,13 @@ bool CWallet::CreateTransaction(interfaces::Chain::Lock& locked_chain, const std
                 scriptChange = GetScriptForDestination(dest);
             }
             CTxOut change_prototype_txout(0, scriptChange);
-            coin_selection_params.change_output_size = GetSerializeSize(change_prototype_txout);
+            coin_selection_params.change_output_size = GetSerializeSize(change_prototype_txout) * WITNESS_SCALE_FACTOR;
+            // Apply witness data discount
+            int witnessversion;
+            std::vector<unsigned char> witnessprogram;
+            if (scriptChange.IsWitnessProgram(witnessversion, witnessprogram)) {
+                coin_selection_params.tx_noinputs_size -= witnessprogram.size() * (WITNESS_SCALE_FACTOR - 1);
+            }
 
             CFeeRate discard_rate = GetDiscardRate(*this);
 
@@ -2616,7 +2622,8 @@ bool CWallet::CreateTransaction(interfaces::Chain::Lock& locked_chain, const std
                     nValueToSelect += nFeeRet;
 
                 // vouts to the payees
-                coin_selection_params.tx_noinputs_size = 11; // Static vsize overhead + outputs vsize. 4 nVersion, 4 nLocktime, 1 input count, 1 output count, 1 witness overhead (dummy, flag, stack size)
+                // Static weight overhead + outputs vsize. 4*4 nVersion, 4*4 nLocktime, 1*4 input count, 1*4 output count, 1 witness overhead (dummy, flag, stack size)
+                coin_selection_params.tx_noinputs_size = (4 + 4 + 1 + 1) * WITNESS_SCALE_FACTOR + 1;
                 for (const auto& recipient : vecSend)
                 {
                     CTxOut txout(recipient.nAmount, recipient.scriptPubKey);
@@ -2633,7 +2640,13 @@ bool CWallet::CreateTransaction(interfaces::Chain::Lock& locked_chain, const std
                         }
                     }
                     // Include the fee cost for outputs. Note this is only used for BnB right now
-                    coin_selection_params.tx_noinputs_size += ::GetSerializeSize(txout, PROTOCOL_VERSION);
+                    coin_selection_params.tx_noinputs_size += ::GetSerializeSize(txout, PROTOCOL_VERSION) * WITNESS_SCALE_FACTOR;
+                    // Apply witness data discount
+                    int witnessversion;
+                    std::vector<unsigned char> witnessprogram;
+                    if (txout.scriptPubKey.IsWitnessProgram(witnessversion, witnessprogram)) {
+                        coin_selection_params.tx_noinputs_size -= witnessprogram.size() * (WITNESS_SCALE_FACTOR - 1);
+                    }
 
                     if (IsDust(txout, chain().relayDustFee()))
                     {
@@ -2721,13 +2734,13 @@ bool CWallet::CreateTransaction(interfaces::Chain::Lock& locked_chain, const std
                     txNew.vin.push_back(CTxIn(coin.outpoint,CScript()));
                 }
 
-                nBytes = CalculateMaximumSignedTxSize(CTransaction(txNew), this, coin_control.fAllowWatchOnly);
-                if (nBytes < 0) {
+                nWeightUnits = CalculateMaximumSignedTxSize(CTransaction(txNew), this, coin_control.fAllowWatchOnly);
+                if (nWeightUnits < 0) {
                     strFailReason = _("Signing transaction failed").translated;
                     return false;
                 }
 
-                nFeeNeeded = GetMinimumFee(*this, nBytes, coin_control, &feeCalc);
+                nFeeNeeded = GetMinimumFee(*this, nWeightUnits, coin_control, &feeCalc);
                 if (feeCalc.reason == FeeReason::FALLBACK && !m_allow_fallback_fee) {
                     // eventually allow a fallback fee
                     strFailReason = _("Fee estimation failed. Fallbackfee is disabled. Wait a few blocks or enable -fallbackfee.").translated;
@@ -2746,7 +2759,7 @@ bool CWallet::CreateTransaction(interfaces::Chain::Lock& locked_chain, const std
                     // (because of reduced tx size) and so we should add a
                     // change output. Only try this once.
                     if (nChangePosInOut == -1 && nSubtractFeeFromAmount == 0 && pick_new_inputs) {
-                        unsigned int tx_size_with_change = nBytes + coin_selection_params.change_output_size + 2; // Add 2 as a buffer in case increasing # of outputs changes compact size
+                        unsigned int tx_size_with_change = nWeightUnits + coin_selection_params.change_output_size + 2; // Add 2 as a buffer in case increasing # of outputs changes compact size
                         CAmount fee_needed_with_change = GetMinimumFee(*this, tx_size_with_change, coin_control, nullptr);
                         CAmount minimum_value_for_change = GetDustThreshold(change_prototype_txout, discard_rate);
                         if (nFeeRet >= fee_needed_with_change + minimum_value_for_change) {
@@ -2866,8 +2879,8 @@ bool CWallet::CreateTransaction(interfaces::Chain::Lock& locked_chain, const std
     // accidental re-use.
     reservedest.KeepDestination();
 
-    WalletLogPrintf("Fee Calculation: Fee:%d Bytes:%u Needed:%d Tgt:%d (requested %d) Reason:\"%s\" Decay %.5f: Estimation: (%g - %g) %.2f%% %.1f/(%.1f %d mem %.1f out) Fail: (%g - %g) %.2f%% %.1f/(%.1f %d mem %.1f out)\n",
-              nFeeRet, nBytes, nFeeNeeded, feeCalc.returnedTarget, feeCalc.desiredTarget, StringForFeeReason(feeCalc.reason), feeCalc.est.decay,
+    WalletLogPrintf("Fee Calculation: Fee:%d Weight units:%u Needed:%d Tgt:%d (requested %d) Reason:\"%s\" Decay %.5f: Estimation: (%g - %g) %.2f%% %.1f/(%.1f %d mem %.1f out) Fail: (%g - %g) %.2f%% %.1f/(%.1f %d mem %.1f out)\n",
+              nFeeRet, nWeightUnits, nFeeNeeded, feeCalc.returnedTarget, feeCalc.desiredTarget, StringForFeeReason(feeCalc.reason), feeCalc.est.decay,
               feeCalc.est.pass.start, feeCalc.est.pass.end,
               100 * feeCalc.est.pass.withinTarget / (feeCalc.est.pass.totalConfirmed + feeCalc.est.pass.inMempool + feeCalc.est.pass.leftMempool),
               feeCalc.est.pass.withinTarget, feeCalc.est.pass.totalConfirmed, feeCalc.est.pass.inMempool, feeCalc.est.pass.leftMempool,
@@ -3704,11 +3717,11 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
             error = AmountErrMsg("mintxfee", gArgs.GetArg("-mintxfee", "")).translated;
             return nullptr;
         }
-        if (n > HIGH_TX_FEE_PER_KB) {
+        if (n / WITNESS_SCALE_FACTOR > HIGH_TX_FEERATE_PER_WU) {
             warnings.push_back(AmountHighWarn("-mintxfee").translated + " " +
                               _("This is the minimum transaction fee you pay on every transaction.").translated);
         }
-        walletInstance->m_min_fee = CFeeRate(n);
+        walletInstance->m_min_fee = CFeeRate(n / WITNESS_SCALE_FACTOR);
     }
 
     if (gArgs.IsArgSet("-fallbackfee")) {
@@ -3717,11 +3730,11 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
             error = strprintf(_("Invalid amount for -fallbackfee=<amount>: '%s'").translated, gArgs.GetArg("-fallbackfee", ""));
             return nullptr;
         }
-        if (nFeePerK > HIGH_TX_FEE_PER_KB) {
+        if (nFeePerK / WITNESS_SCALE_FACTOR > HIGH_TX_FEERATE_PER_WU) {
             warnings.push_back(AmountHighWarn("-fallbackfee").translated + " " +
                               _("This is the transaction fee you may pay when fee estimates are not available.").translated);
         }
-        walletInstance->m_fallback_fee = CFeeRate(nFeePerK);
+        walletInstance->m_fallback_fee = CFeeRate(nFeePerK / WITNESS_SCALE_FACTOR);
     }
     // Disable fallback fee in case value was set to 0, enable if non-null value
     walletInstance->m_allow_fallback_fee = walletInstance->m_fallback_fee.GetFeePerK() != 0;
@@ -3732,11 +3745,11 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
             error = strprintf(_("Invalid amount for -discardfee=<amount>: '%s'").translated, gArgs.GetArg("-discardfee", ""));
             return nullptr;
         }
-        if (nFeePerK > HIGH_TX_FEE_PER_KB) {
+        if (nFeePerK / WITNESS_SCALE_FACTOR > HIGH_TX_FEERATE_PER_WU) {
             warnings.push_back(AmountHighWarn("-discardfee").translated + " " +
                               _("This is the transaction fee you may discard if change is smaller than dust at this level").translated);
         }
-        walletInstance->m_discard_rate = CFeeRate(nFeePerK);
+        walletInstance->m_discard_rate = CFeeRate(nFeePerK / WITNESS_SCALE_FACTOR);
     }
     if (gArgs.IsArgSet("-paytxfee")) {
         CAmount nFeePerK = 0;
@@ -3744,11 +3757,11 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
             error = AmountErrMsg("paytxfee", gArgs.GetArg("-paytxfee", "")).translated;
             return nullptr;
         }
-        if (nFeePerK > HIGH_TX_FEE_PER_KB) {
+        if (nFeePerK / WITNESS_SCALE_FACTOR > HIGH_TX_FEERATE_PER_WU) {
             warnings.push_back(AmountHighWarn("-paytxfee").translated + " " +
                               _("This is the transaction fee you will pay if you send a transaction.").translated);
         }
-        walletInstance->m_pay_tx_fee = CFeeRate(nFeePerK, 1000);
+        walletInstance->m_pay_tx_fee = CFeeRate(nFeePerK / WITNESS_SCALE_FACTOR, 1000);
         if (walletInstance->m_pay_tx_fee < chain.relayMinFee()) {
             error = strprintf(_("Invalid amount for -paytxfee=<amount>: '%s' (must be at least %s)").translated,
                 gArgs.GetArg("-paytxfee", ""), chain.relayMinFee().ToString());
@@ -3762,18 +3775,18 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain,
             error = AmountErrMsg("maxtxfee", gArgs.GetArg("-maxtxfee", "")).translated;
             return nullptr;
         }
-        if (nMaxFee > HIGH_MAX_TX_FEE) {
+        if (nMaxFee / WITNESS_SCALE_FACTOR > HIGH_MAX_TX_FEE) {
             warnings.push_back(_("-maxtxfee is set very high! Fees this large could be paid on a single transaction.").translated);
         }
-        if (CFeeRate(nMaxFee, 1000) < chain.relayMinFee()) {
+        if (CFeeRate(nMaxFee / WITNESS_SCALE_FACTOR, 1000) < chain.relayMinFee()) {
             error = strprintf(_("Invalid amount for -maxtxfee=<amount>: '%s' (must be at least the minrelay fee of %s to prevent stuck transactions)").translated,
                                        gArgs.GetArg("-maxtxfee", ""), chain.relayMinFee().ToString());
             return nullptr;
         }
-        walletInstance->m_default_max_tx_fee = nMaxFee;
+        walletInstance->m_default_max_tx_fee = nMaxFee / WITNESS_SCALE_FACTOR;
     }
 
-    if (chain.relayMinFee().GetFeePerK() > HIGH_TX_FEE_PER_KB) {
+    if (chain.relayMinFee().GetFeePerK() > HIGH_TX_FEERATE_PER_WU) {
         warnings.push_back(AmountHighWarn("-minrelaytxfee").translated + " " +
                     _("The wallet will avoid paying less than the minimum relay fee.").translated);
     }
