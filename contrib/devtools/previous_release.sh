@@ -67,7 +67,8 @@ if [ "$DOWNLOAD_BINARY" -eq "1" ]; then
   HOST="${HOST:-$(./depends/config.guess)}"
   case "$HOST" in
     x86_64-*-linux*)
-      PLATFORM=x86_64-linux-gnu
+      #PLATFORM=x86_64-linux-gnu
+      PLATFORM=linux64
       ;;
     x86_64-apple-darwin*)
       PLATFORM=osx64

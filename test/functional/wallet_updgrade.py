@@ -27,36 +27,17 @@ from test_framework.util import (
     sync_mempools
 )
 
-
-def adapt_old_config(nodes):
-    """Rewrite the config without the lines old bitcoinds don't support."""
-    for node in nodes:
-        with open(os.path.join(node.datadir, "bitcoin.conf"),
-                  'r', encoding='utf8') as f:
-            lines = f.readlines()
-        with open(os.path.join(node.datadir, "bitcoin.conf"),
-                  'w', encoding='utf8') as f:
-            for line in lines:
-                # Configuration sections were introduced in v0.17
-                supports_sections = (node.version is not None
-                                     and node.version < 170000)
-                if line.strip('\n') == "[regtest]" and supports_sections:
-                    continue
-                f.write(line)
-
-
 class BackwardsCompatibilityTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 6
+        self.num_nodes = 5
         # Add new version after each release:
         self.extra_args = [
             ["-addresstype=bech32"], # Pre-release: use to mine blocks
             ["-nowallet", "-walletrbf=1", "-addresstype=bech32"], # Pre-release: use to receive coins, swap wallets, etc
             ["-nowallet", "-walletrbf=1", "-addresstype=bech32"], # v0.19.0.1
             ["-nowallet", "-walletrbf=1", "-addresstype=bech32"], # v0.18.1
-            ["-nowallet", "-walletrbf=1", "-addresstype=bech32"], # v0.17.1
-            ["-nowallet", "-walletrbf=1"],
+            ["-nowallet", "-walletrbf=1", "-addresstype=bech32"] # v0.17.1
         ]
 
     def skip_test_if_missing_module(self):
@@ -77,25 +58,20 @@ class BackwardsCompatibilityTest(BitcoinTestFramework):
             None,
             190000,
             180100,
-            170100,
-            120100,
+            170100
         ], binary=[
             self.options.bitcoind,
             self.options.bitcoind,
             releases_path + "/v0.19.0.1/bin/bitcoind",
             releases_path + "/v0.18.1/bin/bitcoind",
-            releases_path + "/v0.17.1/bin/bitcoind",
-            releases_path + "/v0.12.1/bin/bitcoind",
+            releases_path + "/v0.17.1/bin/bitcoind"
         ], binary_cli=[
             self.options.bitcoincli,
             self.options.bitcoincli,
             releases_path + "/v0.19.0.1/bin/bitcoin-cli",
             releases_path + "/v0.18.1/bin/bitcoin-cli",
-            releases_path + "/v0.17.1/bin/bitcoin-cli",
-            releases_path + "/v0.12.1/bin/bitcoin-cli"
+            releases_path + "/v0.17.1/bin/bitcoin-cli"
         ])
-
-        adapt_old_config(self.nodes)
 
         self.start_nodes()
 
@@ -108,11 +84,10 @@ class BackwardsCompatibilityTest(BitcoinTestFramework):
         res = self.nodes[self.num_nodes - 1].getblockchaininfo()
         assert_equal(res['blocks'], 101)
 
-        node_master = self.nodes[self.num_nodes - 5]
-        node_v19 = self.nodes[self.num_nodes - 4]
-        node_v18 = self.nodes[self.num_nodes - 3]
-        node_v17 = self.nodes[self.num_nodes - 2]
-        node_v11 = self.nodes[self.num_nodes - 1]
+        node_master = self.nodes[self.num_nodes - 4]
+        node_v19 = self.nodes[self.num_nodes - 3]
+        node_v18 = self.nodes[self.num_nodes - 2]
+        node_v17 = self.nodes[self.num_nodes - 1]
 
         self.log.info("Test wallet backwards compatibility...")
         # Create a number of wallets and open them in older versions:
