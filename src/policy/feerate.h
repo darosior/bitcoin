@@ -7,6 +7,7 @@
 #define BITCOIN_POLICY_FEERATE_H
 
 #include <amount.h>
+#include <consensus/consensus.h>
 #include <serialize.h>
 
 #include <string>
@@ -24,27 +25,30 @@ enum class FeeEstimateMode {
 };
 
 /**
- * Fee rate in satoshis per kilobyte: CAmount / kB
+ * Fee rate in satoshis per kiloweight: CAmount / kW
  */
 class CFeeRate
 {
 private:
-    CAmount nSatoshisPerK; // unit is satoshis-per-1,000-bytes
+    CAmount nSatoshisPerK; // unit is satoshis-per-1,000-weight-units
+    CAmount nSatoshisPerKVbyte() const;
 
 public:
-    /** Fee rate of 0 satoshis per kB */
+    /** Fee rate of 0 satoshis per kW */
     CFeeRate() : nSatoshisPerK(0) { }
     template<typename I>
-    explicit CFeeRate(const I _nSatoshisPerK): nSatoshisPerK(_nSatoshisPerK) {
+    explicit CFeeRate(const I _nSatoshisPerK, bool vbyte=true): nSatoshisPerK(_nSatoshisPerK) {
         // We've previously had bugs creep in from silent double->int conversion...
         static_assert(std::is_integral<I>::value, "CFeeRate should be used without floats");
+        // Round up if we're passed a feerate in vbytes.
+        if (vbyte) nSatoshisPerK = (nSatoshisPerK /* FIXME + WITNESS_SCALE_FACTOR - 1*/) / WITNESS_SCALE_FACTOR;
     }
-    /** Constructor for a fee rate in satoshis per kB. The size in bytes must not exceed (2^63 - 1)*/
-    CFeeRate(const CAmount& nFeePaid, size_t nBytes);
+    /** Constructor for a fee rate either in satoshis per kB or per kW. The size must not exceed (2^63 - 1)*/
+    CFeeRate(const CAmount& nFeePaid, size_t nSize, bool vbyte=true);
     /**
      * Return the fee in satoshis for the given size in bytes.
      */
-    CAmount GetFee(size_t nBytes) const;
+    CAmount GetFee(size_t nSize, bool vbyte=true) const;
     /**
      * Return the fee in satoshis for a size of 1000 bytes
      */
