@@ -5,9 +5,10 @@
 #include <policy/rbf.h>
 #include <util/rbf.h>
 
-RBFTransactionState IsRBFOptIn(const CTransaction& tx, const CTxMemPool& pool)
+namespace {
+RBFTransactionState IsRBFOptIn(const CTransaction& tx, const CTxMemPool* const pool) NO_THREAD_SAFETY_ANALYSIS
 {
-    AssertLockHeld(pool.cs);
+    if (pool) AssertLockHeld(pool->cs);
 
     CTxMemPool::setEntries setAncestors;
 
@@ -18,7 +19,7 @@ RBFTransactionState IsRBFOptIn(const CTransaction& tx, const CTxMemPool& pool)
 
     // If this transaction is not in our mempool, then we can't be sure
     // we will know about all its inputs.
-    if (!pool.exists(tx.GetHash())) {
+    if (!pool || !pool->exists(tx.GetHash())) {
         return RBFTransactionState::UNKNOWN;
     }
 
@@ -26,8 +27,8 @@ RBFTransactionState IsRBFOptIn(const CTransaction& tx, const CTxMemPool& pool)
     // signaled for RBF if any unconfirmed parents have signaled.
     uint64_t noLimit = std::numeric_limits<uint64_t>::max();
     std::string dummy;
-    CTxMemPoolEntry entry = *pool.mapTx.find(tx.GetHash());
-    pool.CalculateMemPoolAncestors(entry, setAncestors, noLimit, noLimit, noLimit, noLimit, dummy, false);
+    CTxMemPoolEntry entry = *pool->mapTx.find(tx.GetHash());
+    pool->CalculateMemPoolAncestors(entry, setAncestors, noLimit, noLimit, noLimit, noLimit, dummy, false);
 
     for (CTxMemPool::txiter it : setAncestors) {
         if (SignalsOptInRBF(it->GetTx())) {
@@ -36,3 +37,7 @@ RBFTransactionState IsRBFOptIn(const CTransaction& tx, const CTxMemPool& pool)
     }
     return RBFTransactionState::FINAL;
 }
+} // namespace
+
+RBFTransactionState IsRBFOptIn(const CTransaction& tx, const CTxMemPool& pool) { return IsRBFOptIn(tx, &pool); }
+RBFTransactionState IsRBFOptInEmptyMempool(const CTransaction& tx) { return IsRBFOptIn(tx, nullptr); }
