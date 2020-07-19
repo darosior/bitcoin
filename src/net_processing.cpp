@@ -1672,7 +1672,7 @@ void static ProcessGetBlockData(CNode& pfrom, const CChainParams& chainparams, c
 }
 
 //! Determine whether or not a peer can request a transaction, and return it (or nullptr if not found or not allowed).
-CTransactionRef static FindTxForGetData(const CNode& peer, const uint256& txid_or_wtxid, bool use_wtxid, const std::chrono::seconds mempool_req, const std::chrono::seconds now) LOCKS_EXCLUDED(cs_main)
+CTransactionRef static FindTxForGetData(const CTxMemPool& mempool, const CNode& peer, const uint256& txid_or_wtxid, bool use_wtxid, const std::chrono::seconds mempool_req, const std::chrono::seconds now) LOCKS_EXCLUDED(cs_main)
 {
     auto txinfo = mempool.info(txid_or_wtxid, use_wtxid);
     if (txinfo.tx) {
@@ -1728,7 +1728,7 @@ void static ProcessGetData(CNode& pfrom, const CChainParams& chainparams, CConnm
             continue;
         }
 
-        CTransactionRef tx = FindTxForGetData(pfrom, inv.hash, inv.type == MSG_WTX, mempool_req, now);
+        CTransactionRef tx = FindTxForGetData(mempool, pfrom, inv.hash, inv.type == MSG_WTX, mempool_req, now);
         if (tx) {
             // WTX and WITNESS_TX imply we serialize with witness
             int nSendFlags = (inv.type == MSG_TX ? SERIALIZE_TRANSACTION_NO_WITNESS : 0);
