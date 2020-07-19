@@ -185,7 +185,7 @@ void Shutdown(NodeContext& node)
     /// Be sure that anything that writes files or flushes caches only does this if the respective
     /// module was initialized.
     util::ThreadRename("shutoff");
-    mempool.AddTransactionsUpdated(1);
+    if (node.mempool) node.mempool->AddTransactionsUpdated(1);
 
     StopHTTPRPC();
     StopREST();
@@ -229,8 +229,8 @@ void Shutdown(NodeContext& node)
     node.connman.reset();
     node.banman.reset();
 
-    if (::mempool.IsLoaded() && gArgs.GetArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL)) {
-        DumpMempool(::mempool);
+    if (node.mempool && node.mempool->IsLoaded() && gArgs.GetArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL)) {
+        DumpMempool(*node.mempool);
     }
 
     if (fFeeEstimatesInitialized)
@@ -682,7 +682,7 @@ static void CleanupBlockRevFiles()
     }
 }
 
-static void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFiles)
+static void ThreadImport(ChainstateManager& chainman, CTxMemPool* mempool, std::vector<fs::path> vImportFiles)
 {
     const CChainParams& chainparams = Params();
     ScheduleBatchPriority();
@@ -750,10 +750,12 @@ static void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImp
         return;
     }
     } // End scope of CImportingNow
-    if (gArgs.GetArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL)) {
-        LoadMempool(::mempool);
+    if (mempool) {
+        if (gArgs.GetArg("-persistmempool", DEFAULT_PERSIST_MEMPOOL)) {
+            LoadMempool(*mempool);
+        }
+        mempool->SetIsLoaded(!ShutdownRequested());
     }
-    ::mempool.SetIsLoaded(!ShutdownRequested());
 }
 
 /** Sanity checks
@@ -1063,11 +1065,6 @@ bool AppInitParameterInteraction()
         }
     }
 
-    // Checkmempool and checkblockindex default to true in regtest mode
-    int ratio = std::min<int>(std::max<int>(gArgs.GetArg("-checkmempool", chainparams.DefaultConsistencyChecks() ? 1 : 0), 0), 1000000);
-    if (ratio != 0) {
-        mempool.setSanityCheck(1.0 / ratio);
-    }
     fCheckBlockIndex = gArgs.GetBoolArg("-checkblockindex", chainparams.DefaultConsistencyChecks());
     fCheckpointsEnabled = gArgs.GetBoolArg("-checkpoints", DEFAULT_CHECKPOINTS_ENABLED);
 
@@ -1375,10 +1372,18 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
     node.banman = MakeUnique<BanMan>(GetDataDir() / "banlist.dat", &uiInterface, gArgs.GetArg("-bantime", DEFAULT_MISBEHAVING_BANTIME));
     assert(!node.connman);
     node.connman = MakeUnique<CConnman>(GetRand(std::numeric_limits<uint64_t>::max()), GetRand(std::numeric_limits<uint64_t>::max()), gArgs.GetBoolArg("-networkactive", true));
+
     // Make mempool generally available in the node context. For example the connection manager, wallet, or RPC threads,
     // which are all started after this, may use it from the node context.
     assert(!node.mempool);
     node.mempool = &::mempool;
+    if (node.mempool) {
+        int ratio = std::min<int>(std::max<int>(gArgs.GetArg("-checkmempool", chainparams.DefaultConsistencyChecks() ? 1 : 0), 0), 1000000);
+        if (ratio != 0) {
+            node.mempool->setSanityCheck(1.0 / ratio);
+        }
+    }
+
     assert(!node.chainman);
     node.chainman = &g_chainman;
     ChainstateManager& chainman = *Assert(node.chainman);
@@ -1849,7 +1854,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
         vImportFiles.push_back(strFile);
     }
 
-    g_load_block = std::thread(&TraceThread<std::function<void()>>, "loadblk", [=, &chainman]{ ThreadImport(chainman, vImportFiles); });
+    g_load_block = std::thread(&TraceThread<std::function<void()>>, "loadblk", [=, &chainman, &node] { ThreadImport(chainman, node.mempool, vImportFiles); });
 
     // Wait for genesis block to be processed
     {
