@@ -137,11 +137,11 @@ TestingSetup::TestingSetup(const std::string& chainName, const std::vector<const
 
     pblocktree.reset(new CBlockTreeDB(1 << 20, true));
 
-    m_node.mempool = &::mempool;
+    m_node.mempool = MakeUnique<CTxMemPool>(&::feeEstimator);
     m_node.mempool->setSanityCheck(1.0);
 
     m_node.chainman = &::g_chainman;
-    m_node.chainman->InitializeChainstate(m_node.mempool);
+    m_node.chainman->InitializeChainstate(m_node.mempool.get());
     ::ChainstateActive().InitCoinsDB(
         /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
     assert(!::ChainstateActive().CanFlushToDisk());
@@ -183,8 +183,8 @@ TestingSetup::~TestingSetup()
     m_node.connman.reset();
     m_node.banman.reset();
     m_node.args = nullptr;
-    UnloadBlockIndex(m_node.mempool);
-    m_node.mempool = nullptr;
+    UnloadBlockIndex(m_node.mempool.get());
+    m_node.mempool.reset();
     m_node.scheduler.reset();
     m_node.chainman->Reset();
     m_node.chainman = nullptr;

@@ -301,7 +301,7 @@ void Shutdown(NodeContext& node)
     globalVerifyHandle.reset();
     ECC_Stop();
     node.args = nullptr;
-    node.mempool = nullptr;
+    node.mempool.reset();
     node.chainman = nullptr;
     node.scheduler.reset();
 
@@ -1376,7 +1376,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
     // Make mempool generally available in the node context. For example the connection manager, wallet, or RPC threads,
     // which are all started after this, may use it from the node context.
     assert(!node.mempool);
-    node.mempool = &::mempool;
+    node.mempool = MakeUnique<CTxMemPool>(&::feeEstimator);
     if (node.mempool) {
         int ratio = std::min<int>(std::max<int>(gArgs.GetArg("-checkmempool", chainparams.DefaultConsistencyChecks() ? 1 : 0), 0), 1000000);
         if (ratio != 0) {
@@ -1567,10 +1567,10 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
             const int64_t load_block_index_start_time = GetTimeMillis();
             try {
                 LOCK(cs_main);
-                chainman.InitializeChainstate(node.mempool);
+                chainman.InitializeChainstate(node.mempool.get());
                 chainman.m_total_coinstip_cache = nCoinCacheUsage;
                 chainman.m_total_coinsdb_cache = nCoinDBCache;
-                UnloadBlockIndex(node.mempool);
+                UnloadBlockIndex(node.mempool.get());
 
                 // new CBlockTreeDB tries to delete the existing file, which
                 // fails if it's still open from the previous loop. Close it first:
@@ -1853,7 +1853,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
         vImportFiles.push_back(strFile);
     }
 
-    g_load_block = std::thread(&TraceThread<std::function<void()>>, "loadblk", [=, &chainman, &node] { ThreadImport(chainman, node.mempool, vImportFiles); });
+    g_load_block = std::thread(&TraceThread<std::function<void()>>, "loadblk", [=, &chainman, &node] { ThreadImport(chainman, node.mempool.get(), vImportFiles); });
 
     // Wait for genesis block to be processed
     {
