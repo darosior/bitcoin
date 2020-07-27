@@ -53,7 +53,7 @@ void LeaveCritical();
 void CheckLastCritical(void* cs, std::string& lockname, const char* guardname, const char* file, int line);
 std::string LocksHeld();
 template <typename MutexType>
-void AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine, MutexType* cs) ASSERT_EXCLUSIVE_LOCK(cs);
+void AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine, MutexType& cs) ASSERT_EXCLUSIVE_LOCK(cs);
 void AssertLockNotHeldInternal(const char* pszName, const char* pszFile, int nLine, void* cs);
 void DeleteLock(void* cs);
 
@@ -64,15 +64,15 @@ void DeleteLock(void* cs);
  */
 extern bool g_debug_lockorder_abort;
 #else
-void static inline EnterCritical(const char* pszName, const char* pszFile, int nLine, void* cs, bool fTry = false) {}
-void static inline LeaveCritical() {}
-void static inline CheckLastCritical(void* cs, std::string& lockname, const char* guardname, const char* file, int line) {}
+void inline EnterCritical(const char* pszName, const char* pszFile, int nLine, void* cs, bool fTry = false) {}
+void inline LeaveCritical() {}
+void inline CheckLastCritical(void* cs, std::string& lockname, const char* guardname, const char* file, int line) {}
 template <typename MutexType>
-void static inline AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine, MutexType* cs) ASSERT_EXCLUSIVE_LOCK(cs) {}
-void static inline AssertLockNotHeldInternal(const char* pszName, const char* pszFile, int nLine, void* cs) {}
-void static inline DeleteLock(void* cs) {}
+void inline AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine, MutexType& cs) ASSERT_EXCLUSIVE_LOCK(cs) {}
+void inline AssertLockNotHeldInternal(const char* pszName, const char* pszFile, int nLine, void* cs) {}
+void inline DeleteLock(void* cs) {}
 #endif
-#define AssertLockHeld(cs) AssertLockHeldInternal(#cs, __FILE__, __LINE__, &cs)
+#define AssertLockHeld(cs) AssertLockHeldInternal(#cs, __FILE__, __LINE__, cs)
 #define AssertLockNotHeld(cs) AssertLockNotHeldInternal(#cs, __FILE__, __LINE__, &cs)
 
 /**
