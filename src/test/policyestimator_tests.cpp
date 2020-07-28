@@ -16,8 +16,8 @@ BOOST_FIXTURE_TEST_SUITE(policyestimator_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
 {
-    CBlockPolicyEstimator feeEst;
-    CTxMemPool mpool(&feeEst);
+    CTxMemPool mpool;
+    const std::shared_ptr<CBlockPolicyEstimator> feeEst = mpool.getFeeEstimator();
     LOCK2(cs_main, mpool.cs);
     TestMemPoolEntryHelper entry;
     CAmount basefee(2000);
@@ -81,9 +81,9 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
             // At this point we should need to combine 3 buckets to get enough data points
             // So estimateFee(1) should fail and estimateFee(2) should return somewhere around
             // 9*baserate.  estimateFee(2) %'s are 100,100,90 = average 97%
-            BOOST_CHECK(feeEst.estimateFee(1) == CFeeRate(0));
-            BOOST_CHECK(feeEst.estimateFee(2).GetFeePerK() < 9*baseRate.GetFeePerK() + deltaFee);
-            BOOST_CHECK(feeEst.estimateFee(2).GetFeePerK() > 9*baseRate.GetFeePerK() - deltaFee);
+            BOOST_CHECK(feeEst->estimateFee(1) == CFeeRate(0));
+            BOOST_CHECK(feeEst->estimateFee(2).GetFeePerK() < 9*baseRate.GetFeePerK() + deltaFee);
+            BOOST_CHECK(feeEst->estimateFee(2).GetFeePerK() > 9*baseRate.GetFeePerK() - deltaFee);
         }
     }
 
@@ -95,7 +95,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     // Second highest feerate has 100% chance of being included by 2 blocks,
     // so estimateFee(2) should return 9*baseRate etc...
     for (int i = 1; i < 10;i++) {
-        origFeeEst.push_back(feeEst.estimateFee(i).GetFeePerK());
+        origFeeEst.push_back(feeEst->estimateFee(i).GetFeePerK());
         if (i > 2) { // Fee estimates should be monotonically decreasing
             BOOST_CHECK(origFeeEst[i-1] <= origFeeEst[i-2]);
         }
@@ -107,7 +107,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     }
     // Fill out rest of the original estimates
     for (int i = 10; i <= 48; i++) {
-        origFeeEst.push_back(feeEst.estimateFee(i).GetFeePerK());
+        origFeeEst.push_back(feeEst->estimateFee(i).GetFeePerK());
     }
 
     // Mine 50 more blocks with no transactions happening, estimates shouldn't change
@@ -115,10 +115,10 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     while (blocknum < 250)
         mpool.removeForBlock(block, ++blocknum);
 
-    BOOST_CHECK(feeEst.estimateFee(1) == CFeeRate(0));
+    BOOST_CHECK(feeEst->estimateFee(1) == CFeeRate(0));
     for (int i = 2; i < 10;i++) {
-        BOOST_CHECK(feeEst.estimateFee(i).GetFeePerK() < origFeeEst[i-1] + deltaFee);
-        BOOST_CHECK(feeEst.estimateFee(i).GetFeePerK() > origFeeEst[i-1] - deltaFee);
+        BOOST_CHECK(feeEst->estimateFee(i).GetFeePerK() < origFeeEst[i-1] + deltaFee);
+        BOOST_CHECK(feeEst->estimateFee(i).GetFeePerK() > origFeeEst[i-1] - deltaFee);
     }
 
 
@@ -137,7 +137,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     }
 
     for (int i = 1; i < 10;i++) {
-        BOOST_CHECK(feeEst.estimateFee(i) == CFeeRate(0) || feeEst.estimateFee(i).GetFeePerK() > origFeeEst[i-1] - deltaFee);
+        BOOST_CHECK(feeEst->estimateFee(i) == CFeeRate(0) || feeEst->estimateFee(i).GetFeePerK() > origFeeEst[i-1] - deltaFee);
     }
 
     // Mine all those transactions
@@ -152,9 +152,9 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     }
     mpool.removeForBlock(block, 266);
     block.clear();
-    BOOST_CHECK(feeEst.estimateFee(1) == CFeeRate(0));
+    BOOST_CHECK(feeEst->estimateFee(1) == CFeeRate(0));
     for (int i = 2; i < 10;i++) {
-        BOOST_CHECK(feeEst.estimateFee(i) == CFeeRate(0) || feeEst.estimateFee(i).GetFeePerK() > origFeeEst[i-1] - deltaFee);
+        BOOST_CHECK(feeEst->estimateFee(i) == CFeeRate(0) || feeEst->estimateFee(i).GetFeePerK() > origFeeEst[i-1] - deltaFee);
     }
 
     // Mine 400 more blocks where everything is mined every block
@@ -174,9 +174,9 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
         mpool.removeForBlock(block, ++blocknum);
         block.clear();
     }
-    BOOST_CHECK(feeEst.estimateFee(1) == CFeeRate(0));
+    BOOST_CHECK(feeEst->estimateFee(1) == CFeeRate(0));
     for (int i = 2; i < 9; i++) { // At 9, the original estimate was already at the bottom (b/c scale = 2)
-        BOOST_CHECK(feeEst.estimateFee(i).GetFeePerK() < origFeeEst[i-1] - deltaFee);
+        BOOST_CHECK(feeEst->estimateFee(i).GetFeePerK() < origFeeEst[i-1] - deltaFee);
     }
 }
 

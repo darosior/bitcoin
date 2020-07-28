@@ -326,8 +326,8 @@ void CTxMemPoolEntry::UpdateAncestorState(int64_t modifySize, CAmount modifyFee,
     assert(int(nSigOpCostWithAncestors) >= 0);
 }
 
-CTxMemPool::CTxMemPool(CBlockPolicyEstimator* estimator)
-    : nTransactionsUpdated(0), minerPolicyEstimator(estimator), m_epoch(0), m_has_epoch_guard(false)
+CTxMemPool::CTxMemPool()
+    : nTransactionsUpdated(0), m_epoch(0), m_has_epoch_guard(false)
 {
     _clear(); //lock free clear
 
@@ -335,6 +335,11 @@ CTxMemPool::CTxMemPool(CBlockPolicyEstimator* estimator)
     // accepting transactions becomes O(N^2) where N is the number
     // of transactions in the pool
     nCheckFrequency = 0;
+
+    // Tracks mempool transactions' feerate and the number of blocks for each
+    // to be mined, in order to provide a feerate estimation depending on the
+    // confirmation target.
+    minerPolicyEstimator = std::make_shared<CBlockPolicyEstimator>();
 }
 
 bool CTxMemPool::isSpent(const COutPoint& outpoint) const

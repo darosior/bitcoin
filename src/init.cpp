@@ -233,13 +233,14 @@ void Shutdown(NodeContext& node)
         DumpMempool(*node.mempool);
     }
 
+    const std::shared_ptr<CBlockPolicyEstimator> feeEstimator = node.mempool->getFeeEstimator();
     if (fFeeEstimatesInitialized)
     {
-        ::feeEstimator.FlushUnconfirmed();
+        feeEstimator->FlushUnconfirmed();
         fs::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
         CAutoFile est_fileout(fsbridge::fopen(est_path, "wb"), SER_DISK, CLIENT_VERSION);
         if (!est_fileout.IsNull())
-            ::feeEstimator.Write(est_fileout);
+            feeEstimator->Write(est_fileout);
         else
             LogPrintf("%s: Failed to write fee estimates to %s\n", __func__, est_path.string());
         fFeeEstimatesInitialized = false;
@@ -1376,7 +1377,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
     // Make mempool generally available in the node context. For example the connection manager, wallet, or RPC threads,
     // which are all started after this, may use it from the node context.
     assert(!node.mempool);
-    node.mempool = MakeUnique<CTxMemPool>(&::feeEstimator);
+    node.mempool = MakeUnique<CTxMemPool>();
     if (node.mempool) {
         int ratio = std::min<int>(std::max<int>(gArgs.GetArg("-checkmempool", chainparams.DefaultConsistencyChecks() ? 1 : 0), 0), 1000000);
         if (ratio != 0) {
@@ -1780,8 +1781,9 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
     CAutoFile est_filein(fsbridge::fopen(est_path, "rb"), SER_DISK, CLIENT_VERSION);
     // Allowed to fail as this file IS missing on first startup.
     if (!est_filein.IsNull())
-        ::feeEstimator.Read(est_filein);
+        node.mempool->getFeeEstimator()->Read(est_filein);
     fFeeEstimatesInitialized = true;
+    }
 
     // ********************************************************* Step 8: start indexers
     if (gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {

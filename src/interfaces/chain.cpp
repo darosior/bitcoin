@@ -326,11 +326,13 @@ public:
     }
     CFeeRate estimateSmartFee(int num_blocks, bool conservative, FeeCalculation* calc) override
     {
-        return ::feeEstimator.estimateSmartFee(num_blocks, calc, conservative);
+        if (!m_node.mempool) return CFeeRate(0);
+        return m_node.mempool->getFeeEstimator()->estimateSmartFee(num_blocks, calc, conservative);
     }
     unsigned int estimateMaxBlocks() override
     {
-        return ::feeEstimator.HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
+        if (!m_node.mempool) return 0;
+        return m_node.mempool->getFeeEstimator()->HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
     }
     CFeeRate mempoolMinFee() override
     {

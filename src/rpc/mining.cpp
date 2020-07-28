@@ -1036,7 +1036,10 @@ static UniValue estimatesmartfee(const JSONRPCRequest& request)
 
     RPCTypeCheck(request.params, {UniValue::VNUM, UniValue::VSTR});
     RPCTypeCheckArgument(request.params[0], UniValue::VNUM);
-    unsigned int max_target = ::feeEstimator.HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
+
+    const CTxMemPool& mempool = EnsureMemPool(request.context);
+    const std::shared_ptr<CBlockPolicyEstimator> feeEstimator = mempool.getFeeEstimator();
+    unsigned int max_target = feeEstimator->HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
     unsigned int conf_target = ParseConfirmTarget(request.params[0], max_target);
     bool conservative = true;
     if (!request.params[1].isNull()) {
@@ -1050,7 +1053,7 @@ static UniValue estimatesmartfee(const JSONRPCRequest& request)
     UniValue result(UniValue::VOBJ);
     UniValue errors(UniValue::VARR);
     FeeCalculation feeCalc;
-    CFeeRate feeRate = ::feeEstimator.estimateSmartFee(conf_target, &feeCalc, conservative);
+    CFeeRate feeRate = feeEstimator->estimateSmartFee(conf_target, &feeCalc, conservative);
     if (feeRate != CFeeRate(0)) {
         result.pushKV("feerate", ValueFromAmount(feeRate.GetFeePerK()));
     } else {
@@ -1119,7 +1122,10 @@ static UniValue estimaterawfee(const JSONRPCRequest& request)
 
     RPCTypeCheck(request.params, {UniValue::VNUM, UniValue::VNUM}, true);
     RPCTypeCheckArgument(request.params[0], UniValue::VNUM);
-    unsigned int max_target = ::feeEstimator.HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
+
+    const CTxMemPool& mempool = EnsureMemPool(request.context);
+    std::shared_ptr<CBlockPolicyEstimator> feeEstimator = mempool.getFeeEstimator();
+    unsigned int max_target = feeEstimator->HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
     unsigned int conf_target = ParseConfirmTarget(request.params[0], max_target);
     double threshold = 0.95;
     if (!request.params[1].isNull()) {
@@ -1136,9 +1142,9 @@ static UniValue estimaterawfee(const JSONRPCRequest& request)
         EstimationResult buckets;
 
         // Only output results for horizons which track the target
-        if (conf_target > ::feeEstimator.HighestTargetTracked(horizon)) continue;
+        if (conf_target > feeEstimator->HighestTargetTracked(horizon)) continue;
 
-        feeRate = ::feeEstimator.estimateRawFee(conf_target, threshold, horizon, &buckets);
+        feeRate = feeEstimator->estimateRawFee(conf_target, threshold, horizon, &buckets);
         UniValue horizon_result(UniValue::VOBJ);
         UniValue errors(UniValue::VARR);
         UniValue passbucket(UniValue::VOBJ);
