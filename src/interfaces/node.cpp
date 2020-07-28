@@ -231,8 +231,11 @@ public:
     CFeeRate estimateSmartFee(int num_blocks, bool conservative, int* returned_target = nullptr) override
     {
         if (!m_context.mempool) return CFeeRate(0);
+        std::shared_ptr<CBlockPolicyEstimator> feeEst = m_context.mempool->getFeeEstimator();
+        if (!feeEst) return CFeeRate(0);
+
         FeeCalculation fee_calc;
-        CFeeRate result = m_context.mempool->getFeeEstimator()->estimateSmartFee(num_blocks, &fee_calc, conservative);
+        CFeeRate result = feeEst->estimateSmartFee(num_blocks, &fee_calc, conservative);
         if (returned_target) {
             *returned_target = fee_calc.returnedTarget;
         }

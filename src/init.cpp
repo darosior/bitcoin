@@ -83,7 +83,6 @@
 #include <zmq/zmqrpc.h>
 #endif
 
-static bool fFeeEstimatesInitialized = false;
 static const bool DEFAULT_PROXYRANDOMIZE = true;
 static const bool DEFAULT_REST_ENABLE = false;
 static const bool DEFAULT_STOPAFTERBLOCKIMPORT = false;
@@ -234,7 +233,7 @@ void Shutdown(NodeContext& node)
     }
 
     const std::shared_ptr<CBlockPolicyEstimator> feeEstimator = node.mempool->getFeeEstimator();
-    if (fFeeEstimatesInitialized)
+    if (feeEstimator)
     {
         feeEstimator->FlushUnconfirmed();
         fs::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
@@ -243,7 +242,6 @@ void Shutdown(NodeContext& node)
             feeEstimator->Write(est_fileout);
         else
             LogPrintf("%s: Failed to write fee estimates to %s\n", __func__, est_path.string());
-        fFeeEstimatesInitialized = false;
     }
 
     // FlushStateToDisk generates a ChainStateFlushed callback, which we should avoid missing
@@ -1779,11 +1777,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node)
 
     fs::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
     CAutoFile est_filein(fsbridge::fopen(est_path, "rb"), SER_DISK, CLIENT_VERSION);
-    // Allowed to fail as this file IS missing on first startup.
-    if (!est_filein.IsNull())
-        node.mempool->getFeeEstimator()->Read(est_filein);
-    fFeeEstimatesInitialized = true;
-    }
+    node.mempool->initFeeEstimator(est_filein);
 
     // ********************************************************* Step 8: start indexers
     if (gArgs.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {

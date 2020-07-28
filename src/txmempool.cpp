@@ -339,7 +339,16 @@ CTxMemPool::CTxMemPool()
     // Tracks mempool transactions' feerate and the number of blocks for each
     // to be mined, in order to provide a feerate estimation depending on the
     // confirmation target.
+    minerPolicyEstimator = nullptr;
+}
+
+void CTxMemPool::initFeeEstimator(CAutoFile& est_file)
+{
     minerPolicyEstimator = std::make_shared<CBlockPolicyEstimator>();
+    // Allowed to fail as this file IS missing on first startup.
+    if (!est_file.IsNull()) {
+        minerPolicyEstimator->Read(est_file);
+    }
 }
 
 bool CTxMemPool::isSpent(const COutPoint& outpoint) const

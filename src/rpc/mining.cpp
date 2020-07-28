@@ -1039,6 +1039,10 @@ static UniValue estimatesmartfee(const JSONRPCRequest& request)
 
     const CTxMemPool& mempool = EnsureMemPool(request.context);
     const std::shared_ptr<CBlockPolicyEstimator> feeEstimator = mempool.getFeeEstimator();
+    if (!feeEstimator) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Fee estimation disabled");
+    }
+
     unsigned int max_target = feeEstimator->HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
     unsigned int conf_target = ParseConfirmTarget(request.params[0], max_target);
     bool conservative = true;
@@ -1125,6 +1129,10 @@ static UniValue estimaterawfee(const JSONRPCRequest& request)
 
     const CTxMemPool& mempool = EnsureMemPool(request.context);
     std::shared_ptr<CBlockPolicyEstimator> feeEstimator = mempool.getFeeEstimator();
+    if (!feeEstimator) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Fee estimation disabled");
+    }
+
     unsigned int max_target = feeEstimator->HighestTargetTracked(FeeEstimateHorizon::LONG_HALFLIFE);
     unsigned int conf_target = ParseConfirmTarget(request.params[0], max_target);
     double threshold = 0.95;

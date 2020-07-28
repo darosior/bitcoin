@@ -20,6 +20,7 @@
 #include <optional.h>
 #include <policy/feerate.h>
 #include <primitives/transaction.h>
+#include <streams.h>
 #include <sync.h>
 #include <random.h>
 
@@ -557,6 +558,9 @@ public:
     const setEntries & GetMemPoolParents(txiter entry) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     const setEntries & GetMemPoolChildren(txiter entry) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     uint64_t CalculateDescendantMaximum(txiter entry) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    void initFeeEstimator(CAutoFile& est_file);
+
 private:
     typedef std::map<txiter, setEntries, CompareIteratorByHash> cacheMap;
 

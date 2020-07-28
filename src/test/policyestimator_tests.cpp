@@ -4,6 +4,7 @@
 
 #include <policy/fees.h>
 #include <policy/policy.h>
+#include <streams.h>
 #include <txmempool.h>
 #include <uint256.h>
 #include <util/time.h>
@@ -17,6 +18,8 @@ BOOST_FIXTURE_TEST_SUITE(policyestimator_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
 {
     CTxMemPool mpool;
+    CAutoFile dummy_estfile(nullptr, 0, 0);
+    mpool.initFeeEstimator(dummy_estfile);
     const std::shared_ptr<CBlockPolicyEstimator> feeEst = mpool.getFeeEstimator();
     LOCK2(cs_main, mpool.cs);
     TestMemPoolEntryHelper entry;
