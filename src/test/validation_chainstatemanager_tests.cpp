@@ -22,13 +22,14 @@ BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 //! First create a legacy (IBD) chainstate, then create a snapshot chainstate.
 BOOST_AUTO_TEST_CASE(chainstatemanager)
 {
+    CTxMemPool mempool;
     ChainstateManager manager;
     std::vector<CChainState*> chainstates;
     const CChainParams& chainparams = Params();
 
     // Create a legacy (IBD) chainstate.
     //
-    CChainState& c1 = *WITH_LOCK(::cs_main, return &manager.InitializeChainstate());
+    CChainState& c1 = *WITH_LOCK(::cs_main, return &manager.InitializeChainstate(&mempool));
     chainstates.push_back(&c1);
     c1.InitCoinsDB(
         /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
@@ -54,7 +55,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager)
 
     // Create a snapshot-based chainstate.
     //
-    CChainState& c2 = *WITH_LOCK(::cs_main, return &manager.InitializeChainstate(GetRandHash()));
+    CChainState& c2 = *WITH_LOCK(::cs_main, return &manager.InitializeChainstate(&mempool, GetRandHash()));
     chainstates.push_back(&c2);
     c2.InitCoinsDB(
         /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
@@ -103,6 +104,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager)
 //! Test rebalancing the caches associated with each chainstate.
 BOOST_AUTO_TEST_CASE(chainstatemanager_rebalance_caches)
 {
+    CTxMemPool mempool;
     ChainstateManager manager;
     size_t max_cache = 10000;
     manager.m_total_coinsdb_cache = max_cache;
@@ -112,7 +114,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager_rebalance_caches)
 
     // Create a legacy (IBD) chainstate.
     //
-    CChainState& c1 = *WITH_LOCK(cs_main, return &manager.InitializeChainstate());
+    CChainState& c1 = *WITH_LOCK(cs_main, return &manager.InitializeChainstate(&mempool));
     chainstates.push_back(&c1);
     c1.InitCoinsDB(
         /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
@@ -129,7 +131,7 @@ BOOST_AUTO_TEST_CASE(chainstatemanager_rebalance_caches)
 
     // Create a snapshot-based chainstate.
     //
-    CChainState& c2 = *WITH_LOCK(cs_main, return &manager.InitializeChainstate(GetRandHash()));
+    CChainState& c2 = *WITH_LOCK(cs_main, return &manager.InitializeChainstate(&mempool, GetRandHash()));
     chainstates.push_back(&c2);
     c2.InitCoinsDB(
         /* cache_size_bytes */ 1 << 23, /* in_memory */ true, /* should_wipe */ false);
