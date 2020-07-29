@@ -40,8 +40,8 @@ public:
     explicit CFeeRate(const I _nSatoshisPerK, bool vbyte=true): nSatoshisPerK(_nSatoshisPerK) {
         // We've previously had bugs creep in from silent double->int conversion...
         static_assert(std::is_integral<I>::value, "CFeeRate should be used without floats");
-        // Round up if we're passed a feerate in vbytes.
-        if (vbyte) nSatoshisPerK = (nSatoshisPerK /* FIXME + WITNESS_SCALE_FACTOR - 1*/) / WITNESS_SCALE_FACTOR;
+        // Vbytes are already a rounded up value, so this is fine.
+        if (vbyte) nSatoshisPerK = (nSatoshisPerK /* FIXME: + WITNESS_SCALE_FACTOR - 1 */) / WITNESS_SCALE_FACTOR;
     }
     /** Constructor for a fee rate either in satoshis per kB or per kW. The size must not exceed (2^63 - 1)*/
     CFeeRate(const CAmount& nFeePaid, size_t nSize, bool vbyte=true);
