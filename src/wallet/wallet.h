@@ -65,13 +65,13 @@ enum class WalletCreationStatus {
 WalletCreationStatus CreateWallet(interfaces::Chain& chain, const SecureString& passphrase, uint64_t wallet_creation_flags, const std::string& name, bilingual_str& error, std::vector<bilingual_str>& warnings, std::shared_ptr<CWallet>& result);
 
 //! -paytxfee default
-constexpr CAmount DEFAULT_PAY_TX_FEE = 0;
+constexpr CAmount DEFAULT_PAY_FEERATE = 0;
 //! -fallbackfee default
-static const CAmount DEFAULT_FALLBACK_FEE = 0;
+static const CAmount DEFAULT_FALLBACK_FEERATE = 0;
 //! -discardfee default
-static const CAmount DEFAULT_DISCARD_FEE = 10000;
+static const CAmount DEFAULT_DISCARD_FEERATE = 10000;
 //! -mintxfee default
-static const CAmount DEFAULT_TRANSACTION_MINFEE = 1000;
+static const CAmount DEFAULT_TRANSACTION_MIN_FEERATE = 1000;
 //! minimum recommended increment for BIP 125 replacement txs
 static const CAmount WALLET_INCREMENTAL_RELAY_FEE = 5000;
 //! Default for -spendzeroconfchange
@@ -995,19 +995,19 @@ public:
     bool ImportPubKeys(const std::vector<CKeyID>& ordered_pubkeys, const std::map<CKeyID, CPubKey>& pubkey_map, const std::map<CKeyID, std::pair<CPubKey, KeyOriginInfo>>& key_origins, const bool add_keypool, const bool internal, const int64_t timestamp) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     bool ImportScriptPubKeys(const std::string& label, const std::set<CScript>& script_pub_keys, const bool have_solving_data, const bool apply_label, const int64_t timestamp) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
-    CFeeRate m_pay_tx_fee{DEFAULT_PAY_TX_FEE};
+    CFeeRate m_pay_tx_fee{DEFAULT_PAY_FEERATE};
     unsigned int m_confirm_target{DEFAULT_TX_CONFIRM_TARGET};
     bool m_spend_zero_conf_change{DEFAULT_SPEND_ZEROCONF_CHANGE};
     bool m_signal_rbf{DEFAULT_WALLET_RBF};
     bool m_allow_fallback_fee{true}; //!< will be false if -fallbackfee=0
-    CFeeRate m_min_fee{DEFAULT_TRANSACTION_MINFEE}; //!< Override with -mintxfee
+    CFeeRate m_min_fee{DEFAULT_TRANSACTION_MIN_FEERATE}; //!< Override with -mintxfee
     /**
      * If fee estimation does not have enough data to provide estimates, use this fee instead.
      * Has no effect if not using fee estimation
      * Override with -fallbackfee
      */
-    CFeeRate m_fallback_fee{DEFAULT_FALLBACK_FEE};
-    CFeeRate m_discard_rate{DEFAULT_DISCARD_FEE};
+    CFeeRate m_fallback_fee{DEFAULT_FALLBACK_FEERATE};
+    CFeeRate m_discard_rate{DEFAULT_DISCARD_FEERATE};
     OutputType m_default_address_type{DEFAULT_ADDRESS_TYPE};
     /**
      * Default output type for change outputs. When unset, automatically choose type

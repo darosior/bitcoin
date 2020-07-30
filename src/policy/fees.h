@@ -158,7 +158,7 @@ private:
     /** Minimum and Maximum values for tracking feerates
      * The MIN_BUCKET_FEERATE should just be set to the lowest reasonable feerate we
      * might ever want to track.  Historically this has been 1000 since it was
-     * inheriting DEFAULT_MIN_RELAY_TX_FEE and changing it is disruptive as it
+     * inheriting DEFAULT_MIN_RELAY_FEERATE and changing it is disruptive as it
      * invalidates old estimates files. So leave it at 1000 unless it becomes
      * necessary to lower it, and then lower it substantially.
      */

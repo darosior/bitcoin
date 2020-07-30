@@ -47,7 +47,7 @@ private:
     const std::string m_reason;
 };
 
-static CFeeRate blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_TX_FEE);
+static CFeeRate blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_FEERATE);
 
 BlockAssembler MinerTestingSetup::AssemblerForTest(const CChainParams& params)
 {

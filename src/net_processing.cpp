@@ -4583,7 +4583,7 @@ bool PeerLogicValidation::SendMessages(CNode* pto)
         ) {
             CAmount currentFilter = m_mempool.GetMinFee(gArgs.GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000).GetFeePerK();
             int64_t timeNow = GetTimeMicros();
-            static FeeFilterRounder g_filter_rounder{CFeeRate{DEFAULT_MIN_RELAY_TX_FEE}};
+            static FeeFilterRounder g_filter_rounder{CFeeRate{DEFAULT_MIN_RELAY_FEERATE}};
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) {
                 // Received tx-inv messages are discarded when the active
                 // chainstate is in IBD, so tell the peer to not send them.

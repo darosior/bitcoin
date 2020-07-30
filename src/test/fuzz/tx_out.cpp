@@ -23,7 +23,7 @@ void test_one_input(const std::vector<uint8_t>& buffer)
         return;
     }
 
-    const CFeeRate dust_relay_fee{DUST_RELAY_TX_FEE};
+    const CFeeRate dust_relay_fee{DUST_RELAY_FEERATE};
     (void)GetDustThreshold(tx_out, dust_relay_fee);
     (void)IsDust(tx_out, dust_relay_fee);
     (void)RecursiveDynamicUsage(tx_out);

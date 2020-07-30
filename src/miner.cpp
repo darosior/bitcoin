@@ -51,7 +51,7 @@ void RegenerateCommitments(CBlock& block)
 }
 
 BlockAssembler::Options::Options() {
-    blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_TX_FEE);
+    blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_FEERATE);
     nBlockMaxWeight = DEFAULT_BLOCK_MAX_WEIGHT;
 }
 
@@ -74,7 +74,7 @@ static BlockAssembler::Options DefaultOptions()
     if (gArgs.IsArgSet("-blockmintxfee") && ParseMoney(gArgs.GetArg("-blockmintxfee", ""), n)) {
         options.blockMinFeeRate = CFeeRate(n);
     } else {
-        options.blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_TX_FEE);
+        options.blockMinFeeRate = CFeeRate(DEFAULT_BLOCK_MIN_FEERATE);
     }
     return options;
 }

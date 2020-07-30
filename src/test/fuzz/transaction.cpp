@@ -64,7 +64,7 @@ void test_one_input(const std::vector<uint8_t>& buffer)
     TxValidationState state_with_dupe_check;
     (void)CheckTransaction(tx, state_with_dupe_check);
 
-    const CFeeRate dust_relay_fee{DUST_RELAY_TX_FEE};
+    const CFeeRate dust_relay_fee{DUST_RELAY_FEERATE};
     std::string reason;
     const bool is_standard_with_permit_bare_multisig = IsStandardTx(tx, /* permit_bare_multisig= */ true, dust_relay_fee, reason);
     const bool is_standard_without_permit_bare_multisig = IsStandardTx(tx, /* permit_bare_multisig= */ false, dust_relay_fee, reason);

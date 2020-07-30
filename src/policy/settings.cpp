@@ -9,6 +9,6 @@
 #include <policy/policy.h>
 
 bool fIsBareMultisigStd = DEFAULT_PERMIT_BAREMULTISIG;
-CFeeRate incrementalRelayFee = CFeeRate(DEFAULT_INCREMENTAL_RELAY_FEE);
-CFeeRate dustRelayFee = CFeeRate(DUST_RELAY_TX_FEE);
+CFeeRate incrementalRelayFee = CFeeRate(DEFAULT_INCREMENTAL_RELAY_FEERATE);
+CFeeRate dustRelayFee = CFeeRate(DUST_RELAY_FEERATE);
 unsigned int nBytesPerSigOp = DEFAULT_BYTES_PER_SIGOP;

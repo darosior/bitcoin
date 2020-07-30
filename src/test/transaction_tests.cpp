@@ -709,7 +709,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     // not dust:
     t.vout[0].nValue = 673;
     BOOST_CHECK(IsStandardTx(CTransaction(t), reason));
-    dustRelayFee = CFeeRate(DUST_RELAY_TX_FEE);
+    dustRelayFee = CFeeRate(DUST_RELAY_FEERATE);
 
     t.vout[0].scriptPubKey = CScript() << OP_1;
     reason.clear();
