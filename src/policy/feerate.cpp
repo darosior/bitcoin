@@ -35,6 +35,21 @@ CAmount CFeeRate::GetFee(size_t nBytes_) const
     return nFee;
 }
 
+std::ostream& operator<<(std::ostream& os, const CFeeRate &f)
+{
+    os << f.GetFeePerK();
+    return os;
+}
+
+std::istream& operator>>(std::istream& is, CFeeRate &f)
+{
+    CAmount nSatoshisPerK;
+    is >> nSatoshisPerK;
+    f = CFeeRate(nSatoshisPerK);
+    return is;
+}
+
+
 std::string CFeeRate::ToString(const FeeEstimateMode& fee_estimate_mode) const
 {
     switch (fee_estimate_mode) {

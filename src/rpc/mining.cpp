@@ -1142,15 +1142,15 @@ static UniValue estimaterawfee(const JSONRPCRequest& request)
         UniValue horizon_result(UniValue::VOBJ);
         UniValue errors(UniValue::VARR);
         UniValue passbucket(UniValue::VOBJ);
-        passbucket.pushKV("startrange", round(buckets.pass.start));
-        passbucket.pushKV("endrange", round(buckets.pass.end));
+        passbucket.pushKV("startrange", buckets.pass.start.GetFeePerK());
+        passbucket.pushKV("endrange", buckets.pass.end.GetFeePerK());
         passbucket.pushKV("withintarget", round(buckets.pass.withinTarget * 100.0) / 100.0);
         passbucket.pushKV("totalconfirmed", round(buckets.pass.totalConfirmed * 100.0) / 100.0);
         passbucket.pushKV("inmempool", round(buckets.pass.inMempool * 100.0) / 100.0);
         passbucket.pushKV("leftmempool", round(buckets.pass.leftMempool * 100.0) / 100.0);
         UniValue failbucket(UniValue::VOBJ);
-        failbucket.pushKV("startrange", round(buckets.fail.start));
-        failbucket.pushKV("endrange", round(buckets.fail.end));
+        failbucket.pushKV("startrange", buckets.fail.start.GetFeePerK());
+        failbucket.pushKV("endrange", buckets.fail.end.GetFeePerK());
         failbucket.pushKV("withintarget", round(buckets.fail.withinTarget * 100.0) / 100.0);
         failbucket.pushKV("totalconfirmed", round(buckets.fail.totalConfirmed * 100.0) / 100.0);
         failbucket.pushKV("inmempool", round(buckets.fail.inMempool * 100.0) / 100.0);
@@ -1162,8 +1162,8 @@ static UniValue estimaterawfee(const JSONRPCRequest& request)
             horizon_result.pushKV("decay", buckets.decay);
             horizon_result.pushKV("scale", (int)buckets.scale);
             horizon_result.pushKV("pass", passbucket);
-            // buckets.fail.start == -1 indicates that all buckets passed, there is no fail bucket to output
-            if (buckets.fail.start != -1) horizon_result.pushKV("fail", failbucket);
+            // buckets.fail.start == CFeeRate(0) indicates that all buckets passed, there is no fail bucket to output
+            if (buckets.fail.start != CFeeRate(0)) horizon_result.pushKV("fail", failbucket);
         } else {
             // Output only information that is still meaningful in the event of error
             horizon_result.pushKV("decay", buckets.decay);

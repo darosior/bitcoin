@@ -82,6 +82,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
             // So estimateFee(1) should fail and estimateFee(2) should return somewhere around
             // 9*baserate.  estimateFee(2) %'s are 100,100,90 = average 97%
             BOOST_CHECK(feeEst.estimateFee(1) == CFeeRate(0));
+            fprintf(stderr, "%ld -- base: %ld\n", feeEst.estimateFee(2).GetFeePerK(), baseRate.GetFeePerK());
             BOOST_CHECK(feeEst.estimateFee(2).GetFeePerK() < 9*baseRate.GetFeePerK() + deltaFee);
             BOOST_CHECK(feeEst.estimateFee(2).GetFeePerK() > 9*baseRate.GetFeePerK() - deltaFee);
         }

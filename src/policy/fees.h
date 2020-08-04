@@ -16,6 +16,13 @@
 #include <string>
 #include <vector>
 
+
+/* Values are stored as integers timed by this factor, as a tradeoff between
+ * being able to use the CFeeRate type for monetary values instead of double,
+ * and being able to compute the decaying average rouded up to the smallest
+ * unit. */
+static constexpr unsigned int PRECISION = COIN;
+
 class CAutoFile;
 class CFeeRate;
 class CTxMemPoolEntry;
@@ -48,8 +55,8 @@ enum class FeeReason {
 /* Used to return detailed information about a feerate bucket */
 struct EstimatorBucket
 {
-    double start = -1;
-    double end = -1;
+    CFeeRate start = CFeeRate(0);
+    CFeeRate end = CFeeRate(0);
     double withinTarget = 0;
     double totalConfirmed = 0;
     double inMempool = 0;
@@ -144,16 +151,16 @@ private:
     static constexpr double LONG_DECAY = .99931;
 
     /** Require greater than 60% of X feerate transactions to be confirmed within Y/2 blocks*/
-    static constexpr double HALF_SUCCESS_PCT = .6;
+    static constexpr uint64_t HALF_SUCCESS_PCT = PRECISION * .6;
     /** Require greater than 85% of X feerate transactions to be confirmed within Y blocks*/
-    static constexpr double SUCCESS_PCT = .85;
+    static constexpr uint64_t SUCCESS_PCT = PRECISION * .85;
     /** Require greater than 95% of X feerate transactions to be confirmed within 2 * Y blocks*/
-    static constexpr double DOUBLE_SUCCESS_PCT = .95;
+    static constexpr uint64_t DOUBLE_SUCCESS_PCT = PRECISION * .95;
 
     /** Require an avg of 0.1 tx in the combined feerate bucket per block to have stat significance */
-    static constexpr double SUFFICIENT_FEETXS = 0.1;
+    static constexpr uint64_t SUFFICIENT_FEETXS = PRECISION * 0.1;
     /** Require an avg of 0.5 tx when using short decay since there are fewer blocks considered*/
-    static constexpr double SUFFICIENT_TXS_SHORT = 0.5;
+    static constexpr uint64_t SUFFICIENT_TXS_SHORT = PRECISION * 0.5;
 
     /** Minimum and Maximum values for tracking feerates
      * The MIN_BUCKET_FEERATE should just be set to the lowest reasonable feerate we
@@ -162,8 +169,8 @@ private:
      * invalidates old estimates files. So leave it at 1000 unless it becomes
      * necessary to lower it, and then lower it substantially.
      */
-    static constexpr double MIN_BUCKET_FEERATE = 1000;
-    static constexpr double MAX_BUCKET_FEERATE = 1e7;
+    static constexpr uint64_t MIN_BUCKET_FEERATE = PRECISION * 1000;
+    static constexpr uint64_t MAX_BUCKET_FEERATE = PRECISION * 1e7;
 
     /** Spacing of FeeRate buckets
      * We have to lump transactions into buckets based on feerate, but we want to be able
@@ -241,16 +248,16 @@ private:
     unsigned int trackedTxs GUARDED_BY(m_cs_fee_estimator);
     unsigned int untrackedTxs GUARDED_BY(m_cs_fee_estimator);
 
-    std::vector<double> buckets GUARDED_BY(m_cs_fee_estimator); // The upper-bound of the range for the bucket (inclusive)
-    std::map<double, unsigned int> bucketMap GUARDED_BY(m_cs_fee_estimator); // Map of bucket upper-bound to index into all vectors by bucket
+    std::vector<CFeeRate> buckets GUARDED_BY(m_cs_fee_estimator); // The upper-bound of the range for the bucket (inclusive)
+    std::map<CFeeRate, unsigned int> bucketMap GUARDED_BY(m_cs_fee_estimator); // Map of bucket upper-bound to index into all vectors by bucket
 
     /** Process a transaction confirmed in a block*/
     bool processBlockTx(unsigned int nBlockHeight, const CTxMemPoolEntry* entry) EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
 
     /** Helper for estimateSmartFee */
-    double estimateCombinedFee(unsigned int confTarget, double successThreshold, bool checkShorterHorizon, EstimationResult *result) const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
+    CFeeRate estimateCombinedFee(unsigned int confTarget, uint64_t successThreshold, bool checkShorterHorizon, EstimationResult *result) const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
     /** Helper for estimateSmartFee */
-    double estimateConservativeFee(unsigned int doubleTarget, EstimationResult *result) const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
+    CFeeRate estimateConservativeFee(unsigned int doubleTarget, EstimationResult *result) const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
     /** Number of blocks of data recorded while fee estimates have been running */
     unsigned int BlockSpan() const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
     /** Number of blocks of recorded fee estimate data represented in saved data file */
