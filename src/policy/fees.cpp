@@ -488,11 +488,17 @@ bool CBlockPolicyEstimator::removeTx(uint256 hash, bool inBlock)
     }
 }
 
-CBlockPolicyEstimator::CBlockPolicyEstimator()
-    : nBestSeenHeight(0), firstRecordedHeight(0), historicalFirst(0), historicalBest(0), trackedTxs(0), untrackedTxs(0)
+CBlockPolicyEstimator::CBlockPolicyEstimator(fs::path fee_est_filepath)
+    : nBestSeenHeight(0), firstRecordedHeight(0), historicalFirst(0), historicalBest(0), trackedTxs(0), untrackedTxs(0), est_filepath(fee_est_filepath)
 {
     static_assert(MIN_BUCKET_FEERATE > 0, "Min feerate must be nonzero");
     size_t bucketIndex = 0;
+
+    // If it's present, read recorded estimations from our fee estimation file
+    if (!est_filepath.empty() && !ReadEstFile()) {
+        LogPrintf("%s: Failed to read fee estimates from %s\n", __func__, est_filepath.string());
+    }
+
     for (double bucketBoundary = MIN_BUCKET_FEERATE; bucketBoundary <= MAX_BUCKET_FEERATE; bucketBoundary *= FEE_SPACING, bucketIndex++) {
         buckets.push_back(bucketBoundary);
         bucketMap[bucketBoundary] = bucketIndex;
@@ -508,6 +514,10 @@ CBlockPolicyEstimator::CBlockPolicyEstimator()
 
 CBlockPolicyEstimator::~CBlockPolicyEstimator()
 {
+    FlushUnconfirmed();
+    if (!WriteEstFile()) {
+        LogPrintf("%s: Failed to write fee estimates to %s\n", __func__, est_filepath.string());
+    }
 }
 
 void CBlockPolicyEstimator::processTransaction(const CTxMemPoolEntry& entry, bool validFeeEstimate)
@@ -861,8 +871,14 @@ CFeeRate CBlockPolicyEstimator::estimateSmartFee(int confTarget, FeeCalculation 
 }
 
 
-bool CBlockPolicyEstimator::Write(CAutoFile& fileout) const
-{
+bool CBlockPolicyEstimator::WriteEstFile() const {
+    CAutoFile est_file(fsbridge::fopen(est_filepath, "wb"), SER_DISK, CLIENT_VERSION);
+    if (est_file.IsNull()) return false;
+
+    return Write(est_file);
+}
+
+bool CBlockPolicyEstimator::Write(CAutoFile &fileout) const {
     try {
         LOCK(m_cs_fee_estimator);
         fileout << 149900; // version required to read: 0.14.99 or later
@@ -886,8 +902,14 @@ bool CBlockPolicyEstimator::Write(CAutoFile& fileout) const
     return true;
 }
 
-bool CBlockPolicyEstimator::Read(CAutoFile& filein)
-{
+bool CBlockPolicyEstimator::ReadEstFile() {
+    CAutoFile est_file(fsbridge::fopen(est_filepath, "rb"), SER_DISK, CLIENT_VERSION);
+    if (est_file.IsNull()) return false;
+
+    return Read(est_file);
+}
+
+bool CBlockPolicyEstimator::Read(CAutoFile &filein) {
     try {
         LOCK(m_cs_fee_estimator);
         int nVersionRequired, nVersionThatWrote;
