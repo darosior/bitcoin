@@ -459,6 +459,77 @@ class ImportDescriptorsTest(BitcoinTestFramework):
         assert_equal(tx_signed_2['complete'], True)
         self.nodes[1].sendrawtransaction(tx_signed_2['hex'])
 
+        self.log.info("We can create and use a huge multisig under P2WSH")
+        self.nodes[1].createwallet(wallet_name='wmulti_priv_big', blank=True, descriptors=True)
+        wmulti_priv_big = self.nodes[1].get_wallet_rpc('wmulti_priv_big')
+        res = wmulti_priv_big.importdescriptors([
+        {
+            "desc": descsum_create("wsh(sortedmulti(20,tprv8ZgxMBicQKsPd46RGA7DzyDpfBN1TACK2ChMHo89RQ3KaPmutZ24WszUaRBCBs53rGtqMVphPsU7tUrkP1DiPR3uUFtH5uk8g2rkzniWnoa/*,tprv8ZgxMBicQKsPeZSeYx7VXDDTs3XrTcmZQpRLbAeSQFCQGgKwR4gKpcxHaKdoTNHniv4EPDJNdzA3KxRrrBHcAgth8fU5X4oCndkkxk39iAt/*,tprv8ZgxMBicQKsPfC9EhMMAk6RWfSBSF1U9DxVDjTemmxrFYZnKXHtPsJkKQf5yq72Ee5bwTi7bUswK2k9gcSRntp7M8dksDt4jZdSWyB8PSAF/*,tprv8ZgxMBicQKsPe6ZEmpUg1T1njzZGuu8B8ohbUjTQXcHDs9tntGUDgmRtHVxoDd2AKQMjefN2FJY8xWfNDRfzrJzX9ud6euttDsTYa8Sv2MM/*,tprv8ZgxMBicQKsPdNANjQngj3KvAWpEfoTD1b5cxNTxuCnBXrfFRAjDFCec7mSWMeAS6AnEJhLGVmXuw9ZuoeRtbdJXMoBBk7A3Uo5nT3rPUfd/*,tprv8ZgxMBicQKsPeAjsABad2QinheaMrvqvCkkBZwBRttYcMALE8yVG5GUsQdLmLWNFeYjUuqKiSay7z2bcvhbi1DEdYMRi5JeedkTKbTuJCda/*,tprv8ZgxMBicQKsPeJ59P23D5yq4HpFgfbqph7kYPCnMVPhNdktyAwbusJoMc9QgksGyV9LQwqPQQjMzjTLVtvkwb2Z6EmFiVtTHQyq2WKVrfRT/*,tprv8ZgxMBicQKsPeZ2m1aQaPA1BJ27xPphNfQQ354z77W8mRLKqwyUyonvusrZgQX3bwAQ2WFo1PPjHoAqiWnM1LMvkkmd3ZkXc5HdjxDarhYk/*,tprv8ZgxMBicQKsPeQ2FPA64vJ91G1Bb9kTARbusYSN9QwNmP9dF5M8xhuX8u8coWD8mq24xjwftnT8hteJ4riMYyjeSsxKMaBd1PX1NDDbxqV2/*,tprv8ZgxMBicQKsPe7nycwReBmFGn5HuTJbzLN7iUpDhFESMGvEZWnurvjrV4otDDEnvsrZ2a8X4o19xGXaTkEJsPUApHvMCeVTmAf2i5bBaSez/*,tprv8ZgxMBicQKsPdauRxSzxXTi85dQd4sSwS5sot1gFLUrJUoUGqzohDgPxTpmBjtmDfYjmNidA1hoF6b5gXh83JBdjcosm5rFeN7xUAM4DFxo/*,tprv8ZgxMBicQKsPfAhMFUPNJMkKVMYebxr1A1bdm8itERTuoDXXhpSQvsXjUQmrTmXsM8x5BxuQjaqF2H5tUXMXuGbiPTpzQKj2NZ6hCsUYJNX/*,tprv8ZgxMBicQKsPddHiYzgaoQthYpCCnnG8TQXaBfQEcoqt2xvzCVXHW7FF1n34LDLoJYghmArzW6ej7xiJpWCDn8sng4XT3uPHxc3MysiE3GS/*,tprv8ZgxMBicQKsPdyon5QGdU6tStoUPSJxidv8u75MWCVjCRhEzoFL2zhEHEx2ejmLExRxANbbqGc84jx3EVjWUVxYShEfDvCeMk3a2Fcqk1Qa/*,tprv8ZgxMBicQKsPcv2k7VmW4rKybZ5QpMUtNWdARqs8rYDoZ7tpg27njFquM2GmdXPgCKpqykwKpZ9mqBn7h7umz1sBm6avKmxcbzs1K8C6bVt/*,tprv8ZgxMBicQKsPea6F9YnfAPrzAQbn1Zeb5h9tp1pjnZQ9WqAds1JYhq9mFBumjBhWn3xmsJ4QmBqDGMeJQ5gPXmZrPBjX5hB8NfUgm7HvUyc/*,tprv8ZgxMBicQKsPf2RCn731KSorsuEjA8hwJqwub6BUBJYGpZV5Z6VQPKGEKqGJxEDtgFxeGpkU9zhjNn82SiiiaSqNXnqXofhZAgn8YirN5y2/*,tprv8ZgxMBicQKsPf94VtPAD9Czz4SButGX49W8PM6nxecBrWACbrULsUb9KRBo6gJs9mCQpX4q7DGCWTtkf27htQwXJGhNCDNJ3WCufeV2CE5T/*,tprv8ZgxMBicQKsPdoKuEXhCT2vPyojxxf1C9U75madMvMdqhQf1sET2ToeaDJRP8mzbjYjYq7DV8C233tMmBoPzubVukuNyfu8uxrUJcbdGEhP/*,tprv8ZgxMBicQKsPetrYKgU8APCNusa2Sq2px2TaNNJ6TKhzcBfzCbrVKArA3tXc6JYa3VZN6ose6564Far2ikD2DKguYQahVd7dSa9BAnVbRJe/*))"),
+            "active": True,
+            "range": 1000,
+            "next_index": 0,
+            "timestamp": "now"
+        },
+        {
+            "desc":
+            descsum_create("wsh(sortedmulti(20,tprv8ZgxMBicQKsPd46RGA7DzyDpfBN1TACK2ChMHo89RQ3KaPmutZ24WszUaRBCBs53rGtqMVphPsU7tUrkP1DiPR3uUFtH5uk8g2rkzniWnoa/*,tprv8ZgxMBicQKsPeZSeYx7VXDDTs3XrTcmZQpRLbAeSQFCQGgKwR4gKpcxHaKdoTNHniv4EPDJNdzA3KxRrrBHcAgth8fU5X4oCndkkxk39iAt/1/*,tprv8ZgxMBicQKsPfC9EhMMAk6RWfSBSF1U9DxVDjTemmxrFYZnKXHtPsJkKQf5yq72Ee5bwTi7bUswK2k9gcSRntp7M8dksDt4jZdSWyB8PSAF/1/*,tprv8ZgxMBicQKsPe6ZEmpUg1T1njzZGuu8B8ohbUjTQXcHDs9tntGUDgmRtHVxoDd2AKQMjefN2FJY8xWfNDRfzrJzX9ud6euttDsTYa8Sv2MM/1/*,tprv8ZgxMBicQKsPdNANjQngj3KvAWpEfoTD1b5cxNTxuCnBXrfFRAjDFCec7mSWMeAS6AnEJhLGVmXuw9ZuoeRtbdJXMoBBk7A3Uo5nT3rPUfd/1/*,tprv8ZgxMBicQKsPeAjsABad2QinheaMrvqvCkkBZwBRttYcMALE8yVG5GUsQdLmLWNFeYjUuqKiSay7z2bcvhbi1DEdYMRi5JeedkTKbTuJCda/1/*,tprv8ZgxMBicQKsPeJ59P23D5yq4HpFgfbqph7kYPCnMVPhNdktyAwbusJoMc9QgksGyV9LQwqPQQjMzjTLVtvkwb2Z6EmFiVtTHQyq2WKVrfRT/1/*,tprv8ZgxMBicQKsPeZ2m1aQaPA1BJ27xPphNfQQ354z77W8mRLKqwyUyonvusrZgQX3bwAQ2WFo1PPjHoAqiWnM1LMvkkmd3ZkXc5HdjxDarhYk/1/*,tprv8ZgxMBicQKsPeQ2FPA64vJ91G1Bb9kTARbusYSN9QwNmP9dF5M8xhuX8u8coWD8mq24xjwftnT8hteJ4riMYyjeSsxKMaBd1PX1NDDbxqV2/1/*,tprv8ZgxMBicQKsPe7nycwReBmFGn5HuTJbzLN7iUpDhFESMGvEZWnurvjrV4otDDEnvsrZ2a8X4o19xGXaTkEJsPUApHvMCeVTmAf2i5bBaSez/1/*,tprv8ZgxMBicQKsPdauRxSzxXTi85dQd4sSwS5sot1gFLUrJUoUGqzohDgPxTpmBjtmDfYjmNidA1hoF6b5gXh83JBdjcosm5rFeN7xUAM4DFxo/1/*,tprv8ZgxMBicQKsPfAhMFUPNJMkKVMYebxr1A1bdm8itERTuoDXXhpSQvsXjUQmrTmXsM8x5BxuQjaqF2H5tUXMXuGbiPTpzQKj2NZ6hCsUYJNX/1/*,tprv8ZgxMBicQKsPddHiYzgaoQthYpCCnnG8TQXaBfQEcoqt2xvzCVXHW7FF1n34LDLoJYghmArzW6ej7xiJpWCDn8sng4XT3uPHxc3MysiE3GS/1/*,tprv8ZgxMBicQKsPdyon5QGdU6tStoUPSJxidv8u75MWCVjCRhEzoFL2zhEHEx2ejmLExRxANbbqGc84jx3EVjWUVxYShEfDvCeMk3a2Fcqk1Qa/1/*,tprv8ZgxMBicQKsPcv2k7VmW4rKybZ5QpMUtNWdARqs8rYDoZ7tpg27njFquM2GmdXPgCKpqykwKpZ9mqBn7h7umz1sBm6avKmxcbzs1K8C6bVt/1/*,tprv8ZgxMBicQKsPea6F9YnfAPrzAQbn1Zeb5h9tp1pjnZQ9WqAds1JYhq9mFBumjBhWn3xmsJ4QmBqDGMeJQ5gPXmZrPBjX5hB8NfUgm7HvUyc/1/*,tprv8ZgxMBicQKsPf2RCn731KSorsuEjA8hwJqwub6BUBJYGpZV5Z6VQPKGEKqGJxEDtgFxeGpkU9zhjNn82SiiiaSqNXnqXofhZAgn8YirN5y2/1/*,tprv8ZgxMBicQKsPf94VtPAD9Czz4SButGX49W8PM6nxecBrWACbrULsUb9KRBo6gJs9mCQpX4q7DGCWTtkf27htQwXJGhNCDNJ3WCufeV2CE5T/1/*,tprv8ZgxMBicQKsPdoKuEXhCT2vPyojxxf1C9U75madMvMdqhQf1sET2ToeaDJRP8mzbjYjYq7DV8C233tMmBoPzubVukuNyfu8uxrUJcbdGEhP/1/*,tprv8ZgxMBicQKsPetrYKgU8APCNusa2Sq2px2TaNNJ6TKhzcBfzCbrVKArA3tXc6JYa3VZN6ose6564Far2ikD2DKguYQahVd7dSa9BAnVbRJe/1/*))"),
+            "active": True,
+            "internal" : True,
+            "range": 1000,
+            "next_index": 0,
+            "timestamp": "now"
+        }])
+        assert_equal(res[0]['success'], True)
+        assert_equal(res[1]['success'], True)
+
+        addr = wmulti_priv_big.getnewaddress()
+        w0.sendtoaddress(addr, 10)
+        self.nodes[0].generate(1)
+        self.sync_all()
+        # It is standard and would relay.
+        txid = wmulti_priv_big.sendtoaddress(w0.getnewaddress(), 9.999)
+        decoded = wmulti_priv_big.decoderawtransaction(wmulti_priv_big.gettransaction(txid)['hex'])
+        # 20 sigs + dummy + witness script
+        assert_equal(len(decoded['vin'][0]['txinwitness']), 22)
+
+
+        self.log.info("Under P2SH, multisig are standard with up to 15 "
+                      "compressed keys")
+        self.nodes[1].createwallet(wallet_name='multi_priv_big_legacy',
+                                   blank=True, descriptors=True)
+        multi_priv_big = self.nodes[1].get_wallet_rpc('multi_priv_big_legacy')
+        res = multi_priv_big.importdescriptors([
+        {
+            "desc": descsum_create("sh(multi(15,tprv8ZgxMBicQKsPeAjsABad2QinheaMrvqvCkkBZwBRttYcMALE8yVG5GUsQdLmLWNFeYjUuqKiSay7z2bcvhbi1DEdYMRi5JeedkTKbTuJCda/*,tprv8ZgxMBicQKsPeJ59P23D5yq4HpFgfbqph7kYPCnMVPhNdktyAwbusJoMc9QgksGyV9LQwqPQQjMzjTLVtvkwb2Z6EmFiVtTHQyq2WKVrfRT/*,tprv8ZgxMBicQKsPeZ2m1aQaPA1BJ27xPphNfQQ354z77W8mRLKqwyUyonvusrZgQX3bwAQ2WFo1PPjHoAqiWnM1LMvkkmd3ZkXc5HdjxDarhYk/*,tprv8ZgxMBicQKsPeQ2FPA64vJ91G1Bb9kTARbusYSN9QwNmP9dF5M8xhuX8u8coWD8mq24xjwftnT8hteJ4riMYyjeSsxKMaBd1PX1NDDbxqV2/*,tprv8ZgxMBicQKsPe7nycwReBmFGn5HuTJbzLN7iUpDhFESMGvEZWnurvjrV4otDDEnvsrZ2a8X4o19xGXaTkEJsPUApHvMCeVTmAf2i5bBaSez/*,tprv8ZgxMBicQKsPdauRxSzxXTi85dQd4sSwS5sot1gFLUrJUoUGqzohDgPxTpmBjtmDfYjmNidA1hoF6b5gXh83JBdjcosm5rFeN7xUAM4DFxo/*,tprv8ZgxMBicQKsPfAhMFUPNJMkKVMYebxr1A1bdm8itERTuoDXXhpSQvsXjUQmrTmXsM8x5BxuQjaqF2H5tUXMXuGbiPTpzQKj2NZ6hCsUYJNX/*,tprv8ZgxMBicQKsPddHiYzgaoQthYpCCnnG8TQXaBfQEcoqt2xvzCVXHW7FF1n34LDLoJYghmArzW6ej7xiJpWCDn8sng4XT3uPHxc3MysiE3GS/*,tprv8ZgxMBicQKsPdyon5QGdU6tStoUPSJxidv8u75MWCVjCRhEzoFL2zhEHEx2ejmLExRxANbbqGc84jx3EVjWUVxYShEfDvCeMk3a2Fcqk1Qa/*,tprv8ZgxMBicQKsPcv2k7VmW4rKybZ5QpMUtNWdARqs8rYDoZ7tpg27njFquM2GmdXPgCKpqykwKpZ9mqBn7h7umz1sBm6avKmxcbzs1K8C6bVt/*,tprv8ZgxMBicQKsPea6F9YnfAPrzAQbn1Zeb5h9tp1pjnZQ9WqAds1JYhq9mFBumjBhWn3xmsJ4QmBqDGMeJQ5gPXmZrPBjX5hB8NfUgm7HvUyc/*,tprv8ZgxMBicQKsPf2RCn731KSorsuEjA8hwJqwub6BUBJYGpZV5Z6VQPKGEKqGJxEDtgFxeGpkU9zhjNn82SiiiaSqNXnqXofhZAgn8YirN5y2/*,tprv8ZgxMBicQKsPf94VtPAD9Czz4SButGX49W8PM6nxecBrWACbrULsUb9KRBo6gJs9mCQpX4q7DGCWTtkf27htQwXJGhNCDNJ3WCufeV2CE5T/*,tprv8ZgxMBicQKsPdoKuEXhCT2vPyojxxf1C9U75madMvMdqhQf1sET2ToeaDJRP8mzbjYjYq7DV8C233tMmBoPzubVukuNyfu8uxrUJcbdGEhP/*,tprv8ZgxMBicQKsPetrYKgU8APCNusa2Sq2px2TaNNJ6TKhzcBfzCbrVKArA3tXc6JYa3VZN6ose6564Far2ikD2DKguYQahVd7dSa9BAnVbRJe/*))"),
+            "active": True,
+            "range": 1000,
+            "next_index": 0,
+            "timestamp": "now"
+        },
+        {
+            "desc":
+            descsum_create("sh(multi(15,tprv8ZgxMBicQKsPeAjsABad2QinheaMrvqvCkkBZwBRttYcMALE8yVG5GUsQdLmLWNFeYjUuqKiSay7z2bcvhbi1DEdYMRi5JeedkTKbTuJCda/1/*,tprv8ZgxMBicQKsPeJ59P23D5yq4HpFgfbqph7kYPCnMVPhNdktyAwbusJoMc9QgksGyV9LQwqPQQjMzjTLVtvkwb2Z6EmFiVtTHQyq2WKVrfRT/1/*,tprv8ZgxMBicQKsPeZ2m1aQaPA1BJ27xPphNfQQ354z77W8mRLKqwyUyonvusrZgQX3bwAQ2WFo1PPjHoAqiWnM1LMvkkmd3ZkXc5HdjxDarhYk/1/*,tprv8ZgxMBicQKsPeQ2FPA64vJ91G1Bb9kTARbusYSN9QwNmP9dF5M8xhuX8u8coWD8mq24xjwftnT8hteJ4riMYyjeSsxKMaBd1PX1NDDbxqV2/1/*,tprv8ZgxMBicQKsPe7nycwReBmFGn5HuTJbzLN7iUpDhFESMGvEZWnurvjrV4otDDEnvsrZ2a8X4o19xGXaTkEJsPUApHvMCeVTmAf2i5bBaSez/1/*,tprv8ZgxMBicQKsPdauRxSzxXTi85dQd4sSwS5sot1gFLUrJUoUGqzohDgPxTpmBjtmDfYjmNidA1hoF6b5gXh83JBdjcosm5rFeN7xUAM4DFxo/1/*,tprv8ZgxMBicQKsPfAhMFUPNJMkKVMYebxr1A1bdm8itERTuoDXXhpSQvsXjUQmrTmXsM8x5BxuQjaqF2H5tUXMXuGbiPTpzQKj2NZ6hCsUYJNX/1/*,tprv8ZgxMBicQKsPddHiYzgaoQthYpCCnnG8TQXaBfQEcoqt2xvzCVXHW7FF1n34LDLoJYghmArzW6ej7xiJpWCDn8sng4XT3uPHxc3MysiE3GS/1/*,tprv8ZgxMBicQKsPdyon5QGdU6tStoUPSJxidv8u75MWCVjCRhEzoFL2zhEHEx2ejmLExRxANbbqGc84jx3EVjWUVxYShEfDvCeMk3a2Fcqk1Qa/1/*,tprv8ZgxMBicQKsPcv2k7VmW4rKybZ5QpMUtNWdARqs8rYDoZ7tpg27njFquM2GmdXPgCKpqykwKpZ9mqBn7h7umz1sBm6avKmxcbzs1K8C6bVt/1/*,tprv8ZgxMBicQKsPea6F9YnfAPrzAQbn1Zeb5h9tp1pjnZQ9WqAds1JYhq9mFBumjBhWn3xmsJ4QmBqDGMeJQ5gPXmZrPBjX5hB8NfUgm7HvUyc/1/*,tprv8ZgxMBicQKsPf2RCn731KSorsuEjA8hwJqwub6BUBJYGpZV5Z6VQPKGEKqGJxEDtgFxeGpkU9zhjNn82SiiiaSqNXnqXofhZAgn8YirN5y2/1/*,tprv8ZgxMBicQKsPf94VtPAD9Czz4SButGX49W8PM6nxecBrWACbrULsUb9KRBo6gJs9mCQpX4q7DGCWTtkf27htQwXJGhNCDNJ3WCufeV2CE5T/1/*,tprv8ZgxMBicQKsPdoKuEXhCT2vPyojxxf1C9U75madMvMdqhQf1sET2ToeaDJRP8mzbjYjYq7DV8C233tMmBoPzubVukuNyfu8uxrUJcbdGEhP/1/*,tprv8ZgxMBicQKsPetrYKgU8APCNusa2Sq2px2TaNNJ6TKhzcBfzCbrVKArA3tXc6JYa3VZN6ose6564Far2ikD2DKguYQahVd7dSa9BAnVbRJe/1/*))"),
+            "active": True,
+            "internal" : True,
+            "range": 1000,
+            "next_index": 0,
+            "timestamp": "now"
+        }])
+        assert_equal(res[0]['success'], True)
+        assert_equal(res[1]['success'], True)
+
+        addr = multi_priv_big.getnewaddress("", "legacy")
+        w0.sendtoaddress(addr, 10)
+        self.nodes[0].generate(6)
+        self.sync_all()
+        # It is standard and would relay.
+        txid = multi_priv_big.sendtoaddress(w0.getnewaddress(), 10, "", "",
+                                            True)
+        decoded = multi_priv_big.decoderawtransaction(
+            multi_priv_big.gettransaction(txid)['hex']
+        )
+
+
         self.log.info("Combo descriptors cannot be active")
         self.test_importdesc({"desc": descsum_create("combo(tpubDCJtdt5dgJpdhW4MtaVYDhG4T4tF6jcLR1PxL43q9pq1mxvXgMS9Mzw1HnXG15vxUGQJMMSqCQHMTy3F1eW5VkgVroWzchsPD5BUojrcWs8/*)"),
                               "active": True,
