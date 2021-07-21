@@ -63,7 +63,7 @@ PSBTAnalysis AnalyzePSBT(PartiallySignedTransaction psbtx)
 
             // Figure out what is missing
             SignatureData outdata;
-            bool complete = SignPSBTInput(DUMMY_SIGNING_PROVIDER, psbtx, i, &txdata, 1, &outdata);
+            bool complete = SignPSBTInput(DUMMY_SIGNING_PROVIDER, psbtx, i, &txdata, 1, true, &outdata);
 
             // Things are missing
             if (!complete) {
