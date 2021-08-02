@@ -331,6 +331,8 @@ public:
         return m_value;
     }
 
+    int64_t GetInt64() const { return m_value; }
+
     std::vector<unsigned char> getvch() const
     {
         return serialize(m_value);
@@ -434,6 +436,25 @@ public:
     // delete non-existent constructor to defend against future introduction
     // e.g. via prevector
     explicit CScript(const std::vector<unsigned char>& b) = delete;
+
+    template <typename Stream, typename Operation>
+     inline void SerializationOp(Stream& s, Operation ser_action) {
+         READWRITEAS(CScriptBase, *this);
+     }
+ 
+     CScript& operator+=(const CScript& b)
+     {
+         reserve(size() + b.size());
+         insert(end(), b.begin(), b.end());
+         return *this;
+     }
+ 
+     friend CScript operator+(const CScript& a, const CScript& b)
+     {
+         CScript ret = a;
+         ret += b;
+         return ret;
+     }
 
     /** Delete non-existent operator to defend against future introduction */
     CScript& operator<<(const CScript& b) = delete;
