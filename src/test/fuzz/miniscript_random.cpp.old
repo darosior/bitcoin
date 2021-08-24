@@ -1,0 +1,373 @@
+// Copyright (c) 2021 The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <core_io.h>
+#include <hash.h>
+#include <key.h>
+#include <script/miniscript.h>
+#include <script/script.h>
+#include <span.h>
+#include <test/fuzz/FuzzedDataProvider.h>
+#include <test/fuzz/fuzz.h>
+#include <test/fuzz/util.h>
+#include <util/strencodings.h>
+
+#include <optional>
+#include <stdint.h>
+
+
+struct TestData {
+    typedef CPubKey Key;
+
+    // Precomputed public keys, and a dummy signature for each of them.
+    std::vector<Key> dummy_keys;
+    std::map<CKeyID, Key> dummy_keys_map;
+    std::map<Key, std::vector<unsigned char>> dummy_sigs;
+
+    // Precomputed hashes of each kind.
+    std::vector<std::vector<unsigned char>> sha256;
+    std::vector<std::vector<unsigned char>> ripemd160;
+    std::vector<std::vector<unsigned char>> hash256;
+    std::vector<std::vector<unsigned char>> hash160;
+    std::map<std::vector<unsigned char>, std::vector<unsigned char>> sha256_preimages;
+    std::map<std::vector<unsigned char>, std::vector<unsigned char>> ripemd160_preimages;
+    std::map<std::vector<unsigned char>, std::vector<unsigned char>> hash256_preimages;
+    std::map<std::vector<unsigned char>, std::vector<unsigned char>> hash160_preimages;
+
+    //! Set the precomputed data.
+    void Init() {
+        unsigned char keydata[32] = {1};
+        for (size_t i = 0; i < 256; i++) {
+            keydata[31] = i;
+            CKey privkey;
+            privkey.Set(keydata, keydata + 32, true);
+            const Key pubkey = privkey.GetPubKey();
+
+            dummy_keys.push_back(pubkey);
+            dummy_keys_map.insert({pubkey.GetID(), pubkey});
+            std::vector<unsigned char> sig;
+            privkey.Sign(uint256S(""), sig);
+            sig.push_back(1); // SIGHASH_ALL
+            dummy_sigs.insert({pubkey, sig});
+
+            std::vector<unsigned char> hash;
+            hash.resize(32);
+            CSHA256().Write(keydata, 32).Finalize(hash.data());
+            sha256.push_back(hash);
+            sha256_preimages[hash] = std::vector<unsigned char>(keydata, keydata + 32);
+            CHash256().Write(keydata).Finalize(hash);
+            hash256.push_back(hash);
+            hash256_preimages[hash] = std::vector<unsigned char>(keydata, keydata + 32);
+            hash.resize(20);
+            CRIPEMD160().Write(keydata, 32).Finalize(hash.data());
+            assert(hash.size() == 20);
+            ripemd160.push_back(hash);
+            ripemd160_preimages[hash] = std::vector<unsigned char>(keydata, keydata + 32);
+            CHash160().Write(keydata).Finalize(hash);
+            hash160.push_back(hash);
+            hash160_preimages[hash] = std::vector<unsigned char>(keydata, keydata + 32);
+        }
+    }
+
+    // Conversion routines
+    bool ToString(const Key& key, std::string& ret) const { ret = HexStr(key); return true; }
+    const std::vector<unsigned char> ToPKBytes(const Key& key) const { return {key.begin(), key.end()}; }
+    const std::vector<unsigned char> ToPKHBytes(const Key& key) const {
+        const auto h = Hash160(key);
+        return {h.begin(), h.end()};
+    }
+    template<typename I>
+    bool FromString(I first, I last, Key& key) const {
+        const auto bytes = ParseHex(std::string(first, last));
+        key.Set(bytes.begin(), bytes.end());
+        return key.IsValid();
+    }
+    template<typename I>
+    bool FromPKBytes(I first, I last, CPubKey& key) const {
+        key.Set(first, last);
+        return key.IsValid();
+    }
+    template<typename I>
+    bool FromPKHBytes(I first, I last, CPubKey& key) const {
+        assert(last - first == 20);
+        CKeyID keyid;
+        std::copy(first, last, keyid.begin());
+        const auto it = dummy_keys_map.find(keyid);
+        if (it == dummy_keys_map.end()) return false;
+        key = it->second;
+        return true;
+    }
+
+    // Timelock challenges satisfaction. Make the value (deterministically) vary to explore different
+    // paths.
+    bool CheckAfter(uint32_t value) const { return value % 2; }
+    bool CheckOlder(uint32_t value) const { return value % 2; }
+
+    // Signature challenges fulfilled with a dummy signate, if it was one of our dummy keys.
+    miniscript::Availability Sign(const CPubKey& key, std::vector<unsigned char>& sig) const {
+        const auto it = dummy_sigs.find(key);
+        if (it == dummy_sigs.end()) return miniscript::Availability::NO;
+        sig = it->second;
+        return miniscript::Availability::YES;
+    }
+
+    //! Lookup generalization for all the hash satisfactions below
+    miniscript::Availability LookupHash(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage,
+                                        const std::map<std::vector<unsigned char>, std::vector<unsigned char>>& map) const
+    {
+        const auto it = map.find(hash);
+        if (it == map.end()) return miniscript::Availability::NO;
+        preimage = it->second;
+        return miniscript::Availability::YES;
+    }
+    miniscript::Availability SatSHA256(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return LookupHash(hash, preimage, sha256_preimages);
+    }
+    miniscript::Availability SatRIPEMD160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return LookupHash(hash, preimage, ripemd160_preimages);
+    }
+    miniscript::Availability SatHASH256(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return LookupHash(hash, preimage, hash256_preimages);
+    }
+    miniscript::Availability SatHASH160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return LookupHash(hash, preimage, hash160_preimages);
+    }
+};
+
+TestData TEST_DATA;
+
+using Fragment = miniscript::Fragment;
+using NodeRef = miniscript::NodeRef<CPubKey>;
+template<typename... Args> NodeRef MakeNodeRef(Args&&... args) { return miniscript::MakeNodeRef<CPubKey>(std::forward<Args>(args)...); }
+using miniscript::operator"" _mst;
+
+NodeRef GenNode(FuzzedDataProvider& provider, miniscript::Type typ, bool safe);
+
+//! Generate a random valid miniscript node of the given type and complexity.
+NodeRef RandomNode(FuzzedDataProvider& provider, miniscript::Type typ, bool safe) {
+    NodeRef ret = GenNode(provider, typ, safe);
+    assert(ret);
+    if (!ret->IsValid()) {
+        std::string s;
+        ret->ToString(TEST_DATA, s);
+        std::cout << "Invalid   " << s << std::endl;
+        assert(false);
+    }
+    if (!(ret->GetType() << typ)) {
+        std::string s;
+        ret->ToString(TEST_DATA, s);
+        std::cout << "Bad type  " << s << "  (Type is " << (typ == "Bkms"_mst ? "safe" : "unsafe") << ")" << std::endl;
+        assert(false);
+    }
+    return ret;
+}
+
+//! Generate a vector of valid miniscript nodes of the given types, and a specified complexity of their sum.
+std::vector<NodeRef> MultiNode(FuzzedDataProvider& provider, const std::vector<miniscript::Type>& types, bool safe)
+{
+    std::vector<NodeRef> subs;
+    for (size_t i = 0; i < types.size(); ++i) {
+        subs.push_back(RandomNode(provider, types[i], safe));
+    }
+    return subs;
+}
+
+// See the properties table on https://bitcoin.sipa.be/miniscript/:
+// o; n; d; u
+#define DNOU Fragment::SHA256, Fragment::HASH256, Fragment::RIPEMD160, Fragment::HASH160, Fragment::WRAP_D
+// n; d; u
+#define DNU Fragment::MULTI
+// z; u; d
+#define DUZ Fragment::JUST_0
+// n; d
+#define DN Fragment::WRAP_J
+// d; u
+#define DU Fragment::OR_B
+// z; u
+#define UZ Fragment::JUST_1
+// u
+#define U Fragment::WRAP_N, Fragment::AND_B
+// z
+#define Z Fragment::OLDER, Fragment::AFTER
+
+std::map<miniscript::Type, std::vector<Fragment>> base_types = {
+    {"dnou"_mst, {DNOU}},
+    {"dno"_mst, {DNOU}},
+    {"dnu"_mst, {DNOU, DNU}},
+    {"dnz"_mst, {DNOU}},
+    {"dou"_mst, {DNOU}},
+    {"duz"_mst, {DUZ}},
+    {"nou"_mst, {DNOU}},
+    {"do"_mst, {DNOU}},
+    {"dn"_mst, {DNOU, DNU, DN}},
+    {"du"_mst, {DNOU, DNU, DUZ, DU}},
+    {"dz"_mst, {DUZ}},
+    {"no"_mst, {DNOU}},
+    {"nu"_mst, {DNOU, DNU, DUZ}},
+    {"ou"_mst, {DNOU}},
+    {"uz"_mst, {DUZ, UZ}},
+    {"d"_mst, {DNOU, DNU, DUZ, DN, DU}},
+    {"n"_mst, {DNOU, DNU, DN}},
+    {"o"_mst, {DNOU}},
+    {"u"_mst, {DNOU, DNU, DUZ, DU, UZ, U}},
+    {"z"_mst, {DUZ, UZ, Z}},
+    {""_mst, {DNOU, DNU, DUZ, DN, DU, UZ, U, Z}}, ///< Any property
+};
+
+miniscript::Type type_properties(miniscript::Type& typ) {
+    return typ & ~"B"_mst & ~"efsmxghijk"_mst;
+}
+
+NodeRef timelock(FuzzedDataProvider& provider, Fragment typ) {
+    assert(typ == Fragment::OLDER || typ == Fragment::AFTER);
+    const uint32_t k{provider.ConsumeIntegral<uint32_t>()};
+    return MakeNodeRef(typ, k);
+}
+
+//! Generate a random (but occasionally invalid) miniscript node of the given type and complexity.
+NodeRef GenNode(FuzzedDataProvider& provider, miniscript::Type typ, bool safe) {
+    if (typ << "B"_mst) {
+        const size_t range_begin = safe ? 3 : 0;
+        const miniscript::Type props = type_properties(typ);
+        const std::vector<Fragment> possible_types = base_types[props];
+        assert(possible_types.size() > 0);
+
+        const size_t index = provider.ConsumeIntegralInRange(size_t(0), possible_types.size() - 1);
+        const Fragment node_type = possible_types[index];
+        switch (node_type) {
+            case Fragment::JUST_0:
+            case Fragment::JUST_1: return MakeNodeRef(node_type);
+            case Fragment::OLDER:
+            case Fragment::AFTER: {
+                const uint32_t k{provider.ConsumeIntegralInRange<uint32_t>(1, CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG - 1)}; // FIXME
+                return MakeNodeRef(possible_types[index], k);
+            }
+            case Fragment::SHA256: return MakeNodeRef(Fragment::SHA256, TEST_DATA.sha256[provider.ConsumeIntegralInRange(0, 255)]);
+            case Fragment::HASH256: return MakeNodeRef(Fragment::HASH256, TEST_DATA.hash256[provider.ConsumeIntegralInRange(0, 255)]);
+            case Fragment::RIPEMD160: return MakeNodeRef(Fragment::RIPEMD160, TEST_DATA.ripemd160[provider.ConsumeIntegralInRange(0, 255)]);
+            case Fragment::HASH160: return MakeNodeRef(Fragment::HASH160, TEST_DATA.hash160[provider.ConsumeIntegralInRange(0, 255)]);
+            case Fragment::WRAP_C: return MakeNodeRef(Fragment::WRAP_C, Vector(RandomNode(provider, "K"_mst, safe)));
+            case Fragment::WRAP_D: return MakeNodeRef(Fragment::WRAP_D, MultiNode(provider, Vector("V"_mst), safe));
+            case Fragment::WRAP_J: return MakeNodeRef(Fragment::WRAP_J, MultiNode(provider, Vector("B"_mst), safe));
+            case Fragment::WRAP_N: return MakeNodeRef(Fragment::WRAP_N, MultiNode(provider, Vector("B"_mst), safe));
+            case Fragment::OR_I: {
+                switch (provider.ConsumeIntegralInRange(0, 2)) {
+                    case 0: return MakeNodeRef(Fragment::OR_I, Cat(MultiNode(provider, Vector("B"_mst), safe), Vector(MakeNodeRef(Fragment::JUST_0))));
+                    case 1: return MakeNodeRef(Fragment::OR_I, Cat(Vector(MakeNodeRef(Fragment::JUST_0)), MultiNode(provider, Vector("B"_mst), safe)));
+                    case 2: return MakeNodeRef(Fragment::OR_I, MultiNode(provider, Vector("B"_mst, "B"_mst), safe));
+                }
+            }
+            case Fragment::AND_V: {
+                if (provider.ConsumeBool()) {
+                    return MakeNodeRef(Fragment::AND_V, Cat(MultiNode(provider, Vector("V"_mst), safe), Vector(MakeNodeRef(Fragment::JUST_1))));
+                } else {
+                    return MakeNodeRef(Fragment::AND_V, MultiNode(provider, Vector("V"_mst, "B"_mst), safe));
+                }
+            }
+            case Fragment::ANDOR: return MakeNodeRef(Fragment::ANDOR, Cat(MultiNode(provider, Vector("B"_mst, "B"_mst), safe), Vector(MakeNodeRef(Fragment::JUST_0))));
+            case Fragment::AND_B: return MakeNodeRef(Fragment::AND_B, MultiNode(provider, Vector("B"_mst, "W"_mst), safe));
+            case Fragment::OR_B: return MakeNodeRef(Fragment::OR_B, MultiNode(provider, Vector("B"_mst, "W"_mst), safe));
+            case Fragment::OR_D: return MakeNodeRef(Fragment::OR_D, MultiNode(provider, Vector("B"_mst, "B"_mst), safe));
+            case Fragment::MULTI: {
+                const size_t n_keys = provider.ConsumeIntegralInRange<size_t>(1, 20);
+                const size_t n_sigs = provider.ConsumeIntegralInRange<size_t>(1, n_keys);
+                std::vector<CPubKey> keys;
+                for (size_t i = 0; i < n_keys; ++i) keys.push_back(TEST_DATA.dummy_keys[provider.ConsumeIntegralInRange<size_t>(0, 255)]);
+                return MakeNodeRef(Fragment::MULTI, std::move(keys), n_sigs);
+            }
+            default: break;
+        }
+        assert(false);
+
+        switch (provider.ConsumeIntegralInRange<size_t>(range_begin, 19)) {
+            // These nodes can't be safe on their own
+            case 0: return MakeNodeRef(provider.ConsumeBool() ? Fragment::JUST_0 : Fragment::JUST_1);
+            case 1: {
+                const uint32_t k{provider.ConsumeIntegral<uint32_t>()};
+                return MakeNodeRef(provider.ConsumeBool() ? Fragment::OLDER : Fragment::AFTER, k);
+            }
+            case 2: {
+                const size_t hashtype = provider.ConsumeIntegralInRange<size_t>(0, 3);
+                const size_t index = provider.ConsumeIntegralInRange<size_t>(0, 255);
+                switch (hashtype) {
+                    case 0: return MakeNodeRef(Fragment::SHA256, TEST_DATA.sha256[index]);
+                    case 1: return MakeNodeRef(Fragment::RIPEMD160, TEST_DATA.ripemd160[index]);
+                    case 2: return MakeNodeRef(Fragment::HASH256, TEST_DATA.hash256[index]);
+                    case 3: return MakeNodeRef(Fragment::HASH160, TEST_DATA.hash160[index]);
+                }
+            }
+            // These nodes can be safe on their own
+            case 3: return MakeNodeRef(Fragment::WRAP_C, Vector(RandomNode(provider, "K"_mst, safe)));
+            case 4: return MakeNodeRef(Fragment::WRAP_C, Vector(RandomNode(provider, "K"_mst, safe)));
+            case 5: return MakeNodeRef(Fragment::WRAP_D, MultiNode(provider, Vector("V"_mst), safe));
+            case 6: return MakeNodeRef(Fragment::WRAP_J, MultiNode(provider, Vector("B"_mst), safe));
+            case 7: return MakeNodeRef(Fragment::WRAP_N, MultiNode(provider, Vector("B"_mst), safe));
+            case 8: return MakeNodeRef(Fragment::OR_I, Cat(MultiNode(provider, Vector("B"_mst), safe), Vector(MakeNodeRef(Fragment::JUST_0))));
+            case 9: return MakeNodeRef(Fragment::OR_I, Cat(Vector(MakeNodeRef(Fragment::JUST_0)), MultiNode(provider, Vector("B"_mst), safe)));
+            case 10: return MakeNodeRef(Fragment::AND_V, Cat(MultiNode(provider, Vector("V"_mst), safe), Vector(MakeNodeRef(Fragment::JUST_1))));
+            case 11: return MakeNodeRef(Fragment::AND_V, Cat(MultiNode(provider, Vector("V"_mst), safe), Vector(MakeNodeRef(Fragment::JUST_1))));
+            case 12: return MakeNodeRef(Fragment::ANDOR, Cat(MultiNode(provider, Vector("B"_mst, "B"_mst), safe), Vector(MakeNodeRef(Fragment::JUST_0))));
+            case 13: return MakeNodeRef(Fragment::AND_B, MultiNode(provider, Vector("B"_mst, "W"_mst), safe));
+            case 14: return MakeNodeRef(Fragment::OR_B, MultiNode(provider, Vector("B"_mst, "W"_mst), safe));
+            case 15: return MakeNodeRef(Fragment::OR_D, MultiNode(provider, Vector("B"_mst, "B"_mst), safe));
+            case 16: return MakeNodeRef(Fragment::OR_I, MultiNode(provider, Vector("B"_mst, "B"_mst), safe));
+            case 17: {
+                const size_t n_keys = provider.ConsumeIntegralInRange<size_t>(1, 20);
+                const size_t n_sigs = provider.ConsumeIntegralInRange<size_t>(1, n_keys);
+                std::vector<CPubKey> keys;
+                for (size_t i = 0; i < n_keys; ++i) keys.push_back(TEST_DATA.dummy_keys[provider.ConsumeIntegralInRange<size_t>(0, 255)]);
+                return MakeNodeRef(Fragment::MULTI, std::move(keys), n_sigs);
+            }
+            case 18: return MakeNodeRef(Fragment::ANDOR, MultiNode(provider, Vector("B"_mst, "B"_mst, "B"_mst), safe));
+            case 19: {
+                const size_t args = 3 + provider.ConsumeIntegralInRange<size_t>(0, 90);
+                const size_t sats = 2 + provider.ConsumeIntegralInRange<size_t>(0, args - 2 - 1);
+                const auto types = Cat(Vector("B"_mst), std::vector<miniscript::Type>(args - 1, "W"_mst));
+                return MakeNodeRef(Fragment::THRESH, MultiNode(provider, types, safe), sats);
+            }
+        }
+    } else if (typ << "V"_mst) {
+        switch (provider.ConsumeIntegralInRange<size_t>(0, 4)) {
+            case 0: return MakeNodeRef(Fragment::WRAP_V, MultiNode(provider, Vector("B"_mst), safe));
+            case 1: return MakeNodeRef(Fragment::AND_V, MultiNode(provider, Vector("V"_mst, "V"_mst), safe));
+            case 2: return MakeNodeRef(Fragment::OR_C, MultiNode(provider, Vector("B"_mst, "V"_mst), safe));
+            case 3: return MakeNodeRef(Fragment::OR_I, MultiNode(provider, Vector("V"_mst, "V"_mst), safe));
+            case 4: return MakeNodeRef(Fragment::ANDOR, MultiNode(provider, Vector("B"_mst, "V"_mst, "V"_mst), safe));
+        }
+    } else if (typ << "W"_mst) {
+        // Generate a "W" node by wrapping a "B" node.
+        auto sub = RandomNode(provider, "B"_mst, safe);
+        if (sub->GetType() << "o"_mst && provider.ConsumeBool()) {
+            return MakeNodeRef(Fragment::WRAP_S, Vector(std::move(sub)));
+        }
+        return MakeNodeRef(Fragment::WRAP_A, Vector(std::move(sub)));
+    } else if (typ << "K"_mst) {
+        // Generate a "K" node.
+        switch (provider.ConsumeIntegralInRange<size_t>(0, 4)) {
+            case 0: return MakeNodeRef(Fragment::PK_K, Vector(TEST_DATA.dummy_keys[provider.ConsumeIntegralInRange<size_t>(0, 255)]));
+            case 1: return MakeNodeRef(Fragment::PK_H, Vector(TEST_DATA.dummy_keys[provider.ConsumeIntegralInRange<size_t>(0, 255)]));
+            case 2: return MakeNodeRef(Fragment::AND_V, MultiNode(provider, Vector("V"_mst, "K"_mst), safe));
+            case 3: return MakeNodeRef(Fragment::OR_I, MultiNode(provider, Vector("K"_mst, "K"_mst), safe));
+            case 4: return MakeNodeRef(Fragment::ANDOR, MultiNode(provider, Vector("B"_mst, "K"_mst, "K"_mst), safe));
+        }
+    }
+    assert(false);
+    return {};
+}
+
+void initialize_miniscript_random() {
+    ECC_Start();
+    TEST_DATA.Init();
+}
+
+FUZZ_TARGET_INIT(miniscript_random, initialize_miniscript_random)
+{
+    FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
+
+    for (size_t i = 0; i < 255; i++) assert(TEST_DATA.ripemd160[i].size() == 20);
+
+    // Generate a valid top-level node
+    const bool safe = fuzzed_data_provider.ConsumeBool();
+    auto node = RandomNode(fuzzed_data_provider, "B"_mst, safe);
+}
