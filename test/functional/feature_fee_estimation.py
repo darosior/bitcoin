@@ -80,34 +80,6 @@ def small_txpuzzle_randfee(from_node, conflist, unconflist, amount, min_fee, fee
     return (tx.serialize().hex(), fee)
 
 
-def split_inputs(from_node, txins, txouts, initial_split=False):
-    """Generate a lot of inputs so we can generate a ton of transactions.
-
-    This function takes an input from txins, and creates and sends a transaction
-    which splits the value into 2 outputs which are appended to txouts.
-    Previously this was designed to be small inputs so they wouldn't have
-    a high coin age when the notion of priority still existed."""
-
-    prevtxout = txins.pop()
-    tx = CTransaction()
-    tx.vin.append(CTxIn(COutPoint(int(prevtxout["txid"], 16), prevtxout["vout"]), b""))
-
-    half_change = satoshi_round(prevtxout["amount"] / 2)
-    rem_change = prevtxout["amount"] - half_change - Decimal("0.00001000")
-    tx.vout.append(CTxOut(int(half_change * COIN), P2SH))
-    tx.vout.append(CTxOut(int(rem_change * COIN), P2SH))
-
-    # If this is the initial split we actually need to sign the transaction
-    # Otherwise we just need to insert the proper ScriptSig
-    if (initial_split):
-        completetx = from_node.signrawtransactionwithwallet(tx.serialize().hex())["hex"]
-    else:
-        tx.vin[0].scriptSig = REDEEM_SCRIPT
-        completetx = tx.serialize().hex()
-    txid = from_node.sendrawtransaction(hexstring=completetx, maxfeerate=0)
-    txouts.append({"txid": txid, "vout": 0, "amount": half_change})
-    txouts.append({"txid": txid, "vout": 1, "amount": rem_change})
-
 def check_raw_estimates(node, fees_seen):
     """Call estimaterawfee and verify that the estimates meet certain invariants."""
 
@@ -206,32 +178,28 @@ class EstimateFeeTest(BitcoinTestFramework):
         self.log.info("This test is time consuming, please be patient")
         self.log.info("Splitting inputs so we can generate tx's")
 
-        # Start node0
+        # Split two coinbases into many small utxos
         self.start_node(0)
-        self.txouts = []
-        self.txouts2 = []
-        # Split a coinbase into two transaction puzzle outputs
-        split_inputs(self.nodes[0], self.nodes[0].listunspent(0), self.txouts, True)
-
-        # Mine
+        utxo_count = 2048
+        self.confutxo = []
+        splitted_amount = Decimal("0.04")
+        fee = Decimal("0.1")
+        change = Decimal("100") - splitted_amount * utxo_count - fee
+        tx = CTransaction()
+        tx.vin = [
+            CTxIn(COutPoint(int(cb["txid"], 16), cb["vout"]), b"")
+            for cb in self.nodes[0].listunspent()[:2]
+        ]
+        tx.vout = [CTxOut(int(splitted_amount * COIN), P2SH) for _ in range(utxo_count)]
+        tx.vout.append(CTxOut(int(change * COIN), P2SH))
+        txhex = self.nodes[0].signrawtransactionwithwallet(tx.serialize().hex())["hex"]
+        txid = self.nodes[0].sendrawtransaction(txhex)
+        self.confutxo = [
+            {"txid": txid, "vout": i, "amount": splitted_amount}
+            for i in range(utxo_count)
+        ]
         while len(self.nodes[0].getrawmempool()) > 0:
             self.generate(self.nodes[0], 1)
-
-        # Repeatedly split those 2 outputs, doubling twice for each rep
-        # Use txouts to monitor the available utxo, since these won't be tracked in wallet
-        reps = 0
-        while reps < 5:
-            # Double txouts to txouts2
-            while len(self.txouts) > 0:
-                split_inputs(self.nodes[0], self.txouts, self.txouts2)
-            while len(self.nodes[0].getrawmempool()) > 0:
-                self.generate(self.nodes[0], 1)
-            # Double txouts2 to txouts
-            while len(self.txouts2) > 0:
-                split_inputs(self.nodes[0], self.txouts2, self.txouts)
-            while len(self.nodes[0].getrawmempool()) > 0:
-                self.generate(self.nodes[0], 1)
-            reps += 1
         self.log.info("Finished splitting")
 
         # Now we can connect the other nodes, didn't want to connect them earlier
@@ -246,7 +214,6 @@ class EstimateFeeTest(BitcoinTestFramework):
 
         self.fees_per_kb = []
         self.memutxo = []
-        self.confutxo = self.txouts  # Start with the set of confirmed txouts after splitting
         self.log.info("Will output estimates for 1/2/3/6/15/25 blocks")
 
         for _ in range(2):
