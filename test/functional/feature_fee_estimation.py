@@ -170,12 +170,8 @@ class EstimateFeeTest(BitcoinTestFramework):
                     newmem.append(utx)
             self.memutxo = newmem
 
-    def run_test(self):
-        self.log.info("This test is time consuming, please be patient")
-        self.log.info("Splitting inputs so we can generate tx's")
-
-        # Split two coinbases into many small utxos
-        self.start_node(0)
+    def initial_split(self, node):
+        """Split two coinbase UTxOs into many small coins"""
         utxo_count = 2048
         self.confutxo = []
         splitted_amount = Decimal("0.04")
@@ -184,30 +180,22 @@ class EstimateFeeTest(BitcoinTestFramework):
         tx = CTransaction()
         tx.vin = [
             CTxIn(COutPoint(int(cb["txid"], 16), cb["vout"]))
-            for cb in self.nodes[0].listunspent()[:2]
+            for cb in node.listunspent()[:2]
         ]
         tx.vout = [CTxOut(int(splitted_amount * COIN), P2SH) for _ in range(utxo_count)]
         tx.vout.append(CTxOut(int(change * COIN), P2SH))
-        txhex = self.nodes[0].signrawtransactionwithwallet(tx.serialize().hex())["hex"]
-        txid = self.nodes[0].sendrawtransaction(txhex)
+        txhex = node.signrawtransactionwithwallet(tx.serialize().hex())["hex"]
+        txid = node.sendrawtransaction(txhex)
         self.confutxo = [
             {"txid": txid, "vout": i, "amount": splitted_amount}
             for i in range(utxo_count)
         ]
-        while len(self.nodes[0].getrawmempool()) > 0:
-            self.generate(self.nodes[0], 1)
-        self.log.info("Finished splitting")
+        while len(node.getrawmempool()) > 0:
+            self.generate(node, 1)
 
-        # Now we can connect the other nodes, didn't want to connect them earlier
-        # so the estimates would not be affected by the splitting transactions
-        self.start_node(1)
-        self.start_node(2)
-        self.connect_nodes(1, 0)
-        self.connect_nodes(0, 2)
-        self.connect_nodes(2, 1)
-
-        self.sync_all()
-
+    def sanity_check_estimates_range(self):
+        """Populate estimation buckets, assert estimates are in a sane range and
+        are strictly increasing as the target decreases."""
         self.fees_per_kb = []
         self.memutxo = []
         self.log.info("Will output estimates for 1/2/3/6/15/25 blocks")
@@ -231,6 +219,27 @@ class EstimateFeeTest(BitcoinTestFramework):
         self.sync_blocks(self.nodes[0:3], wait=.1)
         self.log.info("Final estimates after emptying mempools")
         check_estimates(self.nodes[1], self.fees_per_kb)
+
+    def run_test(self):
+        self.log.info("This test is time consuming, please be patient")
+        self.log.info("Splitting inputs so we can generate tx's")
+
+        # Split two coinbases into many small utxos
+        self.start_node(0)
+        self.initial_split(self.nodes[0])
+        self.log.info("Finished splitting")
+
+        # Now we can connect the other nodes, didn't want to connect them earlier
+        # so the estimates would not be affected by the splitting transactions
+        self.start_node(1)
+        self.start_node(2)
+        self.connect_nodes(1, 0)
+        self.connect_nodes(0, 2)
+        self.connect_nodes(2, 1)
+        self.sync_all()
+
+        self.log.info("Testing estimates with single transactions.")
+        self.sanity_check_estimates_range()
 
         self.log.info("Testing that fee estimation is disabled in blocksonly.")
         self.restart_node(0, ["-blocksonly"])
