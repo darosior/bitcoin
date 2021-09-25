@@ -377,6 +377,8 @@ bool DecomposeScript(const CScript& script, std::vector<std::pair<opcodetype, st
             // Decompose OP_EQUALVERIFY into OP_EQUAL OP_VERIFY
             out.emplace_back(OP_EQUAL, std::vector<unsigned char>());
             opcode = OP_VERIFY;
+        } else if (opcode >= OP_PUSHDATA1 && opcode <= OP_PUSHDATA4) {
+            if (!CheckMinimalPush(push_data, opcode)) return false;
         }
         out.emplace_back(opcode, std::move(push_data));
     }
