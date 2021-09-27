@@ -119,7 +119,7 @@ class Type {
     //! Internal bitmap of properties (see ""_mst operator for details).
     uint32_t m_flags;
 
-    //! Internal constructed used by the ""_mst operator.
+    //! Internal constructor used by the ""_mst operator.
     explicit constexpr Type(uint32_t flags) : m_flags(flags) {}
 
 public:
@@ -1434,7 +1434,9 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
         }
     }
     if (constructed.size() != 1) return {};
-    return constructed.front();
+    const NodeRef<Key> tl_node = constructed.front();
+    if (!tl_node->IsValidTopLevel()) return {};
+    return tl_node;
 }
 
 } // namespace internal
