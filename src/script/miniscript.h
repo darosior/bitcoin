@@ -1436,6 +1436,8 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
     if (constructed.size() != 1) return {};
     const NodeRef<Key> tl_node = constructed.front();
     if (!tl_node->IsValidTopLevel()) return {};
+    if (!tl_node->CheckScriptSize()) return {};
+    if (!tl_node->CheckStackSize()) return {};
     return tl_node;
 }
 
