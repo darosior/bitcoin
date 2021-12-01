@@ -939,7 +939,7 @@ public:
         return m_node->ToString(StringMaker(arg, m_pubkey_args, type == StringType::PRIVATE), out);
     }
 
-    bool IsSolvable() const override { return false; } // For now, mark these descriptors as non-solvable (as we don't have signing logic for them).
+    bool IsSolvable() const override { return true; }
     bool IsSingleType() const final { return true; }
 };
 
