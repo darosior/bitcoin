@@ -379,9 +379,9 @@ struct Satisfier {
     }
 
     //! Time lock satisfactions.
-    // TODO
-    bool CheckAfter(uint32_t value) const { return false; }
-    bool CheckOlder(uint32_t value) const { return false; }
+    bool CheckAfter(uint32_t value) const { return creator.Checker().CheckLockTime(CScriptNum(value)); }
+    bool CheckOlder(uint32_t value) const { return creator.Checker().CheckSequence(CScriptNum(value)); }
+
 
     //! Hash preimage satisfactions.
     // TODO
@@ -616,6 +616,8 @@ public:
     DummySignatureChecker() {}
     bool CheckECDSASignature(const std::vector<unsigned char>& sig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override { return sig.size() != 0; }
     bool CheckSchnorrSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, SigVersion sigversion, const ScriptExecutionData& execdata, ScriptError* serror) const override { return sig.size() != 0; }
+    bool CheckLockTime(const CScriptNum& nLockTime) const override { return true; }
+    bool CheckSequence(const CScriptNum& nSequence) const override { return true; }
 };
 const DummySignatureChecker DUMMY_CHECKER;
 
