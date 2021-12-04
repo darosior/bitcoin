@@ -88,6 +88,13 @@ bool MutableTransactionSignatureCreator::CreateSchnorrSig(const SigningProvider&
     return true;
 }
 
+bool MutableTransactionSignatureCreator::LookupPreimage(SignatureData& sig_data, const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+    auto it = sig_data.hash_preimages.find(hash);
+    if (it == sig_data.hash_preimages.end()) return false;
+    preimage = it->second;
+    return true;
+}
+
 static bool GetCScript(const SigningProvider& provider, const SignatureData& sigdata, const CScriptID& scriptid, CScript& script)
 {
     if (provider.GetCScript(scriptid, script)) {
@@ -378,16 +385,23 @@ struct Satisfier {
     }
 
     //! Time lock satisfactions.
-    bool CheckAfter(uint32_t value) const { return creator.Checker().CheckLockTime(CScriptNum(value)); }
-    bool CheckOlder(uint32_t value) const { return creator.Checker().CheckSequence(CScriptNum(value)); }
+    bool CheckAfter(uint32_t value) const { return m_creator.Checker().CheckLockTime(CScriptNum(value)); }
+    bool CheckOlder(uint32_t value) const { return m_creator.Checker().CheckSequence(CScriptNum(value)); }
 
 
     //! Hash preimage satisfactions.
-    // TODO
-    miniscript::Availability SatSHA256(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return miniscript::Availability::NO; }
-    miniscript::Availability SatRIPEMD160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return miniscript::Availability::NO; }
-    miniscript::Availability SatHASH256(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return miniscript::Availability::NO; }
-    miniscript::Availability SatHASH160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return miniscript::Availability::NO; }
+    miniscript::Availability SatSHA256(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return m_creator.LookupPreimage(m_sig_data, hash, preimage) ? miniscript::Availability::YES : miniscript::Availability::NO;
+    }
+    miniscript::Availability SatRIPEMD160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return m_creator.LookupPreimage(m_sig_data, hash, preimage) ? miniscript::Availability::YES : miniscript::Availability::NO;
+    }
+    miniscript::Availability SatHASH256(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return m_creator.LookupPreimage(m_sig_data, hash, preimage) ? miniscript::Availability::YES : miniscript::Availability::NO;
+    }
+    miniscript::Availability SatHASH160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
+        return m_creator.LookupPreimage(m_sig_data, hash, preimage) ? miniscript::Availability::YES : miniscript::Availability::NO;
+    }
 };
 
 bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreator& creator, const CScript& fromPubKey, SignatureData& sigdata)
@@ -585,19 +599,18 @@ void SignatureData::MergeSignatureData(SignatureData sigdata)
     signatures.insert(std::make_move_iterator(sigdata.signatures.begin()), std::make_move_iterator(sigdata.signatures.end()));
 }
 
-bool SignSignature(const SigningProvider &provider, const CScript& fromPubKey, CMutableTransaction& txTo, unsigned int nIn, const CAmount& amount, int nHashType)
+bool SignSignature(const SigningProvider &provider, const CScript& fromPubKey, CMutableTransaction& txTo, unsigned int nIn, const CAmount& amount, int nHashType, SignatureData sigdata)
 {
     assert(nIn < txTo.vin.size());
 
     MutableTransactionSignatureCreator creator(&txTo, nIn, amount, nHashType);
 
-    SignatureData sigdata;
     bool ret = ProduceSignature(provider, creator, fromPubKey, sigdata);
     UpdateInput(txTo.vin.at(nIn), sigdata);
     return ret;
 }
 
-bool SignSignature(const SigningProvider &provider, const CTransaction& txFrom, CMutableTransaction& txTo, unsigned int nIn, int nHashType)
+bool SignSignature(const SigningProvider &provider, const CTransaction& txFrom, CMutableTransaction& txTo, unsigned int nIn, int nHashType, SignatureData sigdata)
 {
     assert(nIn < txTo.vin.size());
     const CTxIn& txin = txTo.vin[nIn];
@@ -617,6 +630,7 @@ public:
     bool CheckSchnorrSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, SigVersion sigversion, const ScriptExecutionData& execdata, ScriptError* serror) const override { return sig.size() != 0; }
     bool CheckLockTime(const CScriptNum& nLockTime) const override { return true; }
     bool CheckSequence(const CScriptNum& nSequence) const override { return true; }
+    bool CheckEqual(const std::vector<unsigned char>& vch1, const std::vector<unsigned char>& vch2) const override { return true; }
 };
 const DummySignatureChecker DUMMY_CHECKER;
 
@@ -647,13 +661,17 @@ public:
         sig.assign(64, '\000');
         return true;
     }
+
+    bool LookupPreimage(SignatureData& sig_data, const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const override {
+        preimage.assign(32, '\000');
+        return true;
+    }
 };
 
 }
 
 const BaseSignatureCreator& DUMMY_SIGNATURE_CREATOR = DummySignatureCreator(32, 32);
 const BaseSignatureCreator& DUMMY_MAXIMUM_SIGNATURE_CREATOR = DummySignatureCreator(33, 32);
-
 bool IsSolvable(const SigningProvider& provider, const CScript& script)
 {
     // This check is to make sure that the script we created can actually be solved for and signed by us
