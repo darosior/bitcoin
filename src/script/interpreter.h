@@ -259,6 +259,8 @@ public:
          return false;
     }
 
+    virtual bool CheckEqual(const std::vector<unsigned char>& vch1, const std::vector<unsigned char>& vch2) const { return vch1 == vch2; }
+
     virtual ~BaseSignatureChecker() {}
 };
 
