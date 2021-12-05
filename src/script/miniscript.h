@@ -119,7 +119,7 @@ class Type {
     //! Internal bitmap of properties (see ""_mst operator for details).
     uint32_t m_flags;
 
-    //! Internal constructed used by the ""_mst operator.
+    //! Internal constructor used by the ""_mst operator.
     explicit constexpr Type(uint32_t flags) : m_flags(flags) {}
 
 public:
@@ -342,7 +342,7 @@ private:
     size_t CalcScriptLen() const {
         size_t subsize = 0;
         for (const auto& sub : subs) {
-            subsize += sub->GetScriptSize();
+            subsize += sub->ScriptSize();
         }
         Type sub0type = subs.size() > 0 ? subs[0]->GetType() : ""_mst;
         return internal::ComputeScriptLen(nodetype, sub0type, subsize, k, subs.size(), keys.size());
@@ -464,10 +464,10 @@ private:
             }
             case NodeType::AFTER: return std::move(ret) + "after(" + std::to_string(k) + ")";
             case NodeType::OLDER: return std::move(ret) + "older(" + std::to_string(k) + ")";
-            case NodeType::HASH256: return std::move(ret) + "hash256(" + HexStr(data) + ")";
-            case NodeType::HASH160: return std::move(ret) + "hash160(" + HexStr(data) + ")";
-            case NodeType::SHA256: return std::move(ret) + "sha256(" + HexStr(data) + ")";
-            case NodeType::RIPEMD160: return std::move(ret) + "ripemd160(" + HexStr(data) + ")";
+            case NodeType::HASH256: return std::move(ret) + "hash256(" + HexStr(data.begin(), data.end()) + ")";
+            case NodeType::HASH160: return std::move(ret) + "hash160(" + HexStr(data.begin(), data.end()) + ")";
+            case NodeType::SHA256: return std::move(ret) + "sha256(" + HexStr(data.begin(), data.end()) + ")";
+            case NodeType::RIPEMD160: return std::move(ret) + "ripemd160(" + HexStr(data.begin(), data.end()) + ")";
             case NodeType::JUST_1: return std::move(ret) + "1";
             case NodeType::JUST_0: return std::move(ret) + "0";
             case NodeType::AND_V: return std::move(ret) + "and_v(" + subs[0]->MakeString(ctx, success) + "," + subs[1]->MakeString(ctx, success) + ")";
@@ -753,11 +753,8 @@ private:
     }
 
 public:
-    //! Return the size of the script for this expression (faster than ToString().size()).
-    size_t GetScriptSize() const { return scriptlen; }
-
-    //! Check the size of the script against policy limits
-    bool CheckScriptSize() const { return GetScriptSize() <= MAX_STANDARD_P2WSH_SCRIPT_SIZE; }
+    //! Return the size of the script for this expression (faster than ToScript().size()).
+    size_t ScriptSize() const { return scriptlen; }
 
     //! Return the maximum number of ops needed to satisfy this script non-malleably.
     uint32_t GetOps() const { return ops.stat + ops.sat.value; }
@@ -771,14 +768,11 @@ public:
     //! Check the maximum stack size for this script against the policy limit.
     bool CheckStackSize() const { return GetStackSize() <= MAX_STANDARD_P2WSH_STACK_ITEMS; }
 
-    //! Check whether there is no satisfaction path that contains both timelocks and heightlocks
-    bool CheckTimeLocksMix() const { return GetType() << "k"_mst; }
-
     //! Return the expression type.
     Type GetType() const { return typ; }
 
     //! Check whether this node is valid at all.
-    bool IsValid() const { return !(GetType() == ""_mst) && GetScriptSize() <= MAX_STANDARD_P2WSH_SCRIPT_SIZE; }
+    bool IsValid() const { return !(GetType() == ""_mst) && ScriptSize() <= MAX_STANDARD_P2WSH_SCRIPT_SIZE; }
 
     //! Check whether this node is valid as a script on its own.
     bool IsValidTopLevel() const { return IsValid() && GetType() << "B"_mst; }
@@ -790,7 +784,7 @@ public:
     bool NeedsSignature() const { return GetType() << "s"_mst; }
 
     //! Do all sanity checks.
-    bool IsSane() const { return GetType() << "m"_mst && CheckOpsLimit() && CheckStackSize() && CheckTimeLocksMix() && IsValid(); }
+    bool IsSane() const { return GetType() << "mk"_mst && CheckOpsLimit() && CheckStackSize() && IsValid(); }
 
     //! Check whether this node is safe as a script on its own.
     bool IsSaneTopLevel() const { return GetType() << "Bs"_mst && IsSane() && IsValidTopLevel(); }
@@ -853,7 +847,6 @@ static constexpr int MAX_PARSE_RECURSION = 201;
 //! Parse a miniscript from its textual descriptor form.
 template<typename Key, typename Ctx>
 inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx, int recursion_depth, bool wrappers_parsed = false) {
-    using namespace spanparsing;
     if (recursion_depth >= MAX_PARSE_RECURSION) {
         return {};
     }
@@ -862,7 +855,7 @@ inline NodeRef<Key> Parse(Span<const char>& in, const Ctx& ctx, int recursion_de
     if (!wrappers_parsed) {
         // colon cannot be the first character
         //`:pk()` is invalid miniscript
-        for (unsigned int i = 1; i < expr.size(); ++i) {
+        for (int i = 1; i < expr.size(); ++i) {
             if (expr[i] == ':') {
                 auto in2 = expr.subspan(i + 1);
                 // pass wrappers_parsed = true to avoid multi-colons
