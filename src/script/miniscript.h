@@ -1218,7 +1218,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx) {
                 to_parse.emplace_back(DecodeContext::BKV_EXPR, -1, -1);
             }
             /** In and_b and or_b nodes, we only look for SINGLE_BKV_EXPR, because
-             * or_b(and_v(X,Y),Z) has script [X] [Y] [Z] OP_BOOLOR, the same as 
+             * or_b(and_v(X,Y),Z) has script [X] [Y] [Z] OP_BOOLOR, the same as
              * and_v(X,or_b(Y,Z)). In this example, the former of these is invalid as
              * miniscript, while the latter is valid. So we leave the and_v "outside"
              * while decoding. */
