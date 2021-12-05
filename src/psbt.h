@@ -38,6 +38,7 @@ static constexpr uint8_t PSBT_IN_BIP32_DERIVATION = 0x06;
 static constexpr uint8_t PSBT_IN_SCRIPTSIG = 0x07;
 static constexpr uint8_t PSBT_IN_SCRIPTWITNESS = 0x08;
 static constexpr uint8_t PSBT_IN_RIPEMD160 = 0x0A;
+static constexpr uint8_t PSBT_IN_SHA256 = 0x0B;
 static constexpr uint8_t PSBT_IN_PROPRIETARY = 0xFC;
 
 // Output types
@@ -173,6 +174,7 @@ struct PSBTInput
     std::map<CPubKey, KeyOriginInfo> hd_keypaths;
     std::map<CKeyID, SigPair> partial_sigs;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> ripemd160_preimages;
+    std::map<std::vector<unsigned char>, std::vector<unsigned char>> sha256_preimages;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
     int sighash_type = 0;
@@ -227,6 +229,12 @@ struct PSBTInput
             // Write any ripemd160 preimage
             for (const auto& [hash, preimage] : ripemd160_preimages) {
                 SerializeToVector(s, CompactSizeWriter(PSBT_IN_RIPEMD160), Span{hash});
+                s << preimage;
+            }
+
+            // Write any sha256 preimage
+            for (const auto& [hash, preimage] : sha256_preimages) {
+                SerializeToVector(s, CompactSizeWriter(PSBT_IN_SHA256), Span{hash});
                 s << preimage;
             }
         }
@@ -397,6 +405,26 @@ struct PSBTInput
 
                     // Add to preimages list
                     ripemd160_preimages.emplace(hash, std::move(preimage));
+                    break;
+                }
+                case PSBT_IN_SHA256:
+                {
+                    // Make sure that the key is the size of a sha256 hash + 1
+                    if (key.size() != CSHA256::OUTPUT_SIZE + 1) {
+                        throw std::ios_base::failure("Size of key was not the expected size for the type sha256 preimage");
+                    }
+                    // Read in the hash from key
+                    std::vector<unsigned char> hash(key.begin() + 1, key.end());
+                    if (sha256_preimages.count(hash) > 0) {
+                        throw std::ios_base::failure("Duplicate Key, input sha256 preimage already provided");
+                    }
+
+                    // Read in the preimage from value
+                    std::vector<unsigned char> preimage;
+                    s >> preimage;
+
+                    // Add to preimages list
+                    sha256_preimages.emplace(hash, std::move(preimage));
                     break;
                 }
                 case PSBT_IN_PROPRIETARY:
