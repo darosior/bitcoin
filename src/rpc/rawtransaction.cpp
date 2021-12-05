@@ -1118,6 +1118,10 @@ static RPCHelpMan decodepsbt()
                                 {
                                     {RPCResult::Type::STR, "hash", "The hash and preimage that corresponds to it."},
                                 }},
+                                {RPCResult::Type::OBJ_DYN, "hash256_preimages", /* optional */ true, "",
+                                {
+                                    {RPCResult::Type::STR, "hash", "The hash and preimage that corresponds to it."},
+                                }},
                                 {RPCResult::Type::OBJ_DYN, "unknown", /* optional */ true, "The unknown global fields",
                                 {
                                     {RPCResult::Type::STR_HEX, "key", "(key-value pair) An unknown key-value pair"},
@@ -1362,6 +1366,15 @@ static RPCHelpMan decodepsbt()
                 hash160_preimages.pushKV(HexStr(hash), HexStr(preimage));
             }
             in.pushKV("hash160_preimages", hash160_preimages);
+        }
+
+        // Hash256 hash preimages
+        if (!input.hash256_preimages.empty()) {
+            UniValue hash256_preimages(UniValue::VOBJ);
+            for (const auto& [hash, preimage] : input.hash256_preimages) {
+                hash256_preimages.pushKV(HexStr(hash), HexStr(preimage));
+            }
+            in.pushKV("hash256_preimages", hash256_preimages);
         }
 
         // Proprietary
