@@ -37,6 +37,7 @@ static constexpr uint8_t PSBT_IN_WITNESSSCRIPT = 0x05;
 static constexpr uint8_t PSBT_IN_BIP32_DERIVATION = 0x06;
 static constexpr uint8_t PSBT_IN_SCRIPTSIG = 0x07;
 static constexpr uint8_t PSBT_IN_SCRIPTWITNESS = 0x08;
+static constexpr uint8_t PSBT_IN_RIPEMD160 = 0x0A;
 static constexpr uint8_t PSBT_IN_PROPRIETARY = 0xFC;
 
 // Output types
@@ -171,6 +172,7 @@ struct PSBTInput
     CScriptWitness final_script_witness;
     std::map<CPubKey, KeyOriginInfo> hd_keypaths;
     std::map<CKeyID, SigPair> partial_sigs;
+    std::map<std::vector<unsigned char>, std::vector<unsigned char>> ripemd160_preimages;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
     int sighash_type = 0;
@@ -221,6 +223,12 @@ struct PSBTInput
 
             // Write any hd keypaths
             SerializeHDKeypaths(s, hd_keypaths, CompactSizeWriter(PSBT_IN_BIP32_DERIVATION));
+
+            // Write any ripemd160 preimage
+            for (const auto& [hash, preimage] : ripemd160_preimages) {
+                SerializeToVector(s, CompactSizeWriter(PSBT_IN_RIPEMD160), Span{hash});
+                s << preimage;
+            }
         }
 
         // Write script sig
@@ -369,6 +377,26 @@ struct PSBTInput
                         throw std::ios_base::failure("Final scriptWitness key is more than one byte type");
                     }
                     UnserializeFromVector(s, final_script_witness.stack);
+                    break;
+                }
+                case PSBT_IN_RIPEMD160:
+                {
+                    // Make sure that the key is the size of a ripemd160 hash + 1
+                    if (key.size() != CRIPEMD160::OUTPUT_SIZE + 1) {
+                        throw std::ios_base::failure("Size of key was not the expected size for the type ripemd160 preimage");
+                    }
+                    // Read in the hash from key
+                    std::vector<unsigned char> hash(key.begin() + 1, key.end());
+                    if (ripemd160_preimages.count(hash) > 0) {
+                        throw std::ios_base::failure("Duplicate Key, input ripemd160 preimage already provided");
+                    }
+
+                    // Read in the preimage from value
+                    std::vector<unsigned char> preimage;
+                    s >> preimage;
+
+                    // Add to preimages list
+                    ripemd160_preimages.emplace(hash, std::move(preimage));
                     break;
                 }
                 case PSBT_IN_PROPRIETARY:
