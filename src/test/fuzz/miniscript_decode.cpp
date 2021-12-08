@@ -16,7 +16,7 @@
 #include <optional>
 
 
-struct MockedSatisfier {
+struct MockedSatisfier: BaseSignatureChecker {
     typedef CPubKey Key;
 
     // Precomputed public keys, and a dummy signature for each of them.
@@ -131,10 +131,24 @@ struct MockedSatisfier {
     miniscript::Availability SatHASH160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
         return LookupHash(hash, preimage, hash160_preimages);
     }
+
+    // Signature checker methods. Checks the right dummy signature is used. Always assume timelocks are
+    // correct.
+    bool CheckECDSASignature(const std::vector<unsigned char>& sig, const std::vector<unsigned char>& vchPubKey,
+                             const CScript& scriptCode, SigVersion sigversion) const override
+    {
+        const Key key{vchPubKey};
+        const auto it = dummy_sigs.find(key);
+        if (it == dummy_sigs.end()) return false;
+        return it->second == sig;
+    }
+    bool CheckLockTime(const CScriptNum& nLockTime) const override { return true; }
+    bool CheckSequence(const CScriptNum& nSequence) const override { return true; }
 };
 
 
 MockedSatisfier SATISFIER;
+const CScript DUMMY_SCRIPTSIG;
 
 // Since the mocked key converter replaces all the keys with a hardcoded one we can't just
 // compare the two scripts. This asserts that the two scripts are equal except for the pushes.
@@ -171,7 +185,15 @@ FUZZ_TARGET_INIT(miniscript_decode, initialize_miniscript_decode)
         assertSameOps(ms_script, script);
         // We can compute the costs for this script, and (maybe) produce a satisfaction
         std::vector<std::vector<unsigned char>> stack;
-        ms->Satisfy(SATISFIER, stack, true);
-        ms->Satisfy(SATISFIER, stack, false);
+        for (const bool malleable : {true, false}) {
+            // If we could produce a satisfaction, it must be correct according to the interpreter.
+            if (ms->Satisfy(SATISFIER, stack, malleable) == miniscript::Availability::YES) {
+                stack.push_back(std::vector<unsigned char>(script.begin(), script.end()));
+                CScriptWitness scriptWitness;
+                scriptWitness.stack = stack;
+                assert(VerifyScript(DUMMY_SCRIPTSIG, CScript() << OP_0 << WitnessV0ScriptHash(script),
+                                    &scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, SATISFIER));
+            }
+        }
     }
 }
