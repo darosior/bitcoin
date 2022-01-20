@@ -326,8 +326,7 @@ void DoCheck(const std::string& prv, const std::string& pub, const std::string& 
 
                 /* Infer a descriptor from the generated script, and verify its solvability and that it roundtrips. */
                 auto inferred = InferDescriptor(spks[n], script_provider);
-                // FIXME: temporarily disabled to make the commit hygienic
-                //BOOST_CHECK_EQUAL(inferred->IsSolvable(), !(flags & UNSOLVABLE));
+                BOOST_CHECK_EQUAL(inferred->IsSolvable(), !(flags & UNSOLVABLE));
                 std::vector<CScript> spks_inferred;
                 FlatSigningProvider provider_inferred;
                 BOOST_CHECK(inferred->Expand(0, provider_inferred, spks_inferred, provider_inferred));
