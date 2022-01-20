@@ -20,6 +20,39 @@ MINISCRIPTS = [
     "or_i(and_b(pk(029ffbe722b147f3035c87cb1c60b9a5947dd49c774cc31e94773478711a929ac0),a:and_b(pk(025f05815e3a1a8a83bfbb03ce016c9a2ee31066b98f567f6227df1d76ec4bd143),a:and_b(pk(025625f41e4a065efc06d5019cbbd56fe8c07595af1231e7cbc03fafb87ebb71ec),a:and_b(pk(02a27c8b850a00f67da3499b60562673dcf5fdfb82b7e17652a7ac54416812aefd),s:pk(03e618ec5f384d6e19ca9ebdb8e2119e5bef978285076828ce054e55c4daf473e2))))),and_v(v:thresh(2,pkh(tpubD6NzVbkrYhZ4YK67cd5fDe4fBVmGB2waTDrAt1q4ey9HPq9veHjWkw3VpbaCHCcWozjkhgAkWpFrxuPMUrmXVrLHMfEJ9auoZA6AS1g3grC/*),a:pkh(033841045a531e1adf9910a6ec279589a90b3b8a904ee64ffd692bd08a8996c1aa),a:pkh(02aebf2d10b040eb936a6f02f44ee82f8b34f5c1ccb20ff3949c2b28206b7c1068)),older(4209713)))",
 ]
 
+MINISCRIPTS_PRIV = [
+    # One of two keys, of which one private key is known
+    {
+        "ms": "or_i(pk(tprv8ZgxMBicQKsPerQj6m35no46amfKQdjY7AhLnmatHYXs8S4MTgeZYkWAn4edSGwwL3vkSiiGqSZQrmy5D3P5gBoqgvYP2fCUpBwbKTMTAkL/*),pk(tpubD6NzVbkrYhZ4YPAbyf6urxqqnmJF79PzQtyERAmvkSVS9fweCTjxjDh22Z5St9fGb1a5DUCv8G27nYupKP1Ctr1pkamJossoetzws1moNRn/*))",
+        "sequence": None,
+        "locktime": None,
+    },
+    # A more complex policy, that can't be satisfied through the first branch (need for a preimage)
+    {
+        "ms": "andor(dv:older(2),and_v(v:pk(tprv8ZgxMBicQKsPdZFz4VVtpR8NZrjL4LpuLcfVB8oK9evqe6gkYB8GMZ2nf9SQGhVDZpWCpQpEmPckToyTja8R4xSoMMvwYRG4T4uvwhbrNWh),sha256(2a8ce30189b2ec3200b47aeb4feaac8fcad7c0ba170389729f4898b0b7933bcb)),and_v(v:pkh(tprv8ZgxMBicQKsPd3cbrKjE5GKKJLDEidhtzSSmPVtSPyoHQGL2LZw49yt9foZsN9BeiC5VqRaESUSDV2PS9w7zAVBSK6EQH3CZW9sMKxSKDwD),pk(tprv8ZgxMBicQKsPd7T1sTsZdJo7EJm5bD8SKQUHWqivT8r5GCH13wzS1QspAgSnCeoy7fdSUQs7nxZdTVchxQuHxWWNHL4D4pdD67oq6khhX49/*)))",
+        "sequence": 2,
+        "locktime": None,
+    },
+    # Signature with a relative timelock
+    {
+        "ms": "and_v(v:older(2),pk(tprv8ZgxMBicQKsPdZFz4VVtpR8NZrjL4LpuLcfVB8oK9evqe6gkYB8GMZ2nf9SQGhVDZpWCpQpEmPckToyTja8R4xSoMMvwYRG4T4uvwhbrNWh/*))",
+        "sequence": 2,
+        "locktime": None,
+    },
+    # Signature with an absolute timelock
+    {
+        "ms": "and_v(v:after(20),pk(tprv8ZgxMBicQKsPdZFz4VVtpR8NZrjL4LpuLcfVB8oK9evqe6gkYB8GMZ2nf9SQGhVDZpWCpQpEmPckToyTja8R4xSoMMvwYRG4T4uvwhbrNWh/*))",
+        "sequence": None,
+        "locktime": 20,
+    },
+    # Signature with both
+    {
+        "ms": "and_v(v:older(4),and_v(v:after(30),pk(tprv8ZgxMBicQKsPdZFz4VVtpR8NZrjL4LpuLcfVB8oK9evqe6gkYB8GMZ2nf9SQGhVDZpWCpQpEmPckToyTja8R4xSoMMvwYRG4T4uvwhbrNWh/*)))",
+        "sequence": 4,
+        "locktime": 30,
+    },
+]
+
 
 class WalletMiniscriptTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -61,6 +94,61 @@ class WalletMiniscriptTest(BitcoinTestFramework):
         utxo = self.ms_wo_wallet.listunspent(minconf=0, addresses=[addr])[0]
         assert utxo["txid"] == txid and utxo["solvable"]
 
+    def signing_test(self, ms, sequence, locktime):
+        self.log.info(f"Importing private Miniscript '{ms}'")
+        desc = descsum_create(f"wsh({ms})")
+        assert self.ms_sig_wallet.importdescriptors(
+            [
+                {
+                    "desc": desc,
+                    "active": True,
+                    "range": 0,
+                    "next_index": 0,
+                    "timestamp": "now",
+                }
+            ]
+        )[0]["success"]
+
+        self.log.info("Generating an address for it and testing it detects funds")
+        addr = self.ms_sig_wallet.getnewaddress()
+        txid = self.funder.sendtoaddress(addr, 0.01)
+        self.wait_until(lambda: txid in self.funder.getrawmempool())
+        self.funder.generatetoaddress(1, self.funder.getnewaddress())
+        utxo = self.ms_sig_wallet.listunspent(addresses=[addr])[0]
+        assert txid == utxo["txid"] and utxo["solvable"]
+
+        self.log.info(
+            "Creating, signing, and broadcasting a transaction spending these funds"
+        )
+        dest_addr = self.funder.getnewaddress()
+        seq = sequence if sequence is not None else 0xFFFFFFFF - 2
+        lt = locktime if locktime is not None else 0
+        psbt = self.ms_sig_wallet.createpsbt(
+            [
+                {
+                    "txid": txid,
+                    "vout": utxo["vout"],
+                    "sequence": seq,
+                }
+            ],
+            [{dest_addr: 0.009}],
+            lt,
+        )
+        res = self.ms_sig_wallet.walletprocesspsbt(psbt)
+        assert res["complete"]
+        res = self.ms_sig_wallet.finalizepsbt(res["psbt"])
+        assert res["complete"]
+        # If necessary, satisfy a relative timelock
+        if sequence is not None:
+            self.funder.generatetoaddress(sequence, self.funder.getnewaddress())
+        # If necessary, satisfy an absolute timelock
+        height = self.funder.getblockcount()
+        if locktime is not None and height < locktime:
+            self.funder.generatetoaddress(
+                locktime - height, self.funder.getnewaddress()
+            )
+        self.ms_sig_wallet.sendrawtransaction(res["hex"])
+
     def run_test(self):
         self.log.info("Making a descriptor wallet")
         self.funder = self.nodes[0].get_wallet_rpc(self.default_wallet_name)
@@ -68,6 +156,8 @@ class WalletMiniscriptTest(BitcoinTestFramework):
             wallet_name="ms_wo", descriptors=True, disable_private_keys=True
         )
         self.ms_wo_wallet = self.nodes[0].get_wallet_rpc("ms_wo")
+        self.nodes[0].createwallet(wallet_name="ms_sig", descriptors=True)
+        self.ms_sig_wallet = self.nodes[0].get_wallet_rpc("ms_sig")
 
         # Sanity check we wouldn't let an insane Miniscript descriptor in
         res = self.ms_wo_wallet.importdescriptors(
@@ -87,6 +177,10 @@ class WalletMiniscriptTest(BitcoinTestFramework):
         # Test we can track any type of Miniscript
         for ms in MINISCRIPTS:
             self.watchonly_test(ms)
+
+        # Test we can sign most Miniscript (all but ones requiring preimages, for now)
+        for ms in MINISCRIPTS_PRIV:
+            self.signing_test(ms["ms"], ms["sequence"], ms["locktime"])
 
 
 if __name__ == "__main__":
