@@ -178,34 +178,137 @@ using miniscript::operator"" _mst;
 //! Construct a miniscript node as a shared_ptr.
 template<typename... Args> NodeRef MakeNodeRef(Args&&... args) { return miniscript::MakeNodeRef<CPubKey>(std::forward<Args>(args)...); }
 
-/** A QueueElem represents (partial) information about a miniscript Node to be constructed in GenNode(). */
-struct QueueElem {
-    /** What miniscript type is required. */
-    miniscript::Type typ;
-    /** If already decided, what Fragment to use, and how many children. */
-    std::optional<std::pair<Fragment, unsigned>> info;
+/** Information about a yet to be constructed Miniscript node. */
+struct NodeInfo {
+    //! The type of this node
+    Fragment fragment;
+    //! Number of subs of this node
+    uint8_t n_subs;
+    //! The timelock value for older() and after(), the threshold value for multi() and thresh()
+    uint32_t k;
+    //! Keys for this node, if it has some
+    std::vector<CPubKey> keys;
+    //! The hash value for this node, if it has one
+    std::vector<unsigned char> hash;
 
-    /** Construct an invalid QueueElem. */
-    QueueElem() : typ(""_mst) {}
-    /** Construct a QueueElem that permits an arbitrary node of specified type. */
-    QueueElem(miniscript::Type typ_) : typ(typ_) {}
-    /** Construct a QueueElem that permits a specific Fragment, with no children. */
-    QueueElem(Fragment nt_) : typ(""_mst), info({nt_, 0}) {}
+    NodeInfo(Fragment frag): fragment(frag), n_subs(0), k(0) {}
+    NodeInfo(Fragment frag, CPubKey key): fragment(frag), n_subs(0), k(0), keys({key}) {}
+    NodeInfo(Fragment frag, uint32_t _k): fragment(frag), n_subs(0), k(_k) {}
+    NodeInfo(Fragment frag, std::vector<unsigned char> h): fragment(frag), n_subs(0), k(0), hash(h) {}
+    NodeInfo(Fragment frag, uint8_t subs): fragment(frag), n_subs(subs), k(0) {}
+    NodeInfo(Fragment frag, uint32_t _k, uint8_t subs): fragment(frag), n_subs(subs), k(_k) {}
+    NodeInfo(Fragment frag, uint32_t _k, std::vector<CPubKey> _keys): fragment(frag), n_subs(0), k(_k), keys(_keys) {}
 };
 
-/** Helper for modifying the GenNode todo list. */
-template<typename... Args>
-void Plan(std::vector<QueueElem>& todo, Fragment nt, Args... args)
-{
-    auto& elem = todo.back();
-    assert(!elem.info.has_value());
-    elem.info = {nt, sizeof...(args)};
-    todo.resize(todo.size() + sizeof...(args));
-    int pos{0};
-    ( (*(todo.rbegin() + (pos++)) = QueueElem{args}, 0), ...);
-}
+/** A QueueElem represents (partial) information about a miniscript Node to be constructed in GenNode(). */
+struct QueueElem {
+    /** If already decided, what Fragment to use, and how many children. */
+    std::optional<NodeInfo> info;
+
+    /** Construct an invalid QueueElem. */
+    QueueElem() {}
+};
 
 std::set<std::pair<Fragment, miniscript::Type>> types;
+
+/** Pick an index in a collection from a single byte in the fuzzer's output. */
+template<typename T, typename A>
+T ConsumeIndex(FuzzedDataProvider& provider, A& col) {
+    const uint8_t i = provider.ConsumeIntegral<uint8_t>();
+    return col[i];
+}
+
+CPubKey ConsumePubKey(FuzzedDataProvider& provider) {
+    return ConsumeIndex<CPubKey>(provider, TEST_DATA.dummy_keys);
+}
+
+std::vector<unsigned char> ConsumeSha256(FuzzedDataProvider& provider) {
+    return ConsumeIndex<std::vector<unsigned char>>(provider, TEST_DATA.sha256);
+}
+
+std::vector<unsigned char> ConsumeHash256(FuzzedDataProvider& provider) {
+    return ConsumeIndex<std::vector<unsigned char>>(provider, TEST_DATA.hash256);
+}
+
+std::vector<unsigned char> ConsumeRipemd160(FuzzedDataProvider& provider) {
+    return ConsumeIndex<std::vector<unsigned char>>(provider, TEST_DATA.ripemd160);
+}
+
+std::vector<unsigned char> ConsumeHash160(FuzzedDataProvider& provider) {
+    return ConsumeIndex<std::vector<unsigned char>>(provider, TEST_DATA.hash160);
+}
+
+std::optional<uint32_t> ConsumeTimeLock(FuzzedDataProvider& provider) {
+    const uint32_t k = provider.ConsumeIntegral<uint32_t>();
+    if (k == 0 || k >= 0x80000000) return {};
+    return k;
+}
+
+/**
+ * Consume a Miniscript node from the fuzzer's output.
+ *
+ * This defines a very basic binary encoding for a Miniscript node:
+ *  - The first byte sets the type of the fragment. 0, 1 and all non-leaf fragments buth thresh() are single
+ *    byte.
+ *  - For the other leaf fragments, the following bytes depend on their type.
+ *    - For older() and after(), the next 4 bytes define the timelock value.
+ *    - For pk_k(), pk_h(), and all hashes, the next byte defines the index of the value in the test data.
+ *    - For multi(), the next 2 bytes define respectively the threshold and the number of keys. Then as many
+ *      bytes as the number of keys define the index of each key in the test data.
+ *    - For thresh(), the next byte defines the threshold value and the following one the number of subs.
+ */
+std::optional<NodeInfo> ConsumeNode(FuzzedDataProvider& provider) {
+    switch (provider.ConsumeIntegral<uint8_t>()) {
+        case 0: return NodeInfo(Fragment::JUST_0);
+        case 1: return NodeInfo(Fragment::JUST_1);
+        case 2: return NodeInfo(Fragment::PK_K, ConsumePubKey(provider));
+        case 3: return NodeInfo(Fragment::PK_H, ConsumePubKey(provider));
+        case 4: {
+            const auto k = ConsumeTimeLock(provider);
+            return k ? NodeInfo(Fragment::OLDER, *k) : std::optional<NodeInfo>{};
+        }
+        case 5: {
+            const auto k = ConsumeTimeLock(provider);
+            return k ? NodeInfo(Fragment::AFTER, *k) : std::optional<NodeInfo>{};
+        }
+        case 6: return NodeInfo(Fragment::SHA256, ConsumeSha256(provider));
+        case 7: return NodeInfo(Fragment::HASH256, ConsumeHash256(provider));
+        case 8: return NodeInfo(Fragment::RIPEMD160, ConsumeRipemd160(provider));
+        case 9: return NodeInfo(Fragment::HASH160, ConsumeHash160(provider));
+        case 10: {
+            const auto k = provider.ConsumeIntegral<uint8_t>();
+            const auto n_keys = provider.ConsumeIntegral<uint8_t>();
+            if (n_keys > 20 || k == 0 || k > n_keys) return {};
+            std::vector<CPubKey> keys{n_keys};
+            for (auto& key: keys) key = ConsumePubKey(provider);
+            return NodeInfo(Fragment::MULTI, k, keys);
+        }
+        case 11: return NodeInfo(Fragment::ANDOR, uint8_t{3});
+        case 12: return NodeInfo(Fragment::AND_V, uint8_t{2});
+        case 13: return NodeInfo(Fragment::AND_B, uint8_t{2});
+        case 15: return NodeInfo(Fragment::OR_B, uint8_t{2});
+        case 16: return NodeInfo(Fragment::OR_C, uint8_t{2});
+        case 17: return NodeInfo(Fragment::OR_D, uint8_t{2});
+        case 18: return NodeInfo(Fragment::OR_I, uint8_t{2});
+        case 19: {
+            auto k = provider.ConsumeIntegral<uint8_t>();
+            auto n_subs = provider.ConsumeIntegral<uint8_t>();
+            if (k == 0 || k > n_subs) return {};
+            return NodeInfo(Fragment::THRESH, k, n_subs);
+        }
+        case 20: return NodeInfo(Fragment::WRAP_A, uint8_t{1});
+        case 21: return NodeInfo(Fragment::WRAP_S, uint8_t{1});
+        case 22: return NodeInfo(Fragment::WRAP_C, uint8_t{1});
+        case 23: return NodeInfo(Fragment::WRAP_D, uint8_t{1});
+        case 24: return NodeInfo(Fragment::WRAP_V, uint8_t{1});
+        case 25: return NodeInfo(Fragment::WRAP_J, uint8_t{1});
+        case 26: return NodeInfo(Fragment::WRAP_N, uint8_t{1});
+        default: return {};
+    }
+
+    assert(false);
+    return {};
+}
 
 /**
  * Generate a Miniscript node based on the fuzzer's input.
@@ -214,175 +317,43 @@ NodeRef GenNode(FuzzedDataProvider& provider, const miniscript::Type typ) {
     /** A stack of miniscript Nodes being built up. */
     std::vector<NodeRef> stack;
     /** The queue of instructions. */
-    std::vector<QueueElem> todo{QueueElem{typ}};
+    std::vector<QueueElem> todo{QueueElem()};
 
     while (!todo.empty()) {
         // The expected type we have to construct.
-        miniscript::Type typ = todo.back().typ;
         if (!todo.back().info.has_value()) {
             // Fragment/children have not been decided yet. Decide them.
-
-            // Not all type properties are implemented in the match logic below,
-            // so strip away the ones we cannot discern. When the node is actually
-            // constructed, we compare the full requested type properties.
-            typ = typ & "BVWKzondu"_mst;
-            // Helper for computing the child nodes' type properties.
-            auto basetype = "BVK"_mst & typ;
-
-            // Fragcode selects which of the (applicable) matching rules below is selected.
-            // Every rule, if it matches, checks if fragcode has reached 0, and if so,
-            // the rule is used. If not, fragcode is decremented and we continue to the
-            // next rule. This is performed in a loop so that if all rules were tried,
-            // and fragcode hasn't reached 0 yet, we start over. This avoids the need to
-            // count the number of matching rules up front.
-            int fragcode = provider.ConsumeIntegralInRange<uint8_t>(0, 63);
-            while (true) {
-                /* Count how many matching rules we have, so that if there are none
-                 * we can abort instead of looping forever. */
-                int candidates = 0;
-                if ("Bzud"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::JUST_0); // 0
-                } else if ("Bzu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::JUST_1); // 1
-                } else if ("Kondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::PK_K); // pk_k
-                } else if ("Kndu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::PK_H); // pk_h
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_C, Fragment::PK_K); // pk
-                } else if ("Bndu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_C, Fragment::PK_H); // pkh
-                } else if ("Bz"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::OLDER); // older
-                } else if ("Bz"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::AFTER); // after
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::SHA256); // sha256
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::RIPEMD160); // ripemd160
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::HASH256); // hash256
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::HASH160); // hash160
-                } else if ("Bndu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::MULTI); // multi
-                } else if ("Wdu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_A, "B"_mst); // a:
-                } else if ("Wdu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_S, "Bo"_mst); // s:
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_C, "K"_mst); // c:
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_D, "Vz"_mst); // d:
-                } else if ("Vzon"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_V, "B"_mst); // d:
-                } else if ("Bondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_J, "Bn"_mst); // j:
-                } else if ("Bzondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::WRAP_N, "B"_mst); // n:
-                } else if ("Boud"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::OR_I, Fragment::JUST_0, "B"_mst); // l:
-                } else if ("Boud"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::OR_I, "B"_mst, Fragment::JUST_0); // u:
-                } else if ("BVKzonu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::AND_V, "V"_mst, basetype); // and_v
-                } else if ("Bzondu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::AND_B, "B"_mst, "W"_mst); // and_b
-                } else if ("Bzoud"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::ANDOR, "Bdu"_mst, basetype, Fragment::JUST_0); // and_n
-                } else if ("Bzodu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::OR_B, "Bd"_mst, "Wd"_mst); // or_b
-                } else if ("Vzo"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::OR_C, "Bdu"_mst, "V"_mst); // or_c
-                } else if ("Bzodu"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::OR_D, "Bdu"_mst, "B"_mst); // or_d
-                } else if ("BKVoud"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::OR_I, basetype, basetype); // or_i
-                } else if ("BVKzoud"_mst << typ && ++candidates && !(fragcode--)) {
-                    Plan(todo, Fragment::ANDOR, "Bdu"_mst, basetype, basetype); // andor
-                } else if ("Bzodu"_mst << typ && ++candidates && !(fragcode--)) {
-                    // thresh()
-                    auto children = provider.ConsumeIntegralInRange<uint32_t>(1, MAX_OPS_PER_SCRIPT / 2);
-                    todo.back().info = {Fragment::THRESH, children};
-                    todo.reserve(todo.size() + children);
-                    for (uint32_t i = 1; i < children; ++i) todo.emplace_back("Wdu"_mst);
-                    todo.emplace_back("Bdu"_mst);
-                } else if (candidates == 0) {
-                    // This typ value has no applicable rules. Abort.
-                    return {};
-                } else {
-                    // One or more fragments were applicable, but fragcode hadn't reached 0 yet.
-                    // Loop again.
-                    continue;
-                }
-                // If we reach this line, a fragment was selected.
-                break;
-            }
+            const auto node_info = ConsumeNode(provider);
+            if (!node_info) return {};
+            todo.back().info = node_info;
+            for (uint8_t i = 0; i < node_info->n_subs; i++) todo.push_back(QueueElem());
         } else {
             // The back of todo has nodetype and number of children decided, and
             // those children have been constructed at the back of stack. Pop
             // that entry off todo, and use it to construct a new NodeRef on
             // stack.
-            auto [nodetype, children] = *todo.back().info;
-            todo.pop_back();
+            const NodeInfo& info = *todo.back().info;
             // Gather children from the back of stack.
             std::vector<NodeRef> sub;
-            sub.reserve(children);
-            for (size_t i = 0; i < children; ++i) {
-                sub.push_back(std::move(*(stack.end() - children + i)));
+            sub.reserve(info.n_subs);
+            for (size_t i = 0; i < info.n_subs; ++i) {
+                sub.push_back(std::move(*(stack.end() - info.n_subs + i)));
             }
-            stack.erase(stack.end() - children, stack.end());
-            // Additional arguments for construction of NodeRef.
-            uint32_t val = 0;
-            std::vector<unsigned char> arg;
-            std::vector<CPubKey> keys;
-            // Fill in arguments
-            switch (nodetype) {
-                case Fragment::PK_K:
-                case Fragment::PK_H:
-                    keys.push_back(PickValue(provider, TEST_DATA.dummy_keys));
-                    break;
-                case Fragment::MULTI: {
-                    int num_keys = provider.ConsumeIntegralInRange<int>(1, 20);
-                    val = provider.ConsumeIntegralInRange<uint32_t>(1, num_keys);
-                    for (int i = 0; i < num_keys; ++i) keys.push_back(PickValue(provider, TEST_DATA.dummy_keys));
-                    break;
-                }
-                case Fragment::THRESH:
-                    val = provider.ConsumeIntegralInRange<uint32_t>(1, sub.size());
-                    break;
-                case Fragment::AFTER:
-                case Fragment::OLDER:
-                    val = provider.ConsumeIntegralInRange<uint32_t>(1, 0x7FFFFFFF);
-                    break;
-                case Fragment::SHA256:
-                    arg = PickValue(provider, TEST_DATA.sha256);
-                    break;
-                case Fragment::RIPEMD160:
-                    arg = PickValue(provider, TEST_DATA.ripemd160);
-                    break;
-                case Fragment::HASH256:
-                    arg = PickValue(provider, TEST_DATA.hash256);
-                    break;
-                case Fragment::HASH160:
-                    arg = PickValue(provider, TEST_DATA.hash160);
-                    break;
-                default:
-                    break;
-            }
+            stack.erase(stack.end() - info.n_subs, stack.end());
             // Construct new NodeRef.
             NodeRef node;
-            if (keys.empty()) {
-                node = MakeNodeRef(nodetype, std::move(sub), std::move(arg), val);
+            if (info.keys.empty()) {
+                node = MakeNodeRef(info.fragment, std::move(sub), std::move(info.hash), info.k);
             } else {
                 assert(sub.empty());
-                assert(arg.empty());
-                node = MakeNodeRef(nodetype, std::move(keys), val);
+                assert(info.hash.empty());
+                node = MakeNodeRef(info.fragment, std::move(info.keys), info.k);
             }
             // Verify acceptability.
             if (!node || !node->IsValid() || !(node->GetType() << typ)) return {};
             // Move it to the stack.
             stack.push_back(std::move(node));
+            todo.pop_back();
         }
     }
     assert(stack.size() == 1);
@@ -428,7 +399,6 @@ FUZZ_TARGET_INIT(miniscript_random, initialize_miniscript_random)
     auto parsed = miniscript::FromString(str, PARSER_CTX);
     assert(parsed);
     assert(*parsed == *node);
-
 
     // Check both malleable and non-malleable satisfaction. Note that we only assert the produced witness
     // is valid if the Miniscript was sane, as otherwise it could overflow the limits.
