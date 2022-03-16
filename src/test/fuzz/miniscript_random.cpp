@@ -410,6 +410,216 @@ std::optional<NodeInfo> ConsumeNodeSmart(FuzzedDataProvider& provider, miniscrip
     return {};
 }
 
+// As they are repeated several times in the mappings below, we class the fragment by
+// their types and *possible* properties. There are therefore groups with conflicting
+// properties. It's fine, the right one will be chosen by ConsumeNodeSmartMap.
+// See the properties table on https://bitcoin.sipa.be/miniscript/.
+
+// Base types
+// o; n; d; u
+#define B_DNOU Fragment::SHA256, Fragment::HASH256, Fragment::RIPEMD160, Fragment::HASH160, Fragment::WRAP_D
+// z; o; d; u
+#define B_DOUZ Fragment::OR_D
+// n; d; u
+#define B_DNU Fragment::MULTI
+// z; u; d
+#define B_DUZ Fragment::JUST_0
+// n; d
+#define B_DN Fragment::WRAP_J
+// d; u
+#define B_DU Fragment::OR_B, Fragment::THRESH
+// z; u
+#define B_UZ Fragment::JUST_1
+// u
+#define B_U Fragment::AND_B, Fragment::WRAP_C, Fragment::WRAP_N
+// z
+#define B_Z Fragment::OLDER, Fragment::AFTER
+
+// Key types
+// o; n; d; u
+#define K_DNOU Fragment::PK_K
+// n; d; u
+#define K_DNU Fragment::PK_H
+
+// Verify types
+// z; o; n
+#define V_NOZ Fragment::WRAP_V
+// z; o
+#define V_OZ Fragment::OR_C
+
+// Wrapped types
+// d; u
+#define W_DU Fragment::WRAP_A, Fragment::WRAP_S
+
+// Base, Key, or Verify types
+// z; o; u; d
+#define DOUZ Fragment::ANDOR
+// o; u; d
+#define DOU Fragment::OR_I
+// z; o; n; u
+#define NOUZ Fragment::AND_V
+
+// A mapping from properties that may be asked to the possible B fragments that
+// *can* have these properties.
+std::map<miniscript::Type, std::vector<Fragment>> base_fragments = {
+    {"dnou"_mst, {B_DNOU}},
+    {"dno"_mst, {B_DNOU}},
+    {"dnu"_mst, {B_DNOU, B_DNU}},
+    {"dou"_mst, {B_DNOU, B_DOUZ, DOUZ, DOU}},
+    {"duz"_mst, {B_DUZ, B_DOUZ, DOUZ}},
+    {"nou"_mst, {B_DNOU, NOUZ}},
+    {"do"_mst, {B_DNOU, B_DOUZ, DOUZ, DOU}},
+    {"dn"_mst, {B_DNOU, B_DNU, B_DN}},
+    {"du"_mst, {B_DNOU, B_DOUZ, B_DNU, B_DUZ, B_DU, DOUZ, DOU}},
+    {"dz"_mst, {B_DOUZ, B_DUZ, DOUZ}},
+    {"no"_mst, {B_DNOU, NOUZ}},
+    {"nu"_mst, {B_DNOU, B_DNU, NOUZ}},
+    {"ou"_mst, {B_DNOU, B_DOUZ, DOUZ, NOUZ, DOU}},
+    {"uz"_mst, {B_DOUZ, B_DUZ, B_UZ, DOUZ, NOUZ}},
+    {"d"_mst, {B_DNOU, B_DOUZ, B_DNU, B_DUZ, B_DN, B_DU, DOUZ, DOU}},
+    {"n"_mst, {B_DNOU, B_DNU, B_DN, NOUZ}},
+    {"o"_mst, {B_DNOU, B_DOUZ, DOUZ, NOUZ, DOU}},
+    {"u"_mst, {B_DNOU, B_DOUZ, B_DNU, B_DUZ, B_DU, B_UZ, B_U, DOUZ, NOUZ, DOU}},
+    {"z"_mst, {B_DOUZ, B_DUZ, B_UZ, B_Z, DOUZ, NOUZ}},
+    {""_mst, {B_DNOU, B_DOUZ, B_DNU, B_DUZ, B_DN, B_DU, B_UZ, B_U, B_Z, DOUZ, NOUZ, DOU}}, // Any property
+};
+
+// A mapping from properties that may be asked to the possible K fragments that
+// *can* have these properties.
+// Note the K fragments can never have the 'z' property.
+std::map<miniscript::Type, std::vector<Fragment>> key_fragments = {
+    {"dnou"_mst, {K_DNOU}},
+    {"dno"_mst, {K_DNOU}},
+    {"dnu"_mst, {K_DNOU, K_DNU}},
+    {"dou"_mst, {K_DNOU, DOUZ, DOU}},
+    {"nou"_mst, {K_DNOU, NOUZ}},
+    {"do"_mst, {K_DNOU, DOUZ, DOU}},
+    {"dn"_mst, {K_DNOU, K_DNU}},
+    {"du"_mst, {K_DNOU, K_DNU, DOUZ, DOU}},
+    {"no"_mst, {K_DNOU, NOUZ}},
+    {"nu"_mst, {K_DNOU, K_DNU, NOUZ}},
+    {"ou"_mst, {K_DNOU, DOUZ, NOUZ, DOU}},
+    {"d"_mst, {K_DNOU, K_DNU, DOUZ, DOU}},
+    {"n"_mst, {K_DNOU, K_DNU, NOUZ}},
+    {"o"_mst, {K_DNOU, DOUZ, NOUZ, DOU}},
+    {"u"_mst, {K_DNOU, K_DNU, DOUZ, NOUZ, DOU}},
+    {""_mst, {K_DNOU, K_DNU, DOUZ, NOUZ, DOU}}, // Any property
+};
+
+// A mapping from properties that may be asked to the possible V fragments that
+// *can* have these properties.
+std::map<miniscript::Type, std::vector<Fragment>> verify_fragments = {
+    {"dou"_mst, {DOUZ, DOU}},
+    {"duz"_mst, {DOUZ}},
+    {"nou"_mst, {B_DNOU, NOUZ}},
+    {"do"_mst, {DOUZ, DOU}},
+    {"du"_mst, {DOUZ, DOU}},
+    {"dz"_mst, {DOUZ}},
+    {"no"_mst, {V_NOZ, NOUZ}},
+    {"nu"_mst, {NOUZ}},
+    {"ou"_mst, {DOUZ, NOUZ, DOU}},
+    {"uz"_mst, {DOUZ, NOUZ}},
+    {"d"_mst, {DOUZ, DOU}},
+    {"n"_mst, {V_NOZ, NOUZ}},
+    {"o"_mst, {V_NOZ, V_OZ, DOUZ, NOUZ, DOU}},
+    {"u"_mst, {DOUZ, NOUZ, DOU}},
+    {"z"_mst, {V_NOZ, V_OZ, DOUZ, NOUZ}},
+    {""_mst, {V_NOZ, V_OZ, DOUZ, NOUZ, DOU}}, // Any property
+};
+
+// A mapping from properties that may be asked to the possible W fragments that
+// *can* have these properties.
+std::map<miniscript::Type, std::vector<Fragment>> wrapped_fragments = {
+    {"du"_mst, {W_DU}},
+    {"d"_mst, {W_DU}},
+    {"u"_mst, {W_DU}},
+    {""_mst, {W_DU}}, // Any property
+};
+
+// A mapping from type to the existing fragments for these types, keyed by available
+// properties.
+std::map<miniscript::Type, std::map<miniscript::Type, std::vector<Fragment>>> fragments = {
+    {"B"_mst, base_fragments},
+    {"K"_mst, key_fragments},
+    {"V"_mst, verify_fragments},
+    {"W"_mst, wrapped_fragments},
+    // FIXME: K, V and W are awfully done in initialize_miniscript_random as i can't find a way to have B + K + V + W here
+    {""_mst, base_fragments}, // Any type.
+};
+
+/**
+ * Consume a Miniscript node from the fuzzer's output.
+ *
+ * Same as ConsumeNodeSmart, but uses a mapping instead of a loop.
+ */
+std::optional<NodeInfo> ConsumeNodeSmartMap(FuzzedDataProvider& provider, miniscript::Type type_needed) {
+    // If no bytes remain in provider, abort. This prevents infinite loops.
+    if (provider.remaining_bytes() == 0) return {};
+
+    // Get the possible fragments for the requested type and properties from the mapping.
+    // Then make the fuzzer 'choose' which of the possible fragments to use.
+    const auto typ = type_needed & "BKVW"_mst;
+    const auto props = type_needed & "dnouz"_mst;
+    const auto possible_frags = fragments[typ][props];
+    assert(possible_frags.size() > 0);
+    const size_t index = provider.ConsumeIntegralInRange<size_t>(0, possible_frags.size() - 1);
+    const auto frag = possible_frags[index];
+
+    // Helpers for properties pass-through
+    // FIXME: should we try to pass more properties even if that means more combinations?
+    auto tz = props & "z"_mst;
+    auto toz = "z"_mst.If(props << "o"_mst);
+    auto to = props & "o"_mst;
+    auto tn = props & "n"_mst;
+    auto td = props & "d"_mst;
+    auto tu = props & "u"_mst;
+
+    switch (frag) {
+        case Fragment::JUST_0:
+        case Fragment::JUST_1: return {{frag}};
+        case Fragment::PK_K:
+        case Fragment::PK_H: return {{frag, ConsumePubKey(provider)}};
+        case Fragment::OLDER:
+        case Fragment::AFTER: return {{frag, provider.ConsumeIntegralInRange<uint32_t>(1, 0x7FFFFFF)}};
+        case Fragment::SHA256: return {{frag, PickValue(provider, TEST_DATA.sha256)}};
+        case Fragment::RIPEMD160: return {{frag, PickValue(provider, TEST_DATA.ripemd160)}};
+        case Fragment::HASH256: return {{frag, PickValue(provider, TEST_DATA.hash256)}};
+        case Fragment::HASH160: return {{frag, PickValue(provider, TEST_DATA.hash160)}};
+        case Fragment::MULTI: {
+            const auto n_keys = provider.ConsumeIntegralInRange<uint8_t>(1, 20);
+            const auto k = provider.ConsumeIntegralInRange<uint8_t>(1, n_keys);
+            std::vector<CPubKey> keys{n_keys};
+            for (auto& key: keys) key = ConsumePubKey(provider);
+            return {{frag, k, std::move(keys)}};
+        }
+        case Fragment::AND_V: return {{{"V"_mst | tz, typ | tz | tu}, frag}};
+        case Fragment::AND_B: return {{{"B"_mst | tz | td, "W"_mst | tz | td}, frag}};
+        case Fragment::OR_B: return {{{"Bd"_mst | tz, "Wd"_mst | tz}, frag}};
+        case Fragment::OR_C: return {{{"Bdu"_mst | tz | to, "V"_mst | tz | toz}, frag}};
+        case Fragment::OR_D: return {{{"Bdu"_mst | tz | to, "B"_mst | tz | td | tu | toz}, frag}};
+        case Fragment::OR_I: return {{{typ | toz | tu, "B"_mst | toz | tu}, frag}};
+        case Fragment::ANDOR: return {{{"Bdu"_mst | tz, typ | tz | tu, typ | tz | tu | td}, frag}};
+        case Fragment::THRESH: {
+            auto children = provider.ConsumeIntegralInRange<uint32_t>(1, MAX_OPS_PER_SCRIPT / 2);
+            auto k = provider.ConsumeIntegralInRange<uint32_t>(1, children);
+            std::vector<miniscript::Type> subt{children - 1, "Wdu"_mst};
+            subt.push_back("Bdu"_mst);
+            return {{std::move(subt), frag, k}};
+        }
+        case Fragment::WRAP_A: return {{{"B"_mst | td | tu}, frag}};
+        case Fragment::WRAP_S: return {{{"Bo"_mst | td | tu}, frag}};
+        case Fragment::WRAP_C: return {{{"K"_mst | to | tn | td}, frag}};
+        case Fragment::WRAP_D: return {{{"Vz"_mst}, frag}};
+        case Fragment::WRAP_V: return {{{"B"_mst | tz | to | tn}, frag}};
+        case Fragment::WRAP_J: return {{{"Bn"_mst | to | tu}, frag}};
+        case Fragment::WRAP_N: return {{{"B"_mst | tz | to | tn | td}, frag}};
+        default: break;
+    }
+
+    assert(false);
+    return {};
+}
+
 /**
  * Generate a Miniscript node based on the fuzzer's input.
  */
@@ -471,6 +681,11 @@ void initialize_miniscript_random() {
     PARSER_CTX.test_data = &TEST_DATA;
     SATISFIER_CTX.test_data = &TEST_DATA;
     CHECKER_CTX.test_data = &TEST_DATA;
+
+    // FIXME: can't we do that statically?
+    fragments[""_mst].merge(key_fragments);
+    fragments[""_mst].merge(verify_fragments);
+    fragments[""_mst].merge(wrapped_fragments);
 }
 
 /** Perform various applicable tests on a miniscript Node. */
@@ -620,5 +835,14 @@ FUZZ_TARGET_INIT(miniscript_random_smart, initialize_miniscript_random)
     FuzzedDataProvider provider(buffer.data(), buffer.size());
     TestNode(GenNode([&](miniscript::Type needed_type) {
         return ConsumeNodeSmart(provider, needed_type);
+    }), provider);
+}
+
+/** Fuzz target that runs TestNode on nodes generated using ConsumeNodeSmart. */
+FUZZ_TARGET_INIT(miniscript_random_smart_map, initialize_miniscript_random)
+{
+    FuzzedDataProvider provider(buffer.data(), buffer.size());
+    TestNode(GenNode([&](miniscript::Type needed_type) {
+        return ConsumeNodeSmartMap(provider, needed_type);
     }), provider);
 }
