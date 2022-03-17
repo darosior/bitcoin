@@ -547,6 +547,31 @@ std::map<miniscript::Type, std::map<miniscript::Type, std::vector<Fragment>>> fr
     {""_mst, base_fragments}, // Any type.
 };
 
+// If the parent needs the 'o' property, the conditions are always of the form 'o=zXoYoZ or oXzYzZ'
+// or 'o=zXoY or zYoX' (same without a Z sub) for 'andor', 'and_v', 'and_b', 'or_b'.
+void adaptO(FuzzedDataProvider& provider, miniscript::Type x, miniscript::Type y, miniscript::Type z) {
+    if (provider.ConsumeBool()) {
+        x = x | "z"_mst;
+        y = y | "o"_mst;
+        z = z | "o"_mst;
+    } else {
+        x = x | "o"_mst;
+        y = y | "z"_mst;
+        z = z | "z"_mst;
+    }
+}
+
+// If the parent needs the 'n' property, the conditions are always 'n=nX or zXnY' for 'and_v'
+// and 'and_b'.
+void adaptN(FuzzedDataProvider& provider, miniscript::Type x, miniscript::Type y) {
+    if (provider.ConsumeBool()) {
+        x = x | "n"_mst;
+    } else {
+        x = x | "z"_mst;
+        y = y | "n"_mst;
+    }
+}
+
 /**
  * Consume a Miniscript node from the fuzzer's output.
  *
@@ -592,18 +617,37 @@ std::optional<NodeInfo> ConsumeNodeSmartMap(FuzzedDataProvider& provider, minisc
             for (auto& key: keys) key = ConsumePubKey(provider);
             return {{frag, k, std::move(keys)}};
         }
-        case Fragment::AND_V: return {{{"V"_mst | tz, typ | tz | tu}, frag}};
-        case Fragment::AND_B: return {{{"B"_mst | tz | td, "W"_mst | tz | td}, frag}};
-        case Fragment::OR_B: return {{{"Bd"_mst | tz, "Wd"_mst | tz}, frag}};
+        case Fragment::AND_V: {
+            miniscript::Type x{"V"_mst | tz}, y{typ | tz | tu}, z{""_mst};
+            if (props << "o"_mst) adaptO(provider, x, y, z);
+            if (props << "n"_mst) adaptN(provider, x, y);
+            return {{{x, y}, frag}};
+        }
+        case Fragment::AND_B: {
+            miniscript::Type x{"B"_mst | tz | td}, y{"W"_mst | tz | td}, z{""_mst};
+            if (props << "o"_mst) adaptO(provider, x, y, z);
+            if (props << "n"_mst) adaptN(provider, x, y);
+            return {{{x, y}, frag}};
+        }
+        case Fragment::OR_B: {
+            miniscript::Type x{"Bd"_mst | tz}, y{"Wd"_mst | tz}, z{""_mst};
+            if (props << "o"_mst) adaptO(provider, x, y, z);
+            return {{{x, z}, frag}};
+        }
         case Fragment::OR_C: return {{{"Bdu"_mst | tz | to, "V"_mst | tz | toz}, frag}};
         case Fragment::OR_D: return {{{"Bdu"_mst | tz | to, "B"_mst | tz | td | tu | toz}, frag}};
         case Fragment::OR_I: return {{{typ | toz | tu, "B"_mst | toz | tu}, frag}};
-        case Fragment::ANDOR: return {{{"Bdu"_mst | tz, typ | tz | tu, typ | tz | tu | td}, frag}};
+        case Fragment::ANDOR: {
+            miniscript::Type x{"Bdu"_mst | tz}, y{typ | tz | tu}, z{typ | tz | tu | td};
+            if (props << "o"_mst) adaptO(provider, x, y, z);
+            return {{{x, y, z}, frag}};
+        }
         case Fragment::THRESH: {
             auto children = provider.ConsumeIntegralInRange<uint32_t>(1, MAX_OPS_PER_SCRIPT / 2);
             auto k = provider.ConsumeIntegralInRange<uint32_t>(1, children);
-            std::vector<miniscript::Type> subt{children - 1, "Wdu"_mst};
-            subt.push_back("Bdu"_mst);
+            // z=all are z; o=all are z except one is o; d; u
+            std::vector<miniscript::Type> subt{children - 1, "Wdu"_mst | tz | toz};
+            subt.push_back("Bdu"_mst | tz | to);
             return {{std::move(subt), frag, k}};
         }
         case Fragment::WRAP_A: return {{{"B"_mst | td | tu}, frag}};
