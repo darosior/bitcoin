@@ -352,18 +352,18 @@ void Check(const std::string& prv, const std::string& pub, const std::string& no
     // Replace apostrophes with 'h' in prv but not in pub, if apostrophes are found in prv
     if (prv.find('\'') != std::string::npos) {
         found_apostrophes_in_prv = true;
-        DoCheck(prv, pub, norm_prv, norm_pub, flags, scripts, type, paths, /* replace_apostrophe_with_h_in_prv = */true, /*replace_apostrophe_with_h_in_pub = */false);
+        DoCheck(prv, pub, norm_prv, norm_pub, flags, scripts, type, paths, /*replace_apostrophe_with_h_in_prv=*/true, /*replace_apostrophe_with_h_in_pub=*/false);
     }
 
     // Replace apostrophes with 'h' in pub but not in prv, if apostrophes are found in pub
     if (pub.find('\'') != std::string::npos) {
         found_apostrophes_in_pub = true;
-        DoCheck(prv, pub, norm_prv, norm_pub, flags, scripts, type, paths, /* replace_apostrophe_with_h_in_prv = */false, /*replace_apostrophe_with_h_in_pub = */true);
+        DoCheck(prv, pub, norm_prv, norm_pub, flags, scripts, type, paths, /*replace_apostrophe_with_h_in_prv=*/false, /*replace_apostrophe_with_h_in_pub=*/true);
     }
 
     // Replace apostrophes with 'h' both in prv and in pub, if apostrophes are found in both
     if (found_apostrophes_in_prv && found_apostrophes_in_pub) {
-        DoCheck(prv, pub, norm_prv, norm_pub, flags, scripts, type, paths, /* replace_apostrophe_with_h_in_prv = */true, /*replace_apostrophe_with_h_in_pub = */true);
+        DoCheck(prv, pub, norm_prv, norm_pub, flags, scripts, type, paths, /*replace_apostrophe_with_h_in_prv=*/true, /*replace_apostrophe_with_h_in_pub=*/true);
     }
 }
 
