@@ -466,6 +466,165 @@ private:
         return SanitizeType(ComputeType(fragment, x, y, z, sub_types, k, data.size(), subs.size(), keys.size()));
     }
 
+    internal::Ops CalcOps() const {
+        switch (fragment) {
+            case Fragment::JUST_1: return {0, 0, {}};
+            case Fragment::JUST_0: return {0, {}, 0};
+            case Fragment::PK_K: return {0, 0, 0};
+            case Fragment::PK_H: return {3, 0, 0};
+            case Fragment::OLDER:
+            case Fragment::AFTER: return {1, 0, {}};
+            case Fragment::SHA256:
+            case Fragment::RIPEMD160:
+            case Fragment::HASH256:
+            case Fragment::HASH160: return {4, 0, {}};
+            case Fragment::AND_V: return {subs[0]->ops.count + subs[1]->ops.count, subs[0]->ops.sat + subs[1]->ops.sat, {}};
+            case Fragment::AND_B: {
+                const auto count{1 + subs[0]->ops.count + subs[1]->ops.count};
+                const auto sat{subs[0]->ops.sat + subs[1]->ops.sat};
+                const auto dsat{subs[0]->ops.dsat + subs[1]->ops.dsat};
+                return {count, sat, dsat};
+            }
+            case Fragment::OR_B: {
+                const auto count{1 + subs[0]->ops.count + subs[1]->ops.count};
+                const auto sat{(subs[0]->ops.sat + subs[1]->ops.dsat) | (subs[1]->ops.sat + subs[0]->ops.dsat)};
+                const auto dsat{subs[0]->ops.dsat + subs[1]->ops.dsat};
+                return {count, sat, dsat};
+            }
+            case Fragment::OR_D: {
+                const auto count{3 + subs[0]->ops.count + subs[1]->ops.count};
+                const auto sat{subs[0]->ops.sat | (subs[1]->ops.sat + subs[0]->ops.dsat)};
+                const auto dsat{subs[0]->ops.dsat + subs[1]->ops.dsat};
+                return {count, sat, dsat};
+            }
+            case Fragment::OR_C: {
+                const auto count{2 + subs[0]->ops.count + subs[1]->ops.count};
+                const auto sat{subs[0]->ops.sat | (subs[1]->ops.sat + subs[0]->ops.dsat)};
+                return {count, sat, {}};
+            }
+            case Fragment::OR_I: {
+                const auto count{3 + subs[0]->ops.count + subs[1]->ops.count};
+                const auto sat{subs[0]->ops.sat | subs[1]->ops.sat};
+                const auto dsat{subs[0]->ops.dsat | subs[1]->ops.dsat};
+                return {count, sat, dsat};
+            }
+            case Fragment::ANDOR: {
+                const auto count{3 + subs[0]->ops.count + subs[1]->ops.count + subs[2]->ops.count};
+                const auto sat{(subs[1]->ops.sat + subs[0]->ops.sat) | (subs[0]->ops.dsat + subs[2]->ops.sat)};
+                const auto dsat{subs[0]->ops.dsat + subs[2]->ops.dsat};
+                return {count, sat, dsat};
+            }
+            case Fragment::MULTI: return {1, (uint32_t)keys.size(), (uint32_t)keys.size()};
+            case Fragment::WRAP_S:
+            case Fragment::WRAP_C:
+            case Fragment::WRAP_N: return {1 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
+            case Fragment::WRAP_A: return {2 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
+            case Fragment::WRAP_D: return {3 + subs[0]->ops.count, subs[0]->ops.sat, 0};
+            case Fragment::WRAP_J: return {4 + subs[0]->ops.count, subs[0]->ops.sat, 0};
+            case Fragment::WRAP_V: return {subs[0]->ops.count + (subs[0]->GetType() << "x"_mst), subs[0]->ops.sat, {}};
+            case Fragment::THRESH: {
+                uint32_t count = 0;
+                auto sats = Vector(internal::MaxInt<uint32_t>(0));
+                for (const auto& sub : subs) {
+                    count += sub->ops.count + 1;
+                    auto next_sats = Vector(sats[0] + sub->ops.dsat);
+                    for (size_t j = 1; j < sats.size(); ++j) next_sats.push_back((sats[j] + sub->ops.dsat) | (sats[j - 1] + sub->ops.sat));
+                    next_sats.push_back(sats[sats.size() - 1] + sub->ops.sat);
+                    sats = std::move(next_sats);
+                }
+                assert(k <= sats.size());
+                return {count, sats[k], sats[0]};
+            }
+        }
+        assert(false);
+    }
+
+    internal::StackSize CalcStackSize() const {
+        switch (fragment) {
+            case Fragment::JUST_0: return {{}, 0};
+            case Fragment::JUST_1:
+            case Fragment::OLDER:
+            case Fragment::AFTER: return {0, {}};
+            case Fragment::PK_K: return {1, 1};
+            case Fragment::PK_H: return {2, 2};
+            case Fragment::SHA256:
+            case Fragment::RIPEMD160:
+            case Fragment::HASH256:
+            case Fragment::HASH160: return {1, {}};
+            case Fragment::ANDOR: {
+                const auto sat{(subs[0]->ss.sat + subs[1]->ss.sat) | (subs[0]->ss.dsat + subs[2]->ss.sat)};
+                const auto dsat{subs[0]->ss.dsat + subs[2]->ss.dsat};
+                return {sat, dsat};
+            }
+            case Fragment::AND_V: return {subs[0]->ss.sat + subs[1]->ss.sat, {}};
+            case Fragment::AND_B: return {subs[0]->ss.sat + subs[1]->ss.sat, subs[0]->ss.dsat + subs[1]->ss.dsat};
+            case Fragment::OR_B: {
+                const auto sat{(subs[0]->ss.dsat + subs[1]->ss.sat) | (subs[0]->ss.sat + subs[1]->ss.dsat)};
+                const auto dsat{subs[0]->ss.dsat + subs[1]->ss.dsat};
+                return {sat, dsat};
+            }
+            case Fragment::OR_C: return {subs[0]->ss.sat | (subs[0]->ss.dsat + subs[1]->ss.sat), {}};
+            case Fragment::OR_D: return {subs[0]->ss.sat | (subs[0]->ss.dsat + subs[1]->ss.sat), subs[0]->ss.dsat + subs[1]->ss.dsat};
+            case Fragment::OR_I: return {(subs[0]->ss.sat + 1) | (subs[1]->ss.sat + 1), (subs[0]->ss.dsat + 1) | (subs[1]->ss.dsat + 1)};
+            case Fragment::MULTI: return {k + 1, k + 1};
+            case Fragment::WRAP_A:
+            case Fragment::WRAP_N:
+            case Fragment::WRAP_S:
+            case Fragment::WRAP_C: return subs[0]->ss;
+            case Fragment::WRAP_D: return {1 + subs[0]->ss.sat, 1};
+            case Fragment::WRAP_V: return {subs[0]->ss.sat, {}};
+            case Fragment::WRAP_J: return {subs[0]->ss.sat, 1};
+            case Fragment::THRESH: {
+                auto sats = Vector(internal::MaxInt<uint32_t>(0));
+                for (const auto& sub : subs) {
+                    auto next_sats = Vector(sats[0] + sub->ss.dsat);
+                    for (size_t j = 1; j < sats.size(); ++j) next_sats.push_back((sats[j] + sub->ss.dsat) | (sats[j - 1] + sub->ss.sat));
+                    next_sats.push_back(sats[sats.size() - 1] + sub->ss.sat);
+                    sats = std::move(next_sats);
+                }
+                assert(k <= sats.size());
+                return {sats[k], sats[0]};
+            }
+        }
+        assert(false);
+    }
+
+    /** Check whether any key is repeated.
+     * This uses a custom key comparator provided by the context in order to still detect duplicates
+     * for more complicated types.
+     */
+    template<typename Ctx> bool ContainsDuplicateKey(const Ctx& ctx) const {
+        // We cannot use a lambda here, as lambdas are non assignable, and the set operations
+        // below require moving the comparators around.
+        struct Comp {
+            const Ctx* ctx_ptr;
+            Comp(const Ctx& ctx) : ctx_ptr(&ctx) {}
+            bool operator()(const Key& a, const Key& b) const { return ctx_ptr->KeyCompare(a, b); }
+        };
+        using set = std::set<Key, Comp>;
+
+        auto upfn = [this, &ctx](const Node& node, Span<set> subs) -> std::optional<set> {
+            if (&node != this && node.duplicate_key) return {};
+
+            size_t keys_count = node.keys.size();
+            set key_set{node.keys.begin(), node.keys.end(), Comp(ctx)};
+            if (key_set.size() != keys_count) return {};
+
+            for (auto& sub: subs) {
+                keys_count += sub.size();
+                // Small optimization: std::set::merge is linear in the size of the second arg but
+                // logarithmic in the size of the first.
+                if (key_set.size() < sub.size()) std::swap(key_set, sub);
+                key_set.merge(sub);
+                if (key_set.size() != keys_count) return {};
+            }
+
+            return key_set;
+        };
+
+        return !TreeEvalMaybe<set>(upfn);
+    }
+
 public:
     template<typename Ctx>
     CScript ToScript(const Ctx& ctx) const
@@ -639,166 +798,6 @@ public:
         return TreeEvalMaybe<std::string>(false, downfn, upfn);
     }
 
-    internal::Ops CalcOps() const {
-        switch (fragment) {
-            case Fragment::JUST_1: return {0, 0, {}};
-            case Fragment::JUST_0: return {0, {}, 0};
-            case Fragment::PK_K: return {0, 0, 0};
-            case Fragment::PK_H: return {3, 0, 0};
-            case Fragment::OLDER:
-            case Fragment::AFTER: return {1, 0, {}};
-            case Fragment::SHA256:
-            case Fragment::RIPEMD160:
-            case Fragment::HASH256:
-            case Fragment::HASH160: return {4, 0, {}};
-            case Fragment::AND_V: return {subs[0]->ops.count + subs[1]->ops.count, subs[0]->ops.sat + subs[1]->ops.sat, {}};
-            case Fragment::AND_B: {
-                const auto count{1 + subs[0]->ops.count + subs[1]->ops.count};
-                const auto sat{subs[0]->ops.sat + subs[1]->ops.sat};
-                const auto dsat{subs[0]->ops.dsat + subs[1]->ops.dsat};
-                return {count, sat, dsat};
-            }
-            case Fragment::OR_B: {
-                const auto count{1 + subs[0]->ops.count + subs[1]->ops.count};
-                const auto sat{(subs[0]->ops.sat + subs[1]->ops.dsat) | (subs[1]->ops.sat + subs[0]->ops.dsat)};
-                const auto dsat{subs[0]->ops.dsat + subs[1]->ops.dsat};
-                return {count, sat, dsat};
-            }
-            case Fragment::OR_D: {
-                const auto count{3 + subs[0]->ops.count + subs[1]->ops.count};
-                const auto sat{subs[0]->ops.sat | (subs[1]->ops.sat + subs[0]->ops.dsat)};
-                const auto dsat{subs[0]->ops.dsat + subs[1]->ops.dsat};
-                return {count, sat, dsat};
-            }
-            case Fragment::OR_C: {
-                const auto count{2 + subs[0]->ops.count + subs[1]->ops.count};
-                const auto sat{subs[0]->ops.sat | (subs[1]->ops.sat + subs[0]->ops.dsat)};
-                return {count, sat, {}};
-            }
-            case Fragment::OR_I: {
-                const auto count{3 + subs[0]->ops.count + subs[1]->ops.count};
-                const auto sat{subs[0]->ops.sat | subs[1]->ops.sat};
-                const auto dsat{subs[0]->ops.dsat | subs[1]->ops.dsat};
-                return {count, sat, dsat};
-            }
-            case Fragment::ANDOR: {
-                const auto count{3 + subs[0]->ops.count + subs[1]->ops.count + subs[2]->ops.count};
-                const auto sat{(subs[1]->ops.sat + subs[0]->ops.sat) | (subs[0]->ops.dsat + subs[2]->ops.sat)};
-                const auto dsat{subs[0]->ops.dsat + subs[2]->ops.dsat};
-                return {count, sat, dsat};
-            }
-            case Fragment::MULTI: return {1, (uint32_t)keys.size(), (uint32_t)keys.size()};
-            case Fragment::WRAP_S:
-            case Fragment::WRAP_C:
-            case Fragment::WRAP_N: return {1 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
-            case Fragment::WRAP_A: return {2 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
-            case Fragment::WRAP_D: return {3 + subs[0]->ops.count, subs[0]->ops.sat, 0};
-            case Fragment::WRAP_J: return {4 + subs[0]->ops.count, subs[0]->ops.sat, 0};
-            case Fragment::WRAP_V: return {subs[0]->ops.count + (subs[0]->GetType() << "x"_mst), subs[0]->ops.sat, {}};
-            case Fragment::THRESH: {
-                uint32_t count = 0;
-                auto sats = Vector(internal::MaxInt<uint32_t>(0));
-                for (const auto& sub : subs) {
-                    count += sub->ops.count + 1;
-                    auto next_sats = Vector(sats[0] + sub->ops.dsat);
-                    for (size_t j = 1; j < sats.size(); ++j) next_sats.push_back((sats[j] + sub->ops.dsat) | (sats[j - 1] + sub->ops.sat));
-                    next_sats.push_back(sats[sats.size() - 1] + sub->ops.sat);
-                    sats = std::move(next_sats);
-                }
-                assert(k <= sats.size());
-                return {count, sats[k], sats[0]};
-            }
-        }
-        assert(false);
-    }
-
-    internal::StackSize CalcStackSize() const {
-        switch (fragment) {
-            case Fragment::JUST_0: return {{}, 0};
-            case Fragment::JUST_1:
-            case Fragment::OLDER:
-            case Fragment::AFTER: return {0, {}};
-            case Fragment::PK_K: return {1, 1};
-            case Fragment::PK_H: return {2, 2};
-            case Fragment::SHA256:
-            case Fragment::RIPEMD160:
-            case Fragment::HASH256:
-            case Fragment::HASH160: return {1, {}};
-            case Fragment::ANDOR: {
-                const auto sat{(subs[0]->ss.sat + subs[1]->ss.sat) | (subs[0]->ss.dsat + subs[2]->ss.sat)};
-                const auto dsat{subs[0]->ss.dsat + subs[2]->ss.dsat};
-                return {sat, dsat};
-            }
-            case Fragment::AND_V: return {subs[0]->ss.sat + subs[1]->ss.sat, {}};
-            case Fragment::AND_B: return {subs[0]->ss.sat + subs[1]->ss.sat, subs[0]->ss.dsat + subs[1]->ss.dsat};
-            case Fragment::OR_B: {
-                const auto sat{(subs[0]->ss.dsat + subs[1]->ss.sat) | (subs[0]->ss.sat + subs[1]->ss.dsat)};
-                const auto dsat{subs[0]->ss.dsat + subs[1]->ss.dsat};
-                return {sat, dsat};
-            }
-            case Fragment::OR_C: return {subs[0]->ss.sat | (subs[0]->ss.dsat + subs[1]->ss.sat), {}};
-            case Fragment::OR_D: return {subs[0]->ss.sat | (subs[0]->ss.dsat + subs[1]->ss.sat), subs[0]->ss.dsat + subs[1]->ss.dsat};
-            case Fragment::OR_I: return {(subs[0]->ss.sat + 1) | (subs[1]->ss.sat + 1), (subs[0]->ss.dsat + 1) | (subs[1]->ss.dsat + 1)};
-            case Fragment::MULTI: return {k + 1, k + 1};
-            case Fragment::WRAP_A:
-            case Fragment::WRAP_N:
-            case Fragment::WRAP_S:
-            case Fragment::WRAP_C: return subs[0]->ss;
-            case Fragment::WRAP_D: return {1 + subs[0]->ss.sat, 1};
-            case Fragment::WRAP_V: return {subs[0]->ss.sat, {}};
-            case Fragment::WRAP_J: return {subs[0]->ss.sat, 1};
-            case Fragment::THRESH: {
-                auto sats = Vector(internal::MaxInt<uint32_t>(0));
-                for (const auto& sub : subs) {
-                    auto next_sats = Vector(sats[0] + sub->ss.dsat);
-                    for (size_t j = 1; j < sats.size(); ++j) next_sats.push_back((sats[j] + sub->ss.dsat) | (sats[j - 1] + sub->ss.sat));
-                    next_sats.push_back(sats[sats.size() - 1] + sub->ss.sat);
-                    sats = std::move(next_sats);
-                }
-                assert(k <= sats.size());
-                return {sats[k], sats[0]};
-            }
-        }
-        assert(false);
-    }
-
-    /** Check whether any key is repeated.
-     * This uses a custom key comparator provided by the context in order to still detect duplicates
-     * for more complicated types.
-     */
-    template<typename Ctx> bool ContainsDuplicateKey(const Ctx& ctx) const {
-        // We cannot use a lambda here, as lambdas are non assignable, and the set operations
-        // below require moving the comparators around.
-        struct Comp {
-            const Ctx* ctx_ptr;
-            Comp(const Ctx& ctx) : ctx_ptr(&ctx) {}
-            bool operator()(const Key& a, const Key& b) const { return ctx_ptr->KeyCompare(a, b); }
-        };
-        using set = std::set<Key, Comp>;
-
-        auto upfn = [this, &ctx](const Node& node, Span<set> subs) -> std::optional<set> {
-            if (&node != this && node.duplicate_key) return {};
-
-            size_t keys_count = node.keys.size();
-            set key_set{node.keys.begin(), node.keys.end(), Comp(ctx)};
-            if (key_set.size() != keys_count) return {};
-
-            for (auto& sub: subs) {
-                keys_count += sub.size();
-                // Small optimization: std::set::merge is linear in the size of the second arg but
-                // logarithmic in the size of the first.
-                if (key_set.size() < sub.size()) std::swap(key_set, sub);
-                key_set.merge(sub);
-                if (key_set.size() != keys_count) return {};
-            }
-
-            return key_set;
-        };
-
-        return !TreeEvalMaybe<set>(upfn);
-    }
-
-public:
     //! Return the size of the script for this expression (faster than ToScript().size()).
     size_t ScriptSize() const { return scriptlen; }
 
