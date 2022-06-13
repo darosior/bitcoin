@@ -143,12 +143,12 @@ FUZZ_TARGET_INIT(miniscript_string, FuzzInit)
 {
     FuzzedDataProvider provider(buffer.data(), buffer.size());
     auto str = provider.ConsumeRemainingBytesAsString();
-    auto parsed = miniscript::FromString(str, PARSER_CTX);
+    auto parsed = miniscript::Node<CPubKey>::FromString(str, PARSER_CTX);
     if (!parsed) return;
 
     const auto str2 = parsed->ToString(PARSER_CTX);
     assert(str2);
-    auto parsed2 = miniscript::FromString(*str2, PARSER_CTX);
+    auto parsed2 = miniscript::Node<CPubKey>::FromString(*str2, PARSER_CTX);
     assert(parsed2);
     assert(*parsed == *parsed2);
 }
@@ -160,7 +160,7 @@ FUZZ_TARGET(miniscript_script)
     const std::optional<CScript> script = ConsumeDeserializable<CScript>(fuzzed_data_provider);
     if (!script) return;
 
-    const auto ms = miniscript::FromScript(*script, SCRIPT_PARSER_CONTEXT);
+    const auto ms = miniscript::Node<ScriptParserContext::Key>::FromScript(*script, SCRIPT_PARSER_CONTEXT);
     if (!ms) return;
 
     assert(ms->ToScript(SCRIPT_PARSER_CONTEXT) == *script);

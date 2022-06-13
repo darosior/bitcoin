@@ -128,7 +128,7 @@ enum TestMode : int {
 
 void Test(const std::string& ms, const std::string& hexscript, int mode, int opslimit = -1, int stacklimit = -1)
 {
-    auto node = miniscript::FromString(ms, CONVERTER);
+    auto node = miniscript::Node<CPubKey>::FromString(ms, CONVERTER);
     if (mode == TESTMODE_INVALID) {
         BOOST_CHECK_MESSAGE(!node || !node->IsValid(), "Unexpectedly valid: " + ms);
     } else {
@@ -141,7 +141,7 @@ void Test(const std::string& ms, const std::string& hexscript, int mode, int ops
         BOOST_CHECK_MESSAGE(node->IsNonMalleable() == !!(mode & TESTMODE_NONMAL), "Malleability mismatch: " + ms);
         BOOST_CHECK_MESSAGE(node->NeedsSignature() == !!(mode & TESTMODE_NEEDSIG), "Signature necessity mismatch: " + ms);
         BOOST_CHECK_MESSAGE((node->GetType() << "k"_mst) == !(mode & TESTMODE_TIMELOCKMIX), "Timelock mix mismatch: " + ms);
-        auto inferred_miniscript = miniscript::FromScript(computed_script, CONVERTER);
+        auto inferred_miniscript = miniscript::Node<CPubKey>::FromScript(computed_script, CONVERTER);
         BOOST_CHECK_MESSAGE(inferred_miniscript, "Cannot infer miniscript from script: " + ms);
         BOOST_CHECK_MESSAGE(inferred_miniscript->ToScript(CONVERTER) == computed_script, "Roundtrip failure: miniscript->script != miniscript->script->miniscript->script: " + ms);
         if (opslimit != -1) BOOST_CHECK_MESSAGE((int)node->GetOps() == opslimit, "Ops limit mismatch: " << ms << " (" << node->GetOps() << " vs " << opslimit << ")");
@@ -250,11 +250,11 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     // A Script with a non minimal push is invalid
     std::vector<unsigned char> nonminpush = ParseHex("0000210232780000feff00ffffffffffff21ff005f00ae21ae00000000060602060406564c2102320000060900fe00005f00ae21ae00100000060606060606000000000000000000000000000000000000000000000000000000000000000000");
     const CScript nonminpush_script(nonminpush.begin(), nonminpush.end());
-    BOOST_CHECK(miniscript::FromScript(nonminpush_script, CONVERTER) == nullptr);
+    BOOST_CHECK(miniscript::Node<CPubKey>::FromScript(nonminpush_script, CONVERTER) == nullptr);
     // A non-minimal VERIFY (<key> CHECKSIG VERIFY 1)
     std::vector<unsigned char> nonminverify = ParseHex("2103a0434d9e47f3c86235477c7b1ae6ae5d3442d49b1943c2b752a68e2a47e247c7ac6951");
     const CScript nonminverify_script(nonminverify.begin(), nonminverify.end());
-    BOOST_CHECK(miniscript::FromScript(nonminverify_script, CONVERTER) == nullptr);
+    BOOST_CHECK(miniscript::Node<CPubKey>::FromScript(nonminverify_script, CONVERTER) == nullptr);
     // A threshold as large as the number of subs is valid.
     Test("thresh(2,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),altv:after(100))", "2103d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65ac6b6300670164b16951686c935287", TESTMODE_VALID | TESTMODE_NEEDSIG | TESTMODE_NONMAL);
     // A threshold of 1 is valid.
@@ -264,7 +264,7 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     // A threshold with a k null is invalid
     Test("thresh(0,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),sc:pk_k(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556))", "2103d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65ac7c2103fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556ac935187", TESTMODE_INVALID);
     // For CHECKMULTISIG the OP cost is the number of keys, but the stack size is the number of sigs (+1)
-    const auto ms_multi = miniscript::FromString("multi(1,03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65,03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556,0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)", CONVERTER);
+    const auto ms_multi = miniscript::Node<CPubKey>::FromString("multi(1,03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65,03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556,0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)", CONVERTER);
     BOOST_CHECK(ms_multi);
     BOOST_CHECK_EQUAL(ms_multi->GetOps(), 4); // 3 pubkeys + CMS
     BOOST_CHECK_EQUAL(ms_multi->GetStackSize(), 3); // 1 sig + dummy elem + script push
@@ -275,20 +275,20 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     // Unfortunately, this rule is consensus for Taproot but only policy for P2WSH. Therefore we can't
     // (for now) have 'd:' be 'u'. This tests we can't use a 'd:' wrapper for a thresh, which requires
     // its subs to all be 'u' (taken from https://github.com/rust-bitcoin/rust-miniscript/discussions/341).
-    const auto ms_minimalif = miniscript::FromString("thresh(3,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),sc:pk_k(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556),sc:pk_k(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),sdv:older(32))", CONVERTER);
+    const auto ms_minimalif = miniscript::Node<CPubKey>::FromString("thresh(3,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),sc:pk_k(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556),sc:pk_k(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),sdv:older(32))", CONVERTER);
     BOOST_CHECK(!ms_minimalif);
     // A Miniscript with duplicate keys is not sane
-    const auto ms_dup1 = miniscript::FromString("and_v(v:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65))", CONVERTER);
+    const auto ms_dup1 = miniscript::Node<CPubKey>::FromString("and_v(v:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65))", CONVERTER);
     BOOST_CHECK(ms_dup1);
     BOOST_CHECK(!ms_dup1->IsSane() && !ms_dup1->CheckDuplicateKey());
     // Same with a disjunction, and different key nodes (pk and pkh)
-    const auto ms_dup2 = miniscript::FromString("or_b(c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),ac:pk_h(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65))", CONVERTER);
+    const auto ms_dup2 = miniscript::Node<CPubKey>::FromString("or_b(c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),ac:pk_h(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65))", CONVERTER);
     BOOST_CHECK(ms_dup2 && !ms_dup2->IsSane() && !ms_dup2->CheckDuplicateKey());
     // Same when the duplicates are leaves or a larger tree
-    const auto ms_dup3 = miniscript::FromString("or_i(and_b(pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),s:pk(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556)),and_b(older(1),s:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65)))", CONVERTER);
+    const auto ms_dup3 = miniscript::Node<CPubKey>::FromString("or_i(and_b(pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),s:pk(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556)),and_b(older(1),s:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65)))", CONVERTER);
     BOOST_CHECK(ms_dup3 && !ms_dup3->IsSane() && !ms_dup3->CheckDuplicateKey());
     // Same when the duplicates are on different levels in the tree
-    const auto ms_dup4 = miniscript::FromString("thresh(2,pkh(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),s:pk(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556),a:and_b(dv:older(1),s:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65)))", CONVERTER);
+    const auto ms_dup4 = miniscript::Node<CPubKey>::FromString("thresh(2,pkh(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),s:pk(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556),a:and_b(dv:older(1),s:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65)))", CONVERTER);
     BOOST_CHECK(ms_dup4 && !ms_dup4->IsSane() && !ms_dup4->CheckDuplicateKey());
 
     // Timelock tests
