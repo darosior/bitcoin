@@ -322,6 +322,16 @@ static void MaybePushAddress(UniValue & entry, const CTxDestination &dest)
     }
 }
 
+//! Fetch wallet descriptors matching this scriptPubKey.
+static void MaybePushWalletDescriptors(const CWallet& wallet, const CScript& script_pubkey, UniValue& entry)
+{
+    UniValue wallet_descs(UniValue::VARR);
+    for (const auto& desc: wallet.GetWalletDescriptors(script_pubkey)) {
+        wallet_descs.push_back(desc.descriptor->ToString());
+    }
+    entry.pushKV("wallet_descs", wallet_descs);
+}
+
 /**
  * List transactions based on the given criteria.
  *
@@ -385,6 +395,7 @@ static void ListTransactions(const CWallet& wallet, const CWalletTx& wtx, int nM
                 entry.pushKV("involvesWatchonly", true);
             }
             MaybePushAddress(entry, r.destination);
+            MaybePushWalletDescriptors(wallet, r.script_pubkey, entry);
             if (wtx.IsCoinBase())
             {
                 if (wallet.GetTxDepthInMainChain(wtx) < 1)
@@ -436,7 +447,11 @@ static const std::vector<RPCResult> TransactionDescriptionString()
            {RPCResult::Type::NUM_TIME, "timereceived", "The time received expressed in " + UNIX_EPOCH_TIME + "."},
            {RPCResult::Type::STR, "comment", /*optional=*/true, "If a comment is associated with the transaction, only present if not empty."},
            {RPCResult::Type::STR, "bip125-replaceable", "(\"yes|no|unknown\") Whether this transaction could be replaced due to BIP125 (replace-by-fee);\n"
-               "may be unknown for unconfirmed transactions not in the mempool."}};
+               "may be unknown for unconfirmed transactions not in the mempool."},
+           {RPCResult::Type::ARR, "wallet_descs", /*optional=*/true, "Only if 'category' is 'received'. List of imported descriptors matching the scriptPubKey of this coin.", {
+               {RPCResult::Type::STR, "desc", "The descriptor string."},
+           }},
+           };
 }
 
 RPCHelpMan listtransactions()
@@ -728,6 +743,9 @@ RPCHelpMan gettransaction()
                                     "'send' category of transactions."},
                                 {RPCResult::Type::BOOL, "abandoned", /*optional=*/true, "'true' if the transaction has been abandoned (inputs are respendable). Only available for the \n"
                                      "'send' category of transactions."},
+                                {RPCResult::Type::ARR, "wallet_descs", /*optional=*/true, "Only if 'category' is 'received'. List of imported descriptors matching the scriptPubKey of this coin.", {
+                                    {RPCResult::Type::STR, "desc", "The descriptor string."},
+                                }},
                             }},
                         }},
                         {RPCResult::Type::STR_HEX, "hex", "Raw data for transaction"},
