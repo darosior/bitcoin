@@ -38,6 +38,7 @@ CAmount CachedTxGetAvailableCredit(const CWallet& wallet, const CWalletTx& wtx, 
 struct COutputEntry
 {
     CTxDestination destination;
+    CScript script_pubkey;
     CAmount amount;
     int vout;
 };
