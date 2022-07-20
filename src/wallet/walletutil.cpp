@@ -43,4 +43,10 @@ WalletFeature GetClosestWalletFeature(int version)
     }
     return static_cast<WalletFeature>(0);
 }
+
+bool IsSolvable(const CScript& script, const SigningProvider& provider) {
+    if (const auto desc = InferDescriptor(script, provider)) return desc->IsSolvable();
+    return false;
+}
+
 } // namespace wallet
