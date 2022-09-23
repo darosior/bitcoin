@@ -293,7 +293,7 @@ BOOST_AUTO_TEST_CASE(tx_invalid)
                         }
 
                     }
-                } catch (std::runtime_error e) {
+                } catch (const std::runtime_error& e) {
                     BOOST_ERROR("Improperly Formatted One-By-One Fill Settings " << strTest);
                 }
             }
