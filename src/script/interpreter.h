@@ -186,7 +186,7 @@ struct PrecomputedTransactionData
     bool m_bip341_taproot_ready = false;
 
     //! Whether the bip119 fields above are initialized directly (nullptr)
-    //! or lazily (using sync primitves)
+    //! or lazily (using sync primitives)
     typedef std::function<void(std::function<void()>)> bip_119_cache_synchronizer_t;
     bip_119_cache_synchronizer_t m_bip119_cache_synchronizer;
 
