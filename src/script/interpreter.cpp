@@ -1657,6 +1657,18 @@ static bool HandleMissingData(MissingDataBehavior mdb)
     assert(!"Unknown MissingDataBehavior value");
 }
 
+bool IsHashTypeValid(uint8_t hash_type, KeyVersion key_version) {
+    switch (hash_type) {
+        case 0: case 1: case 2: case 3:
+        case 0x81: case 0x82: case 0x83:
+            return true;
+        case 0x41: case 0x42: case 0x43:
+        case 0xc1: case 0xc2: case 0xc3:
+            return key_version == KeyVersion::ANYPREVOUT;
+    }
+    return false;
+}
+
 template<typename T>
 bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, const T& tx_to, uint32_t in_pos, uint8_t hash_type, SigVersion sigversion, KeyVersion keyversion, const PrecomputedTransactionData& cache, MissingDataBehavior mdb)
 {
@@ -1689,20 +1701,7 @@ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, cons
     const uint8_t output_type = (hash_type == SIGHASH_DEFAULT) ? SIGHASH_ALL : (hash_type & SIGHASH_OUTPUT_MASK); // Default (no sighash byte) is equivalent to SIGHASH_ALL
     const uint8_t input_type = hash_type & SIGHASH_INPUT_MASK;
 
-    switch(hash_type) {
-        case 0: case 1: case 2: case 3:
-        case 0x81: case 0x82: case 0x83:
-            break;
-        case 0x41: case 0x42: case 0x43:
-        case 0xc1: case 0xc2: case 0xc3:
-            if (keyversion == KeyVersion::ANYPREVOUT) {
-                break;
-            } else {
-                return false;
-            }
-        default:
-            return false;
-    }
+    if (!IsHashTypeValid(hash_type, keyversion)) return false;
     ss << hash_type;
 
     // Transaction level data
