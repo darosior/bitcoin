@@ -1674,7 +1674,7 @@ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, cons
 {
     uint8_t ext_flag;
     assert(keyversion == KeyVersion::TAPROOT || keyversion == KeyVersion::ANYPREVOUT);
-    assert(keyversion == KeyVersion::ANYPREVOUT ? sigversion == SigVersion::TAPSCRIPT : true);
+    assert(keyversion != KeyVersion::ANYPREVOUT || sigversion == SigVersion::TAPSCRIPT);
     switch (sigversion) {
     case SigVersion::TAPROOT:
         ext_flag = 0;
