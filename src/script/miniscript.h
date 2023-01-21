@@ -605,6 +605,7 @@ public:
                 case Fragment::OR_I: return BuildScript(OP_IF, subs[0], OP_ELSE, subs[1], OP_ENDIF);
                 case Fragment::ANDOR: return BuildScript(std::move(subs[0]), OP_NOTIF, subs[2], OP_ELSE, subs[1], OP_ENDIF);
                 case Fragment::MULTI: {
+                    assert(ctx.MsContext() == MiniscriptContext::P2WSH);
                     CScript script = BuildScript(node.k);
                     for (const auto& key : node.keys) {
                         script = BuildScript(std::move(script), ctx.ToPKBytes(key));
@@ -704,6 +705,7 @@ public:
                     if (node.subs[2]->fragment == Fragment::JUST_0) return std::move(ret) + "and_n(" + std::move(subs[0]) + "," + std::move(subs[1]) + ")";
                     return std::move(ret) + "andor(" + std::move(subs[0]) + "," + std::move(subs[1]) + "," + std::move(subs[2]) + ")";
                 case Fragment::MULTI: {
+                    assert(ctx.MsContext() == MiniscriptContext::P2WSH);
                     auto str = std::move(ret) + "multi(" + ::ToString(node.k);
                     for (const auto& key : node.keys) {
                         auto key_str = ctx.ToString(key);
@@ -1534,6 +1536,9 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 in = in.subspan(arg_size + 1);
                 script_size += 1 + (num > 16) + (num > 0x7f) + (num > 0x7fff) + (num > 0x7fffff);
             } else if (Const("multi(", in)) {
+                if (ctx.MsContext() != MiniscriptContext::P2WSH) {
+                    return {};
+                }
                 // Get threshold
                 int next_comma = FindNextChar(in, ',');
                 if (next_comma < 1) return {};
@@ -1892,6 +1897,9 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
             }
             // Multi
             if (last - in >= 3 && in[0].first == OP_CHECKMULTISIG) {
+                if (ctx.MsContext() != MiniscriptContext::P2WSH) {
+                    return {};
+                }
                 std::vector<Key> keys;
                 const auto n = ParseScriptNumber(in[1]);
                 if (!n || last - in < 3 + *n) return {};
