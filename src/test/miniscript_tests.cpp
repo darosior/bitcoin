@@ -71,6 +71,10 @@ std::unique_ptr<const TestData> g_testdata;
 struct KeyConverter {
     typedef CPubKey Key;
 
+    const miniscript::MiniscriptContext m_script_ctx;
+
+    KeyConverter(miniscript::MiniscriptContext ctx): m_script_ctx(ctx) {}
+
     bool KeyCompare(const Key& a, const Key& b) const {
         return a < b;
     }
@@ -115,10 +119,14 @@ struct KeyConverter {
     std::optional<std::string> ToString(const Key& key) const {
         return HexStr(ToPKBytes(key));
     }
+
+    miniscript::MiniscriptContext MsContext() const {
+        return m_script_ctx;
+    }
 };
 
 //! Singleton instance of KeyConverter.
-const KeyConverter CONVERTER{};
+const KeyConverter CONVERTER{/* ctx = */miniscript::MiniscriptContext::P2WSH};
 
 // https://github.com/llvm/llvm-project/issues/53444
 // NOLINTNEXTLINE(misc-unused-using-decls)

@@ -84,6 +84,10 @@ struct ParserContext {
         if (it == TEST_DATA.dummy_keys_map.end()) return {};
         return it->second;
     }
+
+    miniscript::MiniscriptContext MsContext() const {
+        return miniscript::MiniscriptContext::P2WSH;
+    }
 } PARSER_CTX;
 
 //! Context that implements naive conversion from/to script only, for roundtrip testing.
@@ -127,6 +131,10 @@ struct ScriptParserContext {
         key.data.assign(first, last);
         key.is_hash = true;
         return key;
+    }
+
+    miniscript::MiniscriptContext MsContext() const {
+        return miniscript::MiniscriptContext::P2WSH;
     }
 } SCRIPT_PARSER_CONTEXT;
 

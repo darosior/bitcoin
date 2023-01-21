@@ -280,6 +280,11 @@ struct NoDupCheck {};
 
 } // namespace internal
 
+enum class MiniscriptContext {
+    P2WSH,
+    TAPSCRIPT,
+};
+
 //! A node in a miniscript expression.
 template<typename Key>
 struct Node {
