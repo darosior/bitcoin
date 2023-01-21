@@ -949,15 +949,30 @@ class ScriptMaker {
     //! The script context we're operating within (Tapscript or P2WSH).
     const miniscript::MiniscriptContext m_script_ctx;
 
+    //! Get the ripemd160(sha256()) hash of this key.
+    //! Any key that is valid in a descriptor serializes as 32 bytes within a Tapscript context. So we
+    //! must not hash the sign-bit byte in this case.
+    uint160 GetHash160(uint32_t key) const {
+        if (m_script_ctx == miniscript::MiniscriptContext::TAPSCRIPT) {
+            return Hash160(XOnlyPubKey{m_keys[key]});
+        }
+        return m_keys[key].GetID();
+    }
+
 public:
     ScriptMaker(const std::vector<CPubKey>& keys LIFETIMEBOUND, miniscript::MiniscriptContext ctx) : m_keys(keys), m_script_ctx(ctx) {}
 
     std::vector<unsigned char> ToPKBytes(uint32_t key) const {
-        return {m_keys[key].begin(), m_keys[key].end()};
+        // In Tapscript keys always serialize as x-only, whether an x-only key was used in the descriptor or not.
+        if (m_script_ctx == miniscript::MiniscriptContext::P2WSH) {
+            return {m_keys[key].begin(), m_keys[key].end()};
+        }
+        const XOnlyPubKey xonly_pubkey{m_keys[key]};
+        return {xonly_pubkey.begin(), xonly_pubkey.end()};
     }
 
     std::vector<unsigned char> ToPKHBytes(uint32_t key) const {
-        auto id = m_keys[key].GetID();
+        auto id = GetHash160(key);
         return {id.begin(), id.end()};
     }
 
@@ -1237,11 +1252,19 @@ struct KeyParser {
         return *m_keys.at(a) < *m_keys.at(b);
     }
 
+    ParseScriptContext ParseContext() const {
+        switch (m_script_ctx) {
+            case miniscript::MiniscriptContext::P2WSH: return ParseScriptContext::P2WSH;
+            case miniscript::MiniscriptContext::TAPSCRIPT: return ParseScriptContext::P2TR;
+        }
+        assert(false);
+    }
+
     template<typename I> std::optional<Key> FromString(I begin, I end) const
     {
         assert(m_out);
         Key key = m_keys.size();
-        auto pk = ParsePubkey(key, {&*begin, &*end}, ParseScriptContext::P2WSH, *m_out, m_key_parsing_error);
+        auto pk = ParsePubkey(key, {&*begin, &*end}, ParseContext(), *m_out, m_key_parsing_error);
         if (!pk) return {};
         m_keys.push_back(std::move(pk));
         return key;
@@ -1255,11 +1278,18 @@ struct KeyParser {
     template<typename I> std::optional<Key> FromPKBytes(I begin, I end) const
     {
         assert(m_in);
-        CPubKey pubkey(begin, end);
-        if (pubkey.IsValid()) {
-            Key key = m_keys.size();
-            m_keys.push_back(InferPubkey(pubkey, ParseScriptContext::P2WSH, *m_in));
+        Key key = m_keys.size();
+        if (m_script_ctx == miniscript::MiniscriptContext::TAPSCRIPT && end - begin == 32) {
+            XOnlyPubKey pubkey;
+            std::copy(begin, end, pubkey.begin());
+            m_keys.push_back(InferPubkey(pubkey.GetCPubKey(), ParseContext(), *m_in));
             return key;
+        } else if (m_script_ctx == miniscript::MiniscriptContext::P2WSH) {
+            CPubKey pubkey{begin, end};
+            if (pubkey.IsValid()) {
+                m_keys.push_back(InferPubkey(pubkey, ParseContext(), *m_in));
+                return key;
+            }
         }
         return {};
     }
@@ -1274,7 +1304,7 @@ struct KeyParser {
         CPubKey pubkey;
         if (m_in->GetPubKey(keyid, pubkey)) {
             Key key = m_keys.size();
-            m_keys.push_back(InferPubkey(pubkey, ParseScriptContext::P2WSH, *m_in));
+            m_keys.push_back(InferPubkey(pubkey, ParseContext(), *m_in));
             return key;
         }
         return {};
