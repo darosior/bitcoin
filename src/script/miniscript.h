@@ -1221,7 +1221,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 auto& [key, key_size] = *res;
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx, Fragment::WRAP_C, Vector(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx, Fragment::PK_K, Vector(std::move(key))))));
                 in = in.subspan(key_size + 1);
-                script_size += 34;
+                script_size += (ctx.MsContext() == MiniscriptContext::TAPSCRIPT) ? 33 :34;
             } else if (Const("pkh(", in)) {
                 auto res = ParseKeyEnd<Key>(in, ctx);
                 if (!res) return {};
@@ -1235,7 +1235,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 auto& [key, key_size] = *res;
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx, Fragment::PK_K, Vector(std::move(key))));
                 in = in.subspan(key_size + 1);
-                script_size += 33;
+                script_size += (ctx.MsContext() == MiniscriptContext::TAPSCRIPT) ? 32 :33;
             } else if (Const("pk_h(", in)) {
                 auto res = ParseKeyEnd<Key>(in, ctx);
                 if (!res) return {};
@@ -1581,7 +1581,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 break;
             }
             // Public keys
-            if (in[0].second.size() == 33) {
+            if (in[0].second.size() == 33 || in[0].second.size() == 32) {
                 auto key = ctx.FromPKBytes(in[0].second.begin(), in[0].second.end());
                 if (!key) return {};
                 ++in;
