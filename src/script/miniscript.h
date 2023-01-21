@@ -44,8 +44,8 @@ namespace miniscript {
  *   - When satisfied, pushes nothing.
  *   - Cannot be dissatisfied.
  *   - This can be obtained by adding an OP_VERIFY to a B, modifying the last opcode
- *     of a B to its -VERIFY version (only for OP_CHECKSIG, OP_CHECKSIGVERIFY
- *     and OP_EQUAL), or by combining a V fragment under some conditions.
+ *     of a B to its -VERIFY version (only for OP_CHECKSIG, OP_CHECKSIGVERIFY,
+ *     OP_NUMEQUAL and OP_EQUAL), or by combining a V fragment under some conditions.
  *   - For example vc:pk_k(key) = <key> OP_CHECKSIGVERIFY
  * - "K" Key:
  *   - Takes its inputs from the top of the stack.
@@ -216,7 +216,8 @@ enum class Fragment {
     OR_I,      //!< OP_IF [X] OP_ELSE [Y] OP_ENDIF
     ANDOR,     //!< [X] OP_NOTIF [Z] OP_ELSE [Y] OP_ENDIF
     THRESH,    //!< [X1] ([Xn] OP_ADD)* [k] OP_EQUAL
-    MULTI,     //!< [k] [key_n]* [n] OP_CHECKMULTISIG
+    MULTI,     //!< [k] [key_n]* [n] OP_CHECKMULTISIG (only available within P2WSH context)
+    MULTI_A,   //!< [key_0] OP_CHECKSIG ([key_n] OP_CHECKSIGADD)* [k] OP_NUMEQUAL (only within Tapscript ctx)
     // AND_N(X,Y) is represented as ANDOR(X,Y,0)
     // WRAP_T(X) is represented as AND_V(X,1)
     // WRAP_L(X) is represented as OR_I(0,X)
@@ -612,6 +613,14 @@ public:
                     }
                     return BuildScript(std::move(script), node.keys.size(), verify ? OP_CHECKMULTISIGVERIFY : OP_CHECKMULTISIG);
                 }
+                case Fragment::MULTI_A: {
+                    assert(ctx.MsContext() == MiniscriptContext::TAPSCRIPT);
+                    CScript script = BuildScript(ctx.ToPKBytes(*node.keys.begin()), OP_CHECKSIG);
+                    for (auto it = node.keys.begin() + 1; it != node.keys.end(); ++it) {
+                        script = BuildScript(std::move(script), ctx.ToPKBytes(*it), OP_CHECKSIGADD);
+                    }
+                    return BuildScript(std::move(script), node.k, verify ? OP_NUMEQUALVERIFY : OP_NUMEQUAL);
+                }
                 case Fragment::THRESH: {
                     CScript script = std::move(subs[0]);
                     for (size_t i = 1; i < subs.size(); ++i) {
@@ -714,6 +723,16 @@ public:
                     }
                     return std::move(str) + ")";
                 }
+                case Fragment::MULTI_A: {
+                    assert(ctx.MsContext() == MiniscriptContext::TAPSCRIPT);
+                    auto str = std::move(ret) + "multi_a(" + ::ToString(node.k);
+                    for (const auto& key : node.keys) {
+                        auto key_str = ctx.ToString(key);
+                        if (!key_str) return {};
+                        str += "," + std::move(*key_str);
+                    }
+                    return std::move(str) + ")";
+                }
                 case Fragment::THRESH: {
                     auto str = std::move(ret) + "thresh(" + ::ToString(node.k);
                     for (auto& sub : subs) {
@@ -779,6 +798,7 @@ private:
                 return {count, sat, dsat};
             }
             case Fragment::MULTI: return {1, (uint32_t)keys.size(), (uint32_t)keys.size()};
+            case Fragment::MULTI_A: return {(uint32_t)keys.size() + 1, 0, 0};
             case Fragment::WRAP_S:
             case Fragment::WRAP_C:
             case Fragment::WRAP_N: return {1 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
@@ -831,6 +851,7 @@ private:
             case Fragment::OR_D: return {subs[0]->ss.sat | (subs[0]->ss.dsat + subs[1]->ss.sat), subs[0]->ss.dsat + subs[1]->ss.dsat};
             case Fragment::OR_I: return {(subs[0]->ss.sat + 1) | (subs[1]->ss.sat + 1), (subs[0]->ss.dsat + 1) | (subs[1]->ss.dsat + 1)};
             case Fragment::MULTI: return {k + 1, k + 1};
+            case Fragment::MULTI_A: return {keys.size(), keys.size()};
             case Fragment::WRAP_A:
             case Fragment::WRAP_N:
             case Fragment::WRAP_S:
@@ -870,6 +891,27 @@ private:
                     std::vector<unsigned char> key = ctx.ToPKBytes(node.keys[0]), sig;
                     Availability avail = ctx.Sign(node.keys[0], sig);
                     return {ZERO + InputStack(key), (InputStack(std::move(sig)).SetWithSig() + InputStack(key)).SetAvailable(avail)};
+                }
+                case Fragment::MULTI_A: {
+                    InputStack sat, dsat;
+                    sat.SetAvailable(Availability::NO);
+                    sat.SetWithSig();
+                    sat.stack.reserve(node.keys.size());
+                    dsat.stack.reserve(node.keys.size());
+
+                    size_t sigs_count{0};
+                    for (auto it = node.keys.rbegin(); it != node.keys.rend(); ++it) {
+                        std::vector<unsigned char> sig;
+                        if (sat.available != Availability::YES && ctx.Sign(*it, sig) == Availability::YES) {
+                            sat.stack.push_back(std::move(sig));
+                            if (++sigs_count == node.k) sat.SetAvailable(Availability::YES);
+                        } else {
+                            sat.stack.push_back(std::vector<unsigned char>{});
+                        }
+                        dsat.stack.push_back(std::vector<unsigned char>{});
+                    }
+
+                    return {std::move(dsat), std::move(sat)};
                 }
                 case Fragment::MULTI: {
                     // sats[j] represents the best stack containing j valid signatures (out of the first i keys).
@@ -1183,6 +1225,7 @@ public:
                 case Fragment::PK_K:
                 case Fragment::PK_H:
                 case Fragment::MULTI:
+                case Fragment::MULTI_A:
                 case Fragment::AFTER:
                 case Fragment::OLDER:
                 case Fragment::HASH256:
@@ -1392,6 +1435,41 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
 
     to_parse.emplace_back(ParseContext::WRAPPED_EXPR, -1, -1);
 
+    // Parses a multi() or multi_a() from its string representation. Returns false on parsing error.
+    const auto parse_multi_exp = [&](Span<const char>& in, const bool is_multi_a) -> bool {
+        const auto max_keys{is_multi_a ? MAX_PUBKEYS_PER_MULTI_A : MAX_PUBKEYS_PER_MULTISIG};
+        const auto required_ctx{is_multi_a ? MiniscriptContext::TAPSCRIPT : MiniscriptContext::P2WSH};
+        if (ctx.MsContext() != required_ctx) return false;
+        // Get threshold
+        int next_comma = FindNextChar(in, ',');
+        if (next_comma < 1) return false;
+        int64_t k;
+        if (!ParseInt64(std::string(in.begin(), in.begin() + next_comma), &k)) return false;
+        in = in.subspan(next_comma + 1);
+        // Get keys. It is compatible for both compressed and x-only keys.
+        std::vector<Key> keys;
+        while (next_comma != -1) {
+            next_comma = FindNextChar(in, ',');
+            int key_length = (next_comma == -1) ? FindNextChar(in, ')') : next_comma;
+            if (key_length < 1) return false;
+            auto key = ctx.FromString(in.begin(), in.begin() + key_length);
+            if (!key) return false;
+            keys.push_back(std::move(*key));
+            in = in.subspan(key_length + 1);
+        }
+        if (keys.size() < 1 || keys.size() > max_keys) return false;
+        if (k < 1 || k > (int64_t)keys.size()) return false;
+        if (is_multi_a) {
+            // (push + xonly-key + CHECKSIG[ADD]) * n + k + OP_NUMEQUAL(VERIFY), minus one.
+            script_size += (1 + 32 + 1) * keys.size() + BuildScript(k).size();
+            constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, Fragment::MULTI_A, std::move(keys), k));
+        } else {
+            script_size += 2 + (keys.size() > 16) + (k > 16) + 34 * keys.size();
+            constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, Fragment::MULTI, std::move(keys), k));
+        }
+        return true;
+    };
+
     while (!to_parse.empty()) {
         if (script_size > MAX_STANDARD_P2WSH_SCRIPT_SIZE) return {};
 
@@ -1536,29 +1614,9 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 in = in.subspan(arg_size + 1);
                 script_size += 1 + (num > 16) + (num > 0x7f) + (num > 0x7fff) + (num > 0x7fffff);
             } else if (Const("multi(", in)) {
-                if (ctx.MsContext() != MiniscriptContext::P2WSH) {
-                    return {};
-                }
-                // Get threshold
-                int next_comma = FindNextChar(in, ',');
-                if (next_comma < 1) return {};
-                if (!ParseInt64(std::string(in.begin(), in.begin() + next_comma), &k)) return {};
-                in = in.subspan(next_comma + 1);
-                // Get keys
-                std::vector<Key> keys;
-                while (next_comma != -1) {
-                    next_comma = FindNextChar(in, ',');
-                    int key_length = (next_comma == -1) ? FindNextChar(in, ')') : next_comma;
-                    if (key_length < 1) return {};
-                    auto key = ctx.FromString(in.begin(), in.begin() + key_length);
-                    if (!key) return {};
-                    keys.push_back(std::move(*key));
-                    in = in.subspan(key_length + 1);
-                }
-                if (keys.size() < 1 || keys.size() > 20) return {};
-                if (k < 1 || k > (int64_t)keys.size()) return {};
-                script_size += 2 + (keys.size() > 16) + (k > 16) + 34 * keys.size();
-                constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, Fragment::MULTI, std::move(keys), k));
+                if (!parse_multi_exp(in, /* is_multi_a = */false)) return {};
+            } else if (Const("multi_a(", in)) {
+                if (!parse_multi_exp(in, /* is_multi_a = */true)) return {};
             } else if (Const("thresh(", in)) {
                 int next_comma = FindNextChar(in, ',');
                 if (next_comma < 1) return {};
@@ -1735,8 +1793,8 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
  * Construct a vector with one element per opcode in the script, in reverse order.
  * Each element is a pair consisting of the opcode, as well as the data pushed by
  * the opcode (including OP_n), if any. OP_CHECKSIGVERIFY, OP_CHECKMULTISIGVERIFY,
- * and OP_EQUALVERIFY are decomposed into OP_CHECKSIG, OP_CHECKMULTISIG, OP_EQUAL
- * respectively, plus OP_VERIFY.
+ * OP_NUMEQUALVERIFY and OP_EQUALVERIFY are decomposed into OP_CHECKSIG, OP_CHECKMULTISIG,
+ * OP_EQUAL and OP_NUMEQUAL respectively, plus OP_VERIFY.
  */
 std::optional<std::vector<Opcode>> DecomposeScript(const CScript& script);
 
@@ -1915,6 +1973,37 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 in += 3 + *n;
                 std::reverse(keys.begin(), keys.end());
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, Fragment::MULTI, std::move(keys), *k));
+                break;
+            }
+            // Tapscript's multi
+            if (last - in >= 4 && in[0].first == OP_NUMEQUAL) {
+                if (ctx.MsContext() != MiniscriptContext::TAPSCRIPT) {
+                    return {};
+                }
+                const auto num = ParseScriptNumber(in[1]);
+                if (!num) return {};
+                if (*num < 1 || *num > MAX_PUBKEYS_PER_MULTI_A) return {};
+                if (last - in < 2 + *num * 2) return {};
+                std::vector<Key> keys;
+                keys.reserve(*num);
+                // Walk through the expected (pubkey, CHECKSIG[ADD]) pairs.
+                for (int k = 2;; k += 2) {
+                    if (last - in < k + 1) return {};
+                    // Make sure it's indeed an x-only pubkey and a CHECKSIG[ADD], then parse the key.
+                    if (in[k].first != OP_CHECKSIGADD && in[k].first != OP_CHECKSIG) return {};
+                    if (in[k + 1].second.size() != 32) return {};
+                    auto key = ctx.FromPKBytes(in[k + 1].second.begin(), in[k + 1].second.end());
+                    if (!key) return {};
+                    keys.push_back(std::move(*key));
+                    // Make sure early we don't parse an arbitrary large expression.
+                    if (keys.size() > MAX_PUBKEYS_PER_MULTI_A) return {};
+                    // OP_CHECKSIG means it was the last one to parse.
+                    if (in[k].first == OP_CHECKSIG) break;
+                }
+                if (keys.size() < *num) return {};
+                in += 2 + keys.size() * 2;
+                std::reverse(keys.begin(), keys.end());
+                constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, Fragment::MULTI_A, std::move(keys), *num));
                 break;
             }
             /** In the following wrappers, we only need to push SINGLE_BKV_EXPR rather

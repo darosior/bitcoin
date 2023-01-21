@@ -331,6 +331,7 @@ std::optional<uint32_t> ConsumeTimeLock(FuzzedDataProvider& provider) {
  *    - For pk_k(), pk_h(), and all hashes, the next byte defines the index of the value in the test data.
  *    - For multi(), the next 2 bytes define respectively the threshold and the number of keys. Then as many
  *      bytes as the number of keys define the index of each key in the test data.
+ *    - For multi_a(), same as for multi() but the threshold and the keys count are encoded on two bytes.
  *    - For thresh(), the next byte defines the threshold value and the following one the number of subs.
  */
 std::optional<NodeInfo> ConsumeNodeStable(FuzzedDataProvider& provider, Type type_needed) {
@@ -438,6 +439,15 @@ std::optional<NodeInfo> ConsumeNodeStable(FuzzedDataProvider& provider, Type typ
         case 26:
             if (!allow_B) return {};
             return {{{"B"_mst}, Fragment::WRAP_N}};
+        case 27: {
+            if (!allow_B) return {};
+            const auto k = provider.ConsumeIntegral<uint16_t>();
+            const auto n_keys = provider.ConsumeIntegral<uint16_t>();
+            if (n_keys > 999 || k == 0 || k > n_keys) return {};
+            std::vector<CPubKey> keys{n_keys};
+            for (auto& key: keys) key = ConsumePubKey(provider);
+            return {{Fragment::MULTI_A, k, std::move(keys)}};
+        }
         default:
             break;
     }
@@ -505,7 +515,7 @@ struct SmartInfo
         std::sort(types.begin(), types.end());
 
         // Iterate over all possible fragments.
-        for (int fragidx = 0; fragidx <= int(Fragment::MULTI); ++fragidx) {
+        for (int fragidx = 0; fragidx <= int(Fragment::MULTI_A); ++fragidx) {
             int sub_count = 0; //!< The minimum number of child nodes this recipe has.
             int sub_range = 1; //!< The maximum number of child nodes for this recipe is sub_count+sub_range-1.
             size_t data_size = 0;
@@ -520,6 +530,7 @@ struct SmartInfo
                     n_keys = 1;
                     break;
                 case Fragment::MULTI:
+                case Fragment::MULTI_A:
                     n_keys = 1;
                     k = 1;
                     break;
@@ -714,6 +725,13 @@ std::optional<NodeInfo> ConsumeNodeSmart(FuzzedDataProvider& provider, Type type
             for (auto& key: keys) key = ConsumePubKey(provider);
             return {{frag, k, std::move(keys)}};
         }
+        case Fragment::MULTI_A: {
+            const auto n_keys = provider.ConsumeIntegralInRange<uint16_t>(1, 999);
+            const auto k = provider.ConsumeIntegralInRange<uint16_t>(1, n_keys);
+            std::vector<CPubKey> keys{n_keys};
+            for (auto& key: keys) key = ConsumePubKey(provider);
+            return {{frag, k, std::move(keys)}};
+        }
         case Fragment::OLDER:
         case Fragment::AFTER:
             return {{frag, provider.ConsumeIntegralInRange<uint32_t>(1, 0x7FFFFFF)}};
@@ -835,6 +853,9 @@ NodeRef GenNode(F ConsumeNode, Type root_type, bool strict_valid = false) {
                 break;
             case Fragment::MULTI:
                 ops += 1;
+                break;
+            case Fragment::MULTI_A:
+                ops += node_info->keys.size() + 1;
                 break;
             case Fragment::WRAP_A:
                 ops += 2;
@@ -1025,7 +1046,7 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
             assert(it != TEST_DATA.dummy_sigs.end());
             return it->second.second;
         }
-        case Fragment::MULTI: {
+        case Fragment::MULTI: case Fragment::MULTI_A: {
             size_t sats = 0;
             for (const auto& key : node.keys) {
                 auto it = TEST_DATA.dummy_sigs.find(key);
