@@ -946,9 +946,11 @@ public:
 class ScriptMaker {
     //! Keys contained in the Miniscript (the evaluation of DescriptorImpl::m_pubkey_args).
     const std::vector<CPubKey>& m_keys;
+    //! The script context we're operating within (Tapscript or P2WSH).
+    const miniscript::MiniscriptContext m_script_ctx;
 
 public:
-    ScriptMaker(const std::vector<CPubKey>& keys LIFETIMEBOUND) : m_keys(keys) {}
+    ScriptMaker(const std::vector<CPubKey>& keys LIFETIMEBOUND, miniscript::MiniscriptContext ctx) : m_keys(keys), m_script_ctx(ctx) {}
 
     std::vector<unsigned char> ToPKBytes(uint32_t key) const {
         return {m_keys[key].begin(), m_keys[key].end()};
@@ -957,6 +959,10 @@ public:
     std::vector<unsigned char> ToPKHBytes(uint32_t key) const {
         auto id = m_keys[key].GetID();
         return {id.begin(), id.end()};
+    }
+
+    miniscript::MiniscriptContext MsContext() const {
+        return m_script_ctx;
     }
 };
 
@@ -970,10 +976,15 @@ class StringMaker {
     const std::vector<std::unique_ptr<PubkeyProvider>>& m_pubkeys;
     //! Whether to serialize keys as private or public.
     bool m_private;
+    //! The script context we're operating within (Tapscript or P2WSH).
+    const miniscript::MiniscriptContext m_script_ctx;
 
 public:
-    StringMaker(const SigningProvider* arg LIFETIMEBOUND, const std::vector<std::unique_ptr<PubkeyProvider>>& pubkeys LIFETIMEBOUND, bool priv)
-        : m_arg(arg), m_pubkeys(pubkeys), m_private(priv) {}
+    StringMaker(const SigningProvider* arg LIFETIMEBOUND,
+                const std::vector<std::unique_ptr<PubkeyProvider>>& pubkeys LIFETIMEBOUND,
+                bool priv,
+                miniscript::MiniscriptContext ctx)
+        : m_arg(arg), m_pubkeys(pubkeys), m_private(priv), m_script_ctx(ctx) {}
 
     std::optional<std::string> ToString(uint32_t key) const
     {
@@ -984,6 +995,10 @@ public:
             ret = m_pubkeys[key]->ToString();
         }
         return ret;
+    }
+
+    miniscript::MiniscriptContext MsContext() const {
+        return m_script_ctx;
     }
 };
 
@@ -997,7 +1012,7 @@ protected:
                                      FlatSigningProvider& provider) const override
     {
         for (const auto& key : keys) provider.pubkeys.emplace(key.GetID(), key);
-        return Vector(m_node->ToScript(ScriptMaker(keys)));
+        return Vector(m_node->ToScript(ScriptMaker(keys, miniscript::MiniscriptContext::P2WSH)));
     }
 
 public:
@@ -1007,7 +1022,7 @@ public:
     bool ToStringHelper(const SigningProvider* arg, std::string& out, const StringType type,
                         const DescriptorCache* cache = nullptr) const override
     {
-        if (const auto res = m_node->ToString(StringMaker(arg, m_pubkey_args, type == StringType::PRIVATE))) {
+        if (const auto res = m_node->ToString(StringMaker(arg, m_pubkey_args, type == StringType::PRIVATE, miniscript::MiniscriptContext::P2WSH))) {
             out = *res;
             return true;
         }
@@ -1214,8 +1229,11 @@ struct KeyParser {
     mutable std::vector<std::unique_ptr<PubkeyProvider>> m_keys;
     //! Used to detect key parsing errors within a Miniscript.
     mutable std::string m_key_parsing_error;
+    //! The script context we're operating within (Tapscript or P2WSH).
+    const miniscript::MiniscriptContext m_script_ctx;
 
-    KeyParser(FlatSigningProvider* out LIFETIMEBOUND, const SigningProvider* in LIFETIMEBOUND) : m_out(out), m_in(in) {}
+    KeyParser(FlatSigningProvider* out LIFETIMEBOUND, const SigningProvider* in LIFETIMEBOUND, miniscript::MiniscriptContext ctx)
+        : m_out(out), m_in(in), m_script_ctx(ctx) {}
 
     bool KeyCompare(const Key& a, const Key& b) const {
         return *m_keys.at(a) < *m_keys.at(b);
@@ -1262,6 +1280,10 @@ struct KeyParser {
             return key;
         }
         return {};
+    }
+
+    miniscript::MiniscriptContext MsContext() const {
+        return m_script_ctx;
     }
 };
 
@@ -1502,7 +1524,7 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
     }
     // Process miniscript expressions.
     {
-        KeyParser parser(&out, nullptr);
+        KeyParser parser(/*out = */&out, /* in = */nullptr, /* ctx = */miniscript::MiniscriptContext::P2WSH);
         auto node = miniscript::FromString(std::string(expr.begin(), expr.end()), parser);
         if (node) {
             if (ctx != ParseScriptContext::P2WSH) {
@@ -1670,7 +1692,7 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
     }
 
     if (ctx == ParseScriptContext::P2WSH) {
-        KeyParser parser(nullptr, &provider);
+        KeyParser parser(/* out = */nullptr, /* in = */&provider, /* ctx = */miniscript::MiniscriptContext::P2WSH);
         auto node = miniscript::FromScript(script, parser);
         if (node && node->IsSane()) {
             return std::make_unique<MiniscriptDescriptor>(std::move(parser.m_keys), std::move(node));
