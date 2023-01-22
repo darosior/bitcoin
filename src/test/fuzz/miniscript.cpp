@@ -242,12 +242,16 @@ struct CheckerContext: BaseSignatureChecker {
     bool CheckSequence(const CScriptNum& nSequence) const override { return nSequence.GetInt64() & 1; }
 } CHECKER_CTX;
 
-//! Context to check for duplicates when instancing a Node.
-struct KeyComparator {
+//! Context for the creation of a Node.
+struct NodeCreator {
     bool KeyCompare(const CPubKey& a, const CPubKey& b) const {
         return a < b;
     }
-} KEY_COMP;
+
+    miniscript::MiniscriptContext MsContext() const {
+        return miniscript::MiniscriptContext::P2WSH;
+    }
+} CREATOR_CTX;
 
 // A dummy scriptsig to pass to VerifyScript (we always use Segwit v0).
 const CScript DUMMY_SCRIPTSIG;
@@ -262,7 +266,7 @@ using miniscript::operator"" _mst;
 
 //! Construct a miniscript node as a shared_ptr.
 template<typename... Args> NodeRef MakeNodeRef(Args&&... args) {
-    return miniscript::MakeNodeRef<CPubKey>(miniscript::internal::NoDupCheck{}, std::forward<Args>(args)...);
+    return miniscript::MakeNodeRef<CPubKey>(miniscript::internal::NoDupCheck{}, CREATOR_CTX, std::forward<Args>(args)...);
 }
 
 /** Information about a yet to be constructed Miniscript node. */
@@ -589,7 +593,8 @@ struct SmartInfo
                             if (subs > 0) subt.push_back(x);
                             if (subs > 1) subt.push_back(y);
                             if (subs > 2) subt.push_back(z);
-                            Type res = miniscript::internal::ComputeType(frag, x, y, z, subt, k, data_size, subs, n_keys);
+                            Type res = miniscript::internal::ComputeType(frag, x, y, z, subt, k, data_size, subs,
+                                                                         n_keys, miniscript::MiniscriptContext::P2WSH);
                             // Continue if the result is not a valid node.
                             if ((res << "K"_mst) + (res << "V"_mst) + (res << "B"_mst) + (res << "W"_mst) != 1) continue;
 
@@ -935,7 +940,7 @@ NodeRef GenNode(F ConsumeNode, Type root_type, bool strict_valid = false) {
     assert(stack.size() == 1);
     assert(stack[0]->GetStaticOps() == ops);
     assert(stack[0]->ScriptSize() == scriptsize);
-    stack[0]->DuplicateKeyCheck(KEY_COMP);
+    stack[0]->DuplicateKeyCheck(CREATOR_CTX);
     return std::move(stack[0]);
 }
 
