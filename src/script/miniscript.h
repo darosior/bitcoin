@@ -885,12 +885,11 @@ public:
     //! Check the ops limit of this script against the consensus limit.
     bool CheckOpsLimit() const { return GetOps() <= MAX_OPS_PER_SCRIPT; }
 
-    /** Return the maximum number of stack elements needed to satisfy this script non-malleably, including
-     * the script push. */
-    uint32_t GetStackSize() const { return ss.sat.value + 1; }
+    //! Return the maximum number of stack elements needed to satisfy this script non-malleably.
+    uint32_t GetStackSize() const { return ss.sat.value; }
 
     //! Check the maximum stack size for this script against the policy limit.
-    bool CheckStackSize() const { return GetStackSize() - 1 <= MAX_STANDARD_P2WSH_STACK_ITEMS; }
+    bool CheckStackSize() const { return GetStackSize() <= MAX_STANDARD_P2WSH_STACK_ITEMS; }
 
     //! Return the expression type.
     Type GetType() const { return typ; }
