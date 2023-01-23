@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <bench/bench.h>
+#include <bench/util/wallet_common.h>
 #include <interfaces/chain.h>
 #include <node/context.h>
 #include <test/util/mining.h>
@@ -19,8 +20,6 @@ using wallet::CreateMockWalletDatabase;
 using wallet::DBErrors;
 using wallet::GetBalance;
 using wallet::WALLET_FLAG_DESCRIPTORS;
-
-const std::string ADDRESS_BCRT1_UNSPENDABLE = "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq3xueyj";
 
 static void WalletBalance(benchmark::Bench& bench, const bool set_dirty, const bool add_mine)
 {
