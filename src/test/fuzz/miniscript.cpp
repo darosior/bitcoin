@@ -924,7 +924,7 @@ NodeRef GenNode(F ConsumeNode, Type root_type, bool strict_valid = false) {
             if (!(type_needed == ""_mst)) {
                 assert(node->GetType() << type_needed);
             }
-            if (!node->IsValid()) return {};
+            if (!node->IsValid(PARSER_CTX)) return {};
             // Update resource predictions.
             if (node->fragment == Fragment::WRAP_V && node->subs[0]->GetType() << "x"_mst) {
                 ops += 1;
@@ -968,7 +968,7 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
     }
 
     // The rest of the checks only apply when testing a valid top-level script.
-    if (!node->IsValidTopLevel()) return;
+    if (!node->IsValidTopLevel(PARSER_CTX)) return;
 
     // Check roundtrip to script
     auto decoded = miniscript::FromScript(script, PARSER_CTX);
@@ -1017,12 +1017,12 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
         ScriptError serror;
         bool res = VerifyScript(DUMMY_SCRIPTSIG, script_pubkey, &witness_nonmal, STANDARD_SCRIPT_VERIFY_FLAGS, CHECKER_CTX, &serror);
         // Non-malleable satisfactions are guaranteed to be valid if ValidSatisfactions().
-        if (node->ValidSatisfactions()) assert(res);
+        if (node->ValidSatisfactions(PARSER_CTX)) assert(res);
         // More detailed: non-malleable satisfactions must be valid, or could fail with ops count error (if CheckOpsLimit failed),
         // or with a stack size error (if CheckStackSize check failed).
         assert(res ||
-               (!node->CheckOpsLimit() && serror == ScriptError::SCRIPT_ERR_OP_COUNT) ||
-               (!node->CheckStackSize() && serror == ScriptError::SCRIPT_ERR_STACK_SIZE));
+               (!node->CheckOpsLimit(PARSER_CTX) && serror == ScriptError::SCRIPT_ERR_OP_COUNT) ||
+               (!node->CheckStackSize(PARSER_CTX) && serror == ScriptError::SCRIPT_ERR_STACK_SIZE));
     }
 
     if (mal_success && (!nonmal_success || witness_mal.stack != witness_nonmal.stack)) {
@@ -1034,7 +1034,7 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
         assert(res || serror == ScriptError::SCRIPT_ERR_OP_COUNT || serror == ScriptError::SCRIPT_ERR_STACK_SIZE);
     }
 
-    if (node->IsSane()) {
+    if (node->IsSane(PARSER_CTX)) {
         // For sane nodes, the two algorithms behave identically.
         assert(mal_success == nonmal_success);
     }

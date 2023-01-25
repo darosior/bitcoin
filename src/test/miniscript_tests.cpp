@@ -314,12 +314,12 @@ void TestSatisfy(const std::string& testcase, const NodeRef& node) {
                 ScriptError serror;
                 bool res = VerifyScript(CScript(), script_pubkey, &witness_nonmal, STANDARD_SCRIPT_VERIFY_FLAGS, checker, &serror);
                 // Non-malleable satisfactions are guaranteed to be valid if ValidSatisfactions().
-                if (node->ValidSatisfactions()) BOOST_CHECK(res);
+                if (node->ValidSatisfactions(CONVERTER)) BOOST_CHECK(res);
                 // More detailed: non-malleable satisfactions must be valid, or could fail with ops count error (if CheckOpsLimit failed),
                 // or with a stack size error (if CheckStackSize check fails).
                 BOOST_CHECK(res ||
-                            (!node->CheckOpsLimit() && serror == ScriptError::SCRIPT_ERR_OP_COUNT) ||
-                            (!node->CheckStackSize() && serror == ScriptError::SCRIPT_ERR_STACK_SIZE));
+                            (!node->CheckOpsLimit(CONVERTER) && serror == ScriptError::SCRIPT_ERR_OP_COUNT) ||
+                            (!node->CheckStackSize(CONVERTER) && serror == ScriptError::SCRIPT_ERR_STACK_SIZE));
             }
 
             if (mal_success && (!nonmal_success || witness_mal.stack != witness_nonmal.stack)) {
@@ -331,7 +331,7 @@ void TestSatisfy(const std::string& testcase, const NodeRef& node) {
                 BOOST_CHECK(res || serror == ScriptError::SCRIPT_ERR_OP_COUNT || serror == ScriptError::SCRIPT_ERR_STACK_SIZE);
             }
 
-            if (node->IsSane()) {
+            if (node->IsSane(CONVERTER)) {
                 // For sane nodes, the two algorithms behave identically.
                 BOOST_CHECK_EQUAL(mal_success, nonmal_success);
             }
@@ -341,7 +341,7 @@ void TestSatisfy(const std::string& testcase, const NodeRef& node) {
             // For nonmalleable solutions this is only true if the added condition is PK;
             // for other conditions, adding one may make an valid satisfaction become malleable. If the script
             // is sane, this cannot happen however.
-            if (node->IsSane() || add < 0 || challist[add].first == ChallengeType::PK) {
+            if (node->IsSane(CONVERTER) || add < 0 || challist[add].first == ChallengeType::PK) {
                 BOOST_CHECK(nonmal_success >= prev_nonmal_success);
             }
             // Remember results for the next added challenge.
@@ -353,7 +353,7 @@ void TestSatisfy(const std::string& testcase, const NodeRef& node) {
         // If the miniscript was satisfiable at all, a satisfaction must be found after all conditions are added.
         BOOST_CHECK_EQUAL(prev_mal_success, satisfiable);
         // If the miniscript is sane and satisfiable, a nonmalleable satisfaction must eventually be found.
-        if (node->IsSane()) BOOST_CHECK_EQUAL(prev_nonmal_success, satisfiable);
+        if (node->IsSane(CONVERTER)) BOOST_CHECK_EQUAL(prev_nonmal_success, satisfiable);
     }
 }
 
@@ -369,11 +369,11 @@ void Test(const std::string& ms, const std::string& hexscript, int mode, int ops
 {
     auto node = miniscript::FromString(ms, CONVERTER);
     if (mode == TESTMODE_INVALID) {
-        BOOST_CHECK_MESSAGE(!node || !node->IsValid(), "Unexpectedly valid: " + ms);
+        BOOST_CHECK_MESSAGE(!node || !node->IsValid(CONVERTER), "Unexpectedly valid: " + ms);
     } else {
         BOOST_CHECK_MESSAGE(node, "Unparseable: " + ms);
-        BOOST_CHECK_MESSAGE(node->IsValid(), "Invalid: " + ms);
-        BOOST_CHECK_MESSAGE(node->IsValidTopLevel(), "Invalid top level: " + ms);
+        BOOST_CHECK_MESSAGE(node->IsValid(CONVERTER), "Invalid: " + ms);
+        BOOST_CHECK_MESSAGE(node->IsValidTopLevel(CONVERTER), "Invalid top level: " + ms);
         auto computed_script = node->ToScript(CONVERTER);
         BOOST_CHECK_MESSAGE(node->ScriptSize() == computed_script.size(), "Script size mismatch: " + ms);
         if (hexscript != "?") BOOST_CHECK_MESSAGE(HexStr(computed_script) == hexscript, "Script mismatch: " + ms + " (" + HexStr(computed_script) + " vs " + hexscript + ")");
@@ -516,31 +516,31 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     // (for now) have 'd:' be 'u'. This tests we can't use a 'd:' wrapper for a thresh, which requires
     // its subs to all be 'u' (taken from https://github.com/rust-bitcoin/rust-miniscript/discussions/341).
     const auto ms_minimalif = miniscript::FromString("thresh(3,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),sc:pk_k(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556),sc:pk_k(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),sdv:older(32))", CONVERTER);
-    BOOST_CHECK(ms_minimalif && !ms_minimalif->IsValid());
+    BOOST_CHECK(ms_minimalif && !ms_minimalif->IsValid(CONVERTER));
     // A Miniscript with duplicate keys is not sane
     const auto ms_dup1 = miniscript::FromString("and_v(v:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65))", CONVERTER);
     BOOST_CHECK(ms_dup1);
-    BOOST_CHECK(!ms_dup1->IsSane() && !ms_dup1->CheckDuplicateKey());
+    BOOST_CHECK(!ms_dup1->IsSane(CONVERTER) && !ms_dup1->CheckDuplicateKey());
     // Same with a disjunction, and different key nodes (pk and pkh)
     const auto ms_dup2 = miniscript::FromString("or_b(c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),ac:pk_h(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65))", CONVERTER);
-    BOOST_CHECK(ms_dup2 && !ms_dup2->IsSane() && !ms_dup2->CheckDuplicateKey());
+    BOOST_CHECK(ms_dup2 && !ms_dup2->IsSane(CONVERTER) && !ms_dup2->CheckDuplicateKey());
     // Same when the duplicates are leaves or a larger tree
     const auto ms_dup3 = miniscript::FromString("or_i(and_b(pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),s:pk(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556)),and_b(older(1),s:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65)))", CONVERTER);
-    BOOST_CHECK(ms_dup3 && !ms_dup3->IsSane() && !ms_dup3->CheckDuplicateKey());
+    BOOST_CHECK(ms_dup3 && !ms_dup3->IsSane(CONVERTER) && !ms_dup3->CheckDuplicateKey());
     // Same when the duplicates are on different levels in the tree
     const auto ms_dup4 = miniscript::FromString("thresh(2,pkh(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),s:pk(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556),a:and_b(dv:older(1),s:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65)))", CONVERTER);
-    BOOST_CHECK(ms_dup4 && !ms_dup4->IsSane() && !ms_dup4->CheckDuplicateKey());
+    BOOST_CHECK(ms_dup4 && !ms_dup4->IsSane(CONVERTER) && !ms_dup4->CheckDuplicateKey());
     // Sanity check the opposite is true, too. An otherwise sane Miniscript with no duplicate keys is sane.
     const auto ms_nondup = miniscript::FromString("pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65)", CONVERTER);
-    BOOST_CHECK(ms_nondup && ms_nondup->CheckDuplicateKey() && ms_nondup->IsSane());
+    BOOST_CHECK(ms_nondup && ms_nondup->CheckDuplicateKey() && ms_nondup->IsSane(CONVERTER));
     // Test we find the first insane sub closer to be a leaf node. This fragment is insane for two reasons:
     // 1. It can be spent without a signature
     // 2. It contains timelock mixes
     // We'll report the timelock mix error, as it's "deeper" (closer to be a leaf node) than the "no 's' property"
     // error is.
     const auto ms_ins = miniscript::FromString("or_i(and_b(after(1),a:after(1000000000)),pk(03cdabb7f2dce7bfbd8a0b9570c6fd1e712e5d64045e9d6b517b3d5072251dc204))", CONVERTER);
-    BOOST_CHECK(ms_ins && ms_ins->IsValid() && !ms_ins->IsSane());
-    const auto insane_sub = ms_ins->FindInsaneSub();
+    BOOST_CHECK(ms_ins && ms_ins->IsValid(CONVERTER) && !ms_ins->IsSane(CONVERTER));
+    const auto insane_sub = ms_ins->FindInsaneSub(CONVERTER);
     BOOST_CHECK(insane_sub && *insane_sub->ToString(CONVERTER) == "and_b(after(1),a:after(1000000000))");
 
     // Timelock tests

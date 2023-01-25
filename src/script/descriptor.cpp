@@ -1524,23 +1524,23 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
     }
     // Process miniscript expressions.
     {
-        KeyParser parser(/*out = */&out, /* in = */nullptr, /* ctx = */miniscript::MiniscriptContext::P2WSH);
-        auto node = miniscript::FromString(std::string(expr.begin(), expr.end()), parser);
+        KeyParser parser_ctx(/*out = */&out, /* in = */nullptr, /* ctx = */miniscript::MiniscriptContext::P2WSH);
+        auto node = miniscript::FromString(std::string(expr.begin(), expr.end()), parser_ctx);
         if (node) {
             if (ctx != ParseScriptContext::P2WSH) {
                 error = "Miniscript expressions can only be used in wsh";
                 return nullptr;
             }
-            if (parser.m_key_parsing_error != "") {
-                error = std::move(parser.m_key_parsing_error);
+            if (parser_ctx.m_key_parsing_error != "") {
+                error = std::move(parser_ctx.m_key_parsing_error);
                 return nullptr;
             }
-            if (!node->IsSane()) {
+            if (!node->IsSane(parser_ctx)) {
                 // Try to find the first insane sub for better error reporting.
                 auto insane_node = node.get();
-                if (const auto sub = node->FindInsaneSub()) insane_node = sub;
-                if (const auto str = insane_node->ToString(parser)) error = *str;
-                if (!insane_node->IsValid()) {
+                if (const auto sub = node->FindInsaneSub(parser_ctx)) insane_node = sub;
+                if (const auto str = insane_node->ToString(parser_ctx)) error = *str;
+                if (!insane_node->IsValid(parser_ctx)) {
                     error += " is invalid";
                 } else {
                     error += " is not sane";
@@ -1552,13 +1552,13 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
                         error += ": contains mixes of timelocks expressed in blocks and seconds";
                     } else if (!insane_node->CheckDuplicateKey()) {
                         error += ": contains duplicate public keys";
-                    } else if (!insane_node->ValidSatisfactions()) {
+                    } else if (!insane_node->ValidSatisfactions(parser_ctx)) {
                         error += ": needs witnesses that may exceed resource limits";
                     }
                 }
                 return nullptr;
             }
-            return std::make_unique<MiniscriptDescriptor>(std::move(parser.m_keys), std::move(node));
+            return std::make_unique<MiniscriptDescriptor>(std::move(parser_ctx.m_keys), std::move(node));
         }
     }
     if (ctx == ParseScriptContext::P2SH) {
@@ -1692,10 +1692,10 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
     }
 
     if (ctx == ParseScriptContext::P2WSH) {
-        KeyParser parser(/* out = */nullptr, /* in = */&provider, /* ctx = */miniscript::MiniscriptContext::P2WSH);
-        auto node = miniscript::FromScript(script, parser);
-        if (node && node->IsSane()) {
-            return std::make_unique<MiniscriptDescriptor>(std::move(parser.m_keys), std::move(node));
+        KeyParser parser_ctx(/* out = */nullptr, /* in = */&provider, /* ctx = */miniscript::MiniscriptContext::P2WSH);
+        auto node = miniscript::FromScript(script, parser_ctx);
+        if (node && node->IsSane(parser_ctx)) {
+            return std::make_unique<MiniscriptDescriptor>(std::move(parser_ctx.m_keys), std::move(node));
         }
     }
 
