@@ -812,6 +812,10 @@ private:
         assert(false);
     }
 
+    template <typename Ctx> bool IsTapscript(const Ctx& ctx) const {
+        return ctx.MsContext() == MiniscriptContext::TAPSCRIPT;
+    }
+
 public:
     /** Update duplicate key information in this Node.
      *
@@ -882,32 +886,46 @@ public:
     //! Return the maximum number of ops needed to satisfy this script non-malleably.
     uint32_t GetOps() const { return ops.count + ops.sat.value; }
 
-    //! Check the ops limit of this script against the consensus limit.
-    bool CheckOpsLimit() const { return GetOps() <= MAX_OPS_PER_SCRIPT; }
+    //! Check the ops limit of this script against the consensus limit. This limit is only present for P2WSH.
+    template <typename Ctx> bool CheckOpsLimit(const Ctx& ctx) const {
+        return IsTapscript(ctx) || GetOps() <= MAX_OPS_PER_SCRIPT;
+    }
 
     //! Return the maximum number of stack elements needed to satisfy this script non-malleably.
     uint32_t GetStackSize() const { return ss.sat.value; }
 
-    //! Check the maximum stack size for this script against the policy limit.
-    bool CheckStackSize() const { return GetStackSize() <= MAX_STANDARD_P2WSH_STACK_ITEMS; }
+    //! Check the maximum stack size for this script against the limit.
+    template <typename Ctx> bool CheckStackSize(const Ctx& ctx) const {
+        // For Tapscript, not only the witness stack size must be less than the max stack size, but the
+        // stack size must never grow larger than MAX_STACK_SIZE after the execution of each opcode in each
+        // of the fragments. Fortunately, no fragment increase the stack size by more than 2 items whether
+        // while or after it is executed. Therefore a witness stack size of 998 can never grow to be larger
+        // than 1000 items while the script is executed.
+        return GetStackSize() <= (IsTapscript(ctx) ? (MAX_STACK_SIZE - 2) : MAX_STANDARD_P2WSH_STACK_ITEMS);
+    }
 
     //! Return the expression type.
     Type GetType() const { return typ; }
 
     //! Find an insane subnode which has no insane children. Nullptr if there is none.
-    const Node* FindInsaneSub() const {
-        return TreeEval<const Node*>([](const Node& node, Span<const Node*> subs) -> const Node* {
+    template <typename Ctx> const Node* FindInsaneSub(const Ctx& ctx) const {
+        return TreeEval<const Node*>([&ctx](const Node& node, Span<const Node*> subs) -> const Node* {
             for (auto& sub: subs) if (sub) return sub;
-            if (!node.IsSaneSubexpression()) return &node;
+            if (!node.IsSaneSubexpression(ctx)) return &node;
             return nullptr;
         });
     }
 
     //! Check whether this node is valid at all.
-    bool IsValid() const { return !(GetType() == ""_mst) && ScriptSize() <= MAX_STANDARD_P2WSH_SCRIPT_SIZE; }
+    template <typename Ctx> bool IsValid(const Ctx& ctx) const {
+        if (GetType() == ""_mst) return false;
+        return ScriptSize() <= (IsTapscript(ctx) ? MAX_SCRIPT_SIZE : MAX_STANDARD_P2WSH_SCRIPT_SIZE);
+    }
 
     //! Check whether this node is valid as a script on its own.
-    bool IsValidTopLevel() const { return IsValid() && GetType() << "B"_mst; }
+    template <typename Ctx> bool IsValidTopLevel(const Ctx& ctx) const {
+        return IsValid(ctx) && GetType() << "B"_mst;
+    }
 
     //! Check whether this script can always be satisfied in a non-malleable way.
     bool IsNonMalleable() const { return GetType() << "m"_mst; }
@@ -922,13 +940,19 @@ public:
     bool CheckDuplicateKey() const { return has_duplicate_keys && !*has_duplicate_keys; }
 
     //! Whether successful non-malleable satisfactions are guaranteed to be valid.
-    bool ValidSatisfactions() const { return IsValid() && CheckOpsLimit() && CheckStackSize(); }
+    template <typename Ctx> bool ValidSatisfactions(const Ctx& ctx) const {
+        return IsValid(ctx) && CheckOpsLimit(ctx) && CheckStackSize(ctx);
+    }
 
     //! Whether the apparent policy of this node matches its script semantics. Doesn't guarantee it is a safe script on its own.
-    bool IsSaneSubexpression() const { return ValidSatisfactions() && IsNonMalleable() && CheckTimeLocksMix() && CheckDuplicateKey(); }
+    template <typename Ctx> bool IsSaneSubexpression(const Ctx& ctx) const {
+        return ValidSatisfactions(ctx) && IsNonMalleable() && CheckTimeLocksMix() && CheckDuplicateKey();
+    }
 
     //! Check whether this node is safe as a script on its own.
-    bool IsSane() const { return IsValidTopLevel() && IsSaneSubexpression() && NeedsSignature(); }
+    template <typename Ctx> bool IsSane(const Ctx& ctx) const {
+        return IsValidTopLevel(ctx) && IsSaneSubexpression(ctx) && NeedsSignature();
+    }
 
     //! Equality testing.
     bool operator==(const Node<Key>& arg) const { return Compare(*this, arg) == 0; }
@@ -1079,6 +1103,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
     //   (instead transforming another opcode into its VERIFY form). However, the v: wrapper has
     //   to be interleaved with other fragments to be valid, so this is not a concern.
     size_t script_size{1};
+    size_t max_size{(ctx.MsContext() == MiniscriptContext::TAPSCRIPT) ? MAX_SCRIPT_SIZE : MAX_STANDARD_P2WSH_SCRIPT_SIZE};
 
     // The two integers are used to hold state for thresh()
     std::vector<std::tuple<ParseContext, int64_t, int64_t>> to_parse;
@@ -1122,7 +1147,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
     };
 
     while (!to_parse.empty()) {
-        if (script_size > MAX_STANDARD_P2WSH_SCRIPT_SIZE) return {};
+        if (script_size > max_size) return {};
 
         // Get the current context we are decoding within
         auto [cur_context, n, k] = to_parse.back();
@@ -1141,7 +1166,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
             // If there is no colon, this loop won't execute
             bool last_was_v{false};
             for (size_t j = 0; colon_index && j < *colon_index; ++j) {
-                if (script_size > MAX_STANDARD_P2WSH_SCRIPT_SIZE) return {};
+                if (script_size > max_size) return {};
                 if (in[j] == 'a') {
                     script_size += 2;
                     to_parse.emplace_back(ParseContext::ALT, -1, -1);
@@ -1534,7 +1559,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
 
     while (!to_parse.empty()) {
         // Exit early if the Miniscript is not going to be valid.
-        if (!constructed.empty() && !constructed.back()->IsValid()) return {};
+        if (!constructed.empty() && !constructed.back()->IsValid(ctx)) return {};
 
         // Get the current context we are decoding within
         auto [cur_context, n, k] = to_parse.back();
@@ -1907,7 +1932,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
     tl_node->DuplicateKeyCheck(ctx);
     // Note that due to how ComputeType works (only assign the type to the node if the
     // subs' types are valid) this would fail if any node of tree is badly typed.
-    if (!tl_node->IsValidTopLevel()) return {};
+    if (!tl_node->IsValidTopLevel(ctx)) return {};
     return tl_node;
 }
 
@@ -1922,7 +1947,8 @@ template<typename Ctx>
 inline NodeRef<typename Ctx::Key> FromScript(const CScript& script, const Ctx& ctx) {
     using namespace internal;
     // A too large Script is necessarily invalid, don't bother parsing it.
-    if (script.size() > MAX_STANDARD_P2WSH_SCRIPT_SIZE) return {};
+    size_t max_size{(ctx.MsContext() == MiniscriptContext::TAPSCRIPT) ? MAX_SCRIPT_SIZE : MAX_STANDARD_P2WSH_SCRIPT_SIZE};
+    if (script.size() > max_size) return {};
     auto decomposed = DecomposeScript(script);
     if (!decomposed) return {};
     auto it = decomposed->begin();
