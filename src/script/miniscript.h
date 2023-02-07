@@ -241,7 +241,7 @@ namespace internal {
 Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Type>& sub_types, uint32_t k, size_t data_size, size_t n_subs, size_t n_keys, MiniscriptContext ms_ctx);
 
 //! Helper function for Node::CalcScriptLen.
-size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_t k, size_t n_subs, size_t n_keys);
+size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_t k, size_t n_subs, size_t n_keys, MiniscriptContext ms_ctx);
 
 //! A helper sanitizer/checker for the output of CalcType.
 Type SanitizeType(Type x);
@@ -379,13 +379,13 @@ private:
 
 
     //! Compute the length of the script for this miniscript (including children).
-    size_t CalcScriptLen() const {
+    size_t CalcScriptLen(MiniscriptContext ms_ctx) const {
         size_t subsize = 0;
         for (const auto& sub : subs) {
             subsize += sub->ScriptSize();
         }
         Type sub0type = subs.size() > 0 ? subs[0]->GetType() : ""_mst;
-        return internal::ComputeScriptLen(fragment, sub0type, subsize, k, subs.size(), keys.size());
+        return internal::ComputeScriptLen(fragment, sub0type, subsize, k, subs.size(), keys.size(), ms_ctx);
     }
 
     /* Apply a recursive algorithm to a Miniscript tree, without actual recursive calls.
@@ -1312,17 +1312,17 @@ public:
 
     // Constructors with various argument combinations, which bypass the duplicate key check.
     template <typename Ctx> Node(internal::NoDupCheck, const Ctx& ctx, Fragment nt, std::vector<NodeRef<Key>> sub, std::vector<unsigned char> arg, uint32_t val = 0)
-        : fragment(nt), k(val), data(std::move(arg)), subs(std::move(sub)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen()) {}
+        : fragment(nt), k(val), data(std::move(arg)), subs(std::move(sub)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen(ctx.MsContext())) {}
     template <typename Ctx> Node(internal::NoDupCheck, const Ctx& ctx, Fragment nt, std::vector<unsigned char> arg, uint32_t val = 0)
-        : fragment(nt), k(val), data(std::move(arg)),  ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen()) {}
+        : fragment(nt), k(val), data(std::move(arg)),  ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen(ctx.MsContext())) {}
     template <typename Ctx> Node(internal::NoDupCheck, const Ctx& ctx, Fragment nt, std::vector<NodeRef<Key>> sub, std::vector<Key> key, uint32_t val = 0)
-        : fragment(nt), k(val), keys(std::move(key)), subs(std::move(sub)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen()) {}
+        : fragment(nt), k(val), keys(std::move(key)), subs(std::move(sub)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen(ctx.MsContext())) {}
     template <typename Ctx> Node(internal::NoDupCheck, const Ctx& ctx, Fragment nt, std::vector<Key> key, uint32_t val = 0)
-        : fragment(nt), k(val), keys(std::move(key)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen()) {}
+        : fragment(nt), k(val), keys(std::move(key)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen(ctx.MsContext())) {}
     template <typename Ctx> Node(internal::NoDupCheck, const Ctx& ctx, Fragment nt, std::vector<NodeRef<Key>> sub, uint32_t val = 0)
-        : fragment(nt), k(val), subs(std::move(sub)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen()) {}
+        : fragment(nt), k(val), subs(std::move(sub)), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen(ctx.MsContext())) {}
     template <typename Ctx> Node(internal::NoDupCheck, const Ctx& ctx, Fragment nt, uint32_t val = 0)
-        : fragment(nt), k(val), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen()) {}
+        : fragment(nt), k(val), ops(CalcOps()), ss(CalcStackSize()), typ(CalcType(ctx.MsContext())), scriptlen(CalcScriptLen(ctx.MsContext())) {}
 
     // Constructors with various argument combinations, which do perform the duplicate key check.
     template <typename Ctx> Node(const Ctx& ctx, Fragment nt, std::vector<NodeRef<Key>> sub, std::vector<unsigned char> arg, uint32_t val = 0)
@@ -1574,7 +1574,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 auto& [key, key_size] = *res;
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx, Fragment::WRAP_C, Vector(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx, Fragment::PK_K, Vector(std::move(key))))));
                 in = in.subspan(key_size + 1);
-                script_size += 34;
+                script_size += (ctx.MsContext() == MiniscriptContext::TAPSCRIPT) ? 33 : 34;
             } else if (Const("pkh(", in)) {
                 auto res = ParseKeyEnd<Key>(in, ctx);
                 if (!res) return {};
@@ -1588,7 +1588,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 auto& [key, key_size] = *res;
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx, Fragment::PK_K, Vector(std::move(key))));
                 in = in.subspan(key_size + 1);
-                script_size += 33;
+                script_size += (ctx.MsContext() == MiniscriptContext::TAPSCRIPT) ? 32 : 33;
             } else if (Const("pk_h(", in)) {
                 auto res = ParseKeyEnd<Key>(in, ctx);
                 if (!res) return {};
@@ -1934,7 +1934,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 break;
             }
             // Public keys
-            if (in[0].second.size() == 33) {
+            if (in[0].second.size() == 33 || in[0].second.size() == 32) {
                 auto key = ctx.FromPKBytes(in[0].second.begin(), in[0].second.end());
                 if (!key) return {};
                 ++in;
