@@ -276,6 +276,9 @@ public:
      */
     std::vector<CKeyID> GetKeyIDs() const;
 
+    /** Get the compressed key form of this key. Note the Y coordinate of an x-only key is always even. */
+    CPubKey GetCPubKey() const;
+
     const unsigned char& operator[](int pos) const { return *(m_keydata.begin() + pos); }
     const unsigned char* data() const { return m_keydata.begin(); }
     static constexpr size_t size() { return decltype(m_keydata)::size(); }
