@@ -47,6 +47,8 @@ struct TestData {
 struct ParserContext {
     typedef CPubKey Key;
 
+    miniscript::MiniscriptContext script_ctx{miniscript::MiniscriptContext::P2WSH};
+
     bool KeyCompare(const Key& a, const Key& b) const {
         return a < b;
     }
@@ -86,12 +88,18 @@ struct ParserContext {
     }
 
     miniscript::MiniscriptContext MsContext() const {
-        return miniscript::MiniscriptContext::P2WSH;
+        return script_ctx;
+    }
+
+    void SetContext(miniscript::MiniscriptContext ctx) {
+        script_ctx = ctx;
     }
 } PARSER_CTX;
 
 //! Context that implements naive conversion from/to script only, for roundtrip testing.
 struct ScriptParserContext {
+    miniscript::MiniscriptContext script_ctx{miniscript::MiniscriptContext::P2WSH};
+
     //! For Script roundtrip we never need the key from a key hash.
     struct Key {
         bool is_hash;
@@ -134,9 +142,18 @@ struct ScriptParserContext {
     }
 
     miniscript::MiniscriptContext MsContext() const {
-        return miniscript::MiniscriptContext::P2WSH;
+        return script_ctx;
+    }
+
+    void SetContext(miniscript::MiniscriptContext ctx) {
+        script_ctx = ctx;
     }
 } SCRIPT_PARSER_CONTEXT;
+
+miniscript::MiniscriptContext SCRIPT_CTXS[2] = {
+    miniscript::MiniscriptContext::P2WSH,
+    miniscript::MiniscriptContext::TAPSCRIPT
+};
 
 } // namespace
 
@@ -151,14 +168,18 @@ FUZZ_TARGET_INIT(miniscript_string, FuzzInit)
 {
     FuzzedDataProvider provider(buffer.data(), buffer.size());
     auto str = provider.ConsumeRemainingBytesAsString();
-    auto parsed = miniscript::FromString(str, PARSER_CTX);
-    if (!parsed) return;
 
-    const auto str2 = parsed->ToString(PARSER_CTX);
-    assert(str2);
-    auto parsed2 = miniscript::FromString(*str2, PARSER_CTX);
-    assert(parsed2);
-    assert(*parsed == *parsed2);
+    for (const auto script_ctx : SCRIPT_CTXS) {
+        PARSER_CTX.SetContext(script_ctx);
+        auto parsed = miniscript::FromString(str, PARSER_CTX);
+        if (!parsed) return;
+
+        const auto str2 = parsed->ToString(PARSER_CTX);
+        assert(str2);
+        auto parsed2 = miniscript::FromString(*str2, PARSER_CTX);
+        assert(parsed2);
+        assert(*parsed == *parsed2);
+    }
 }
 
 /* Fuzz tests that test parsing from a script, and roundtripping via script. */
@@ -168,8 +189,11 @@ FUZZ_TARGET(miniscript_script)
     const std::optional<CScript> script = ConsumeDeserializable<CScript>(fuzzed_data_provider);
     if (!script) return;
 
-    const auto ms = miniscript::FromScript(*script, SCRIPT_PARSER_CONTEXT);
-    if (!ms) return;
+    for (const auto script_ctx : SCRIPT_CTXS) {
+        SCRIPT_PARSER_CONTEXT.SetContext(script_ctx);
+        const auto ms = miniscript::FromScript(*script, SCRIPT_PARSER_CONTEXT);
+        if (!ms) return;
 
-    assert(ms->ToScript(SCRIPT_PARSER_CONTEXT) == *script);
+        assert(ms->ToScript(SCRIPT_PARSER_CONTEXT) == *script);
+    }
 }
