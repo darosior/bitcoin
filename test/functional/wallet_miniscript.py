@@ -32,7 +32,7 @@ PUBKEYS = [
     "0211c7b2e18b6fd330f322de087da62da92ae2ae3d0b7cec7e616479cce175f183",
 ]
 
-MINISCRIPTS = [
+P2WSH_MINISCRIPTS = [
     # One of two keys
     f"or_b(pk({TPUBS[0]}/*),s:pk({TPUBS[1]}/*))",
     # A script similar (same spending policy) to BOLT3's offered HTLC (with anchor outputs)
@@ -41,6 +41,18 @@ MINISCRIPTS = [
     f"andor(multi(2,{TPUBS[0]}/*,{TPUBS[1]}/*),and_v(v:multi(4,{PUBKEYS[0]},{PUBKEYS[1]},{PUBKEYS[2]},{PUBKEYS[3]}),after(424242)),thresh(4,pkh({TPUBS[2]}/*),a:pkh({TPUBS[3]}/*),a:pkh({TPUBS[4]}/*),a:pkh({TPUBS[5]}/*)))",
     # Liquid-like federated pegin with emergency recovery keys
     "or_i(and_b(pk(029ffbe722b147f3035c87cb1c60b9a5947dd49c774cc31e94773478711a929ac0),a:and_b(pk(025f05815e3a1a8a83bfbb03ce016c9a2ee31066b98f567f6227df1d76ec4bd143),a:and_b(pk(025625f41e4a065efc06d5019cbbd56fe8c07595af1231e7cbc03fafb87ebb71ec),a:and_b(pk(02a27c8b850a00f67da3499b60562673dcf5fdfb82b7e17652a7ac54416812aefd),s:pk(03e618ec5f384d6e19ca9ebdb8e2119e5bef978285076828ce054e55c4daf473e2))))),and_v(v:thresh(2,pkh(tpubD6NzVbkrYhZ4YK67cd5fDe4fBVmGB2waTDrAt1q4ey9HPq9veHjWkw3VpbaCHCcWozjkhgAkWpFrxuPMUrmXVrLHMfEJ9auoZA6AS1g3grC/*),a:pkh(033841045a531e1adf9910a6ec279589a90b3b8a904ee64ffd692bd08a8996c1aa),a:pkh(02aebf2d10b040eb936a6f02f44ee82f8b34f5c1ccb20ff3949c2b28206b7c1068)),older(4209713)))",
+]
+
+MINISCRIPTS = [
+    *[f"wsh({ms})" for ms in P2WSH_MINISCRIPTS],
+    # A Taproot with one of the above scripts as the single script path.
+    f"tr(4d54bb9928a0683b7e383de72943b214b0716f58aa54c7ba6bcea2328bc9c768,{P2WSH_MINISCRIPTS[0]})",
+    # A Taproot with two script paths among the above scripts.
+    f"tr(4d54bb9928a0683b7e383de72943b214b0716f58aa54c7ba6bcea2328bc9c768,{{{P2WSH_MINISCRIPTS[0]},{P2WSH_MINISCRIPTS[1]}}})",
+    # A Taproot with three script paths among the above scripts.
+    f"tr(4d54bb9928a0683b7e383de72943b214b0716f58aa54c7ba6bcea2328bc9c768,{{{{{P2WSH_MINISCRIPTS[0]},{P2WSH_MINISCRIPTS[1]}}},{P2WSH_MINISCRIPTS[2].replace('multi', 'multi_a')}}})",
+    # A Taproot with all above scripts in its tree.
+    f"tr(4d54bb9928a0683b7e383de72943b214b0716f58aa54c7ba6bcea2328bc9c768,{{{{{P2WSH_MINISCRIPTS[0]},{P2WSH_MINISCRIPTS[1]}}},{{{P2WSH_MINISCRIPTS[2].replace('multi', 'multi_a')},{P2WSH_MINISCRIPTS[3]}}}}})",
 ]
 
 
@@ -55,10 +67,10 @@ class WalletMiniscriptTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
         self.skip_if_no_sqlite()
 
-    def watchonly_test(self, ms):
-        self.log.info(f"Importing Miniscript '{ms}'")
-        desc = descsum_create(f"wsh({ms})")
-        assert self.ms_wo_wallet.importdescriptors(
+    def watchonly_test(self, desc):
+        self.log.info(f"Importing Miniscript '{desc}'")
+        desc = descsum_create(f"{desc}")
+        res = self.ms_wo_wallet.importdescriptors(
             [
                 {
                     "desc": desc,
@@ -68,14 +80,20 @@ class WalletMiniscriptTest(BitcoinTestFramework):
                     "timestamp": "now",
                 }
             ]
-        )[0]["success"]
+        )[0]
+        assert res["success"], res
 
         self.log.info("Testing we derive new addresses for it")
+        addr_type = "bech32"
+        if desc.startswith("tr("):
+            addr_type += "m"
         assert_equal(
-            self.ms_wo_wallet.getnewaddress(), self.funder.deriveaddresses(desc, 0)[0]
+            self.ms_wo_wallet.getnewaddress(address_type=addr_type),
+            self.funder.deriveaddresses(desc, 0)[0],
         )
         assert_equal(
-            self.ms_wo_wallet.getnewaddress(), self.funder.deriveaddresses(desc, 1)[1]
+            self.ms_wo_wallet.getnewaddress(address_type=addr_type),
+            self.funder.deriveaddresses(desc, 1)[1],
         )
 
         self.log.info("Testing we detect funds sent to one of them")
@@ -85,7 +103,9 @@ class WalletMiniscriptTest(BitcoinTestFramework):
             lambda: len(self.ms_wo_wallet.listunspent(minconf=0, addresses=[addr])) == 1
         )
         utxo = self.ms_wo_wallet.listunspent(minconf=0, addresses=[addr])[0]
-        assert utxo["txid"] == txid and not utxo["solvable"]  # No satisfaction logic (yet)
+        assert (
+            utxo["txid"] == txid and not utxo["solvable"]
+        )  # No satisfaction logic (yet)
 
     def run_test(self):
         self.log.info("Making a descriptor wallet")
@@ -108,11 +128,13 @@ class WalletMiniscriptTest(BitcoinTestFramework):
             ]
         )[0]
         assert not res["success"]
-        assert "is not sane: witnesses without signature exist" in res["error"]["message"]
+        assert (
+            "is not sane: witnesses without signature exist" in res["error"]["message"]
+        )
 
         # Test we can track any type of Miniscript
-        for ms in MINISCRIPTS:
-            self.watchonly_test(ms)
+        for desc in MINISCRIPTS:
+            self.watchonly_test(desc)
 
 
 if __name__ == "__main__":
