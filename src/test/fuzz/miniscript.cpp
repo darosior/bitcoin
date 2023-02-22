@@ -14,6 +14,15 @@
 
 namespace {
 
+using Fragment = miniscript::Fragment;
+using NodeRef = miniscript::NodeRef<CPubKey>;
+using Node = miniscript::Node<CPubKey>;
+using Type = miniscript::Type;
+using MsCtx = miniscript::MiniscriptContext;
+// https://github.com/llvm/llvm-project/issues/53444
+// NOLINTNEXTLINE(misc-unused-using-decls)
+using miniscript::operator"" _mst;
+
 //! Some pre-computed data for more efficient string roundtrips and to simulate challenges.
 struct TestData {
     typedef CPubKey Key;
@@ -23,6 +32,7 @@ struct TestData {
     std::map<Key, int> dummy_key_idx_map;
     std::map<CKeyID, Key> dummy_keys_map;
     std::map<Key, std::pair<std::vector<unsigned char>, bool>> dummy_sigs;
+    std::map<XOnlyPubKey, std::pair<std::vector<unsigned char>, bool>> schnorr_sigs;
 
     // Precomputed hashes of each kind.
     std::vector<std::vector<unsigned char>> sha256;
@@ -37,6 +47,11 @@ struct TestData {
     //! Set the precomputed data.
     void Init() {
         unsigned char keydata[32] = {1};
+        // All our signatures sign (and are required to sign) this constant message.
+        auto const MESSAGE_HASH{uint256S("f5cd94e18b6fe77dd7aca9e35c2b0c9cbd86356c80a71065")};
+        // We don't pass additional randomness when creating a schnorr signature.
+        auto const EMPTY_AUX{uint256S("")};
+
         for (size_t i = 0; i < 256; i++) {
             keydata[31] = i;
             CKey privkey;
@@ -46,11 +61,17 @@ struct TestData {
             dummy_keys.push_back(pubkey);
             dummy_key_idx_map.emplace(pubkey, i);
             dummy_keys_map.insert({pubkey.GetID(), pubkey});
+            XOnlyPubKey xonly_pubkey{pubkey};
+            dummy_key_idx_map.emplace(xonly_pubkey, i);
+            uint160 xonly_hash{Hash160(xonly_pubkey)};
+            dummy_keys_map.emplace(xonly_hash, pubkey);
 
-            std::vector<unsigned char> sig;
-            privkey.Sign(uint256S(""), sig);
+            std::vector<unsigned char> sig, schnorr_sig(64);
+            privkey.Sign(MESSAGE_HASH, sig);
             sig.push_back(1); // SIGHASH_ALL
             dummy_sigs.insert({pubkey, {sig, i & 1}});
+            assert(privkey.SignSchnorr(MESSAGE_HASH, schnorr_sig, nullptr, EMPTY_AUX));
+            schnorr_sigs.emplace(XOnlyPubKey{pubkey}, std::make_pair(std::move(schnorr_sig), i & 1));
 
             std::vector<unsigned char> hash;
             hash.resize(32);
@@ -72,6 +93,9 @@ struct TestData {
     }
 } TEST_DATA;
 
+//! Script context under which a target run operates.
+MsCtx SCRIPT_CTX{MsCtx::P2WSH};
+
 /**
  * Context to parse a Miniscript node to and from Script or text representation.
  * Uses an integer (an index in the dummy keys array from the test data) as keys in order
@@ -92,14 +116,22 @@ struct ParserContext {
         return HexStr(Span{&idx, 1});
     }
 
-    std::vector<unsigned char> ToPKBytes(const Key& key) const
-    {
-        return {key.begin(), key.end()};
+    std::vector<unsigned char> ToPKBytes(const Key& key) const {
+        if (SCRIPT_CTX == miniscript::MiniscriptContext::P2WSH) {
+            return {key.begin(), key.end()};
+        }
+        assert(SCRIPT_CTX == miniscript::MiniscriptContext::TAPSCRIPT);
+        const XOnlyPubKey xonly_pubkey{key};
+        return {xonly_pubkey.begin(), xonly_pubkey.end()};
     }
 
-    std::vector<unsigned char> ToPKHBytes(const Key& key) const
-    {
-        const auto h = Hash160(key);
+    std::vector<unsigned char> ToPKHBytes(const Key& key) const {
+        if (SCRIPT_CTX == miniscript::MiniscriptContext::P2WSH) {
+            const auto h = Hash160(key);
+            return {h.begin(), h.end()};
+        }
+        assert(SCRIPT_CTX == miniscript::MiniscriptContext::TAPSCRIPT);
+        const auto h = Hash160(XOnlyPubKey{key});
         return {h.begin(), h.end()};
     }
 
@@ -113,10 +145,16 @@ struct ParserContext {
 
     template<typename I>
     std::optional<Key> FromPKBytes(I first, I last) const {
-        CPubKey key;
-        key.Set(first, last);
-        if (!key.IsValid()) return {};
-        return key;
+        if (SCRIPT_CTX == miniscript::MiniscriptContext::P2WSH) {
+            Key key{first, last};
+            if (key.IsValid()) return key;
+            return {};
+        }
+        assert(SCRIPT_CTX == miniscript::MiniscriptContext::TAPSCRIPT);
+        if (last - first != 32) return {};
+        XOnlyPubKey xonly_pubkey;
+        std::copy(first, last, xonly_pubkey.begin());
+        return xonly_pubkey.GetCPubKey();
     }
 
     template<typename I>
@@ -129,8 +167,8 @@ struct ParserContext {
         return it->second;
     }
 
-    miniscript::MiniscriptContext MsContext() const {
-        return miniscript::MiniscriptContext::P2WSH;
+    MsCtx MsContext() const {
+        return SCRIPT_CTX;
     }
 } PARSER_CTX;
 
@@ -177,8 +215,8 @@ struct ScriptParserContext {
         return key;
     }
 
-    miniscript::MiniscriptContext MsContext() const {
-        return miniscript::MiniscriptContext::P2WSH;
+    MsCtx MsContext() const {
+        return SCRIPT_CTX;
     }
 } SCRIPT_PARSER_CONTEXT;
 
@@ -189,17 +227,25 @@ struct SatisfierContext: ParserContext {
     bool CheckAfter(uint32_t value) const { return value % 2; }
     bool CheckOlder(uint32_t value) const { return value % 2; }
 
+    //! Get the signature from the appropriate mapping (ECDSA or Schnorr) depending on the script context.
+    bool GetSig(const CPubKey& key, std::vector<unsigned char>& sig, bool& available) const {
+        if (SCRIPT_CTX == MsCtx::P2WSH) {
+            const auto it = TEST_DATA.dummy_sigs.find(key);
+            if (it == TEST_DATA.dummy_sigs.end()) return false;
+            std::tie(sig, available) = it->second;
+        } else {
+            const auto it = TEST_DATA.schnorr_sigs.find(XOnlyPubKey{key});
+            if (it == TEST_DATA.schnorr_sigs.end()) return false;
+            std::tie(sig, available) = it->second;
+        }
+        return true;
+    }
+
     // Signature challenges fulfilled with a dummy signature, if it was one of our dummy keys.
     miniscript::Availability Sign(const CPubKey& key, std::vector<unsigned char>& sig) const {
-        const auto it = TEST_DATA.dummy_sigs.find(key);
-        if (it == TEST_DATA.dummy_sigs.end()) return miniscript::Availability::NO;
-        if (it->second.second) {
-            // Key is "available"
-            sig = it->second.first;
-            return miniscript::Availability::YES;
-        } else {
-            return miniscript::Availability::NO;
-        }
+        bool sig_available{false};
+        if (!GetSig(key, sig, sig_available) || !sig_available) return miniscript::Availability::NO;
+        return miniscript::Availability::YES;
     }
 
     //! Lookup generalization for all the hash satisfactions below
@@ -238,6 +284,13 @@ struct CheckerContext: BaseSignatureChecker {
         if (it == TEST_DATA.dummy_sigs.end()) return false;
         return it->second.first == sig;
     }
+    bool CheckSchnorrSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, SigVersion,
+                               ScriptExecutionData&, ScriptError*) const override {
+        XOnlyPubKey pk{pubkey};
+        auto it = TEST_DATA.schnorr_sigs.find(pk);
+        if (it == TEST_DATA.schnorr_sigs.end()) return false;
+        return it->second.first == sig;
+    }
     bool CheckLockTime(const CScriptNum& nLockTime) const override { return nLockTime.GetInt64() & 1; }
     bool CheckSequence(const CScriptNum& nSequence) const override { return nSequence.GetInt64() & 1; }
 } CHECKER_CTX;
@@ -248,21 +301,16 @@ struct NodeCreator {
         return a < b;
     }
 
-    miniscript::MiniscriptContext MsContext() const {
-        return miniscript::MiniscriptContext::P2WSH;
+    MsCtx MsContext() const {
+        return SCRIPT_CTX;
     }
 } CREATOR_CTX;
 
 // A dummy scriptsig to pass to VerifyScript (we always use Segwit v0).
 const CScript DUMMY_SCRIPTSIG;
 
-using Fragment = miniscript::Fragment;
-using NodeRef = miniscript::NodeRef<CPubKey>;
-using Node = miniscript::Node<CPubKey>;
-using Type = miniscript::Type;
-// https://github.com/llvm/llvm-project/issues/53444
-// NOLINTNEXTLINE(misc-unused-using-decls)
-using miniscript::operator"" _mst;
+//! Public key to be used as internal key for dummy Taproot spends.
+const std::vector<unsigned char> NUMS_PK{ParseHex("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")};
 
 //! Construct a miniscript node as a shared_ptr.
 template<typename... Args> NodeRef MakeNodeRef(Args&&... args) {
@@ -594,7 +642,7 @@ struct SmartInfo
                             if (subs > 1) subt.push_back(y);
                             if (subs > 2) subt.push_back(z);
                             Type res = miniscript::internal::ComputeType(frag, x, y, z, subt, k, data_size, subs,
-                                                                         n_keys, miniscript::MiniscriptContext::P2WSH);
+                                                                         n_keys, SCRIPT_CTX);
                             // Continue if the result is not a valid node.
                             if ((res << "K"_mst) + (res << "V"_mst) + (res << "B"_mst) + (res << "W"_mst) != 1) continue;
 
@@ -811,11 +859,15 @@ NodeRef GenNode(F ConsumeNode, Type root_type, bool strict_valid = false) {
             // Fragment/children have not been decided yet. Decide them.
             auto node_info = ConsumeNode(type_needed);
             if (!node_info) return {};
+            if ((SCRIPT_CTX == MsCtx::P2WSH && node_info->fragment == Fragment::MULTI_A)
+                || (SCRIPT_CTX == MsCtx::TAPSCRIPT && node_info->fragment == Fragment::MULTI)) {
+                return {};
+            }
             // Update predicted resource limits. Since every leaf Miniscript node is at least one
             // byte long, we move one byte from each child to their parent. A similar technique is
             // used in the miniscript::internal::Parse function to prevent runaway string parsing.
             scriptsize += miniscript::internal::ComputeScriptLen(node_info->fragment, ""_mst, node_info->subtypes.size(), node_info->k, node_info->subtypes.size(),
-                                                                 node_info->keys.size(), miniscript::MiniscriptContext::P2WSH) - 1;
+                                                                 node_info->keys.size(), SCRIPT_CTX) - 1;
             if (scriptsize > MAX_STANDARD_P2WSH_SCRIPT_SIZE) return {};
             switch (node_info->fragment) {
             case Fragment::JUST_0:
@@ -945,6 +997,26 @@ NodeRef GenNode(F ConsumeNode, Type root_type, bool strict_valid = false) {
     return std::move(stack[0]);
 }
 
+//! The spk for this script under the given context. If it's a Taproot output also record the spend data.
+CScript ScriptPubKey(MsCtx ctx, const CScript& script, TaprootBuilder& builder)
+{
+    if (ctx == MsCtx::P2WSH) return CScript() << OP_0 << WitnessV0ScriptHash(script);
+
+    // For Taproot outputs we always use a tree with a single script and a dummy internal key.
+    builder.Add(0, script, TAPROOT_LEAF_TAPSCRIPT);
+    builder.Finalize(XOnlyPubKey{NUMS_PK});
+    return GetScriptForDestination(builder.GetOutput());
+}
+
+//! Fill the witness with the data additional to the script satisfaction.
+void SatisfactionToWitness(MsCtx ctx, CScriptWitness& witness, const CScript& script, TaprootBuilder& builder) {
+    // For P2WSH, it's only the witness script.
+    witness.stack.push_back(std::vector<unsigned char>(script.begin(), script.end()));
+    if (ctx == MsCtx::P2WSH) return;
+    // For Tapscript we also need the control block.
+    witness.stack.push_back(*builder.GetSpendData().scripts.begin()->second.begin());
+}
+
 /** Perform various applicable tests on a miniscript Node. */
 void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
 {
@@ -965,7 +1037,7 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
     // with a push of a key, which could match these opcodes).
     if (!(node->GetType() << "K"_mst)) {
         bool ends_in_verify = !(node->GetType() << "x"_mst);
-        assert(ends_in_verify == (script.back() == OP_CHECKSIG || script.back() == OP_CHECKMULTISIG || script.back() == OP_EQUAL));
+        assert(ends_in_verify == (script.back() == OP_CHECKSIG || script.back() == OP_CHECKMULTISIG || script.back() == OP_EQUAL || script.back() == OP_NUMEQUAL));
     }
 
     // The rest of the checks only apply when testing a valid top-level script.
@@ -980,8 +1052,9 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
     assert(decoded->ToScript(PARSER_CTX) == script);
     assert(decoded->GetType() == node->GetType());
 
-    if (provider.ConsumeBool() && node->GetOps() < MAX_OPS_PER_SCRIPT && node->ScriptSize() < MAX_STANDARD_P2WSH_SCRIPT_SIZE) {
-        // Optionally pad the script with OP_NOPs to max op the ops limit of the constructed script.
+    if (SCRIPT_CTX == MsCtx::P2WSH && provider.ConsumeBool() && node->GetOps() < MAX_OPS_PER_SCRIPT
+        && node->ScriptSize() < MAX_STANDARD_P2WSH_SCRIPT_SIZE) {
+        // Under P2WSH, optionally pad the script with OP_NOPs to max op the ops limit of the constructed script.
         // This makes the script obviously not actually miniscript-compatible anymore, but the
         // signatures constructed in this test don't commit to the script anyway, so the same
         // miniscript satisfier will work. This increases the sensitivity of the test to the ops
@@ -996,20 +1069,26 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
         for (int i = 0; i < add; ++i) script.push_back(OP_NOP);
     }
 
+    // Get the ScriptPubKey for this script, filling spend data if it's Taproot.
+    TaprootBuilder builder;
+    const CScript script_pubkey{ScriptPubKey(SCRIPT_CTX, script, builder)};
+
     // Run malleable satisfaction algorithm.
-    const CScript script_pubkey = CScript() << OP_0 << WitnessV0ScriptHash(script);
     CScriptWitness witness_mal;
     const bool mal_success = node->Satisfy(SATISFIER_CTX, witness_mal.stack, false) == miniscript::Availability::YES;
-    witness_mal.stack.push_back(std::vector<unsigned char>(script.begin(), script.end()));
+    SatisfactionToWitness(SCRIPT_CTX, witness_mal, script, builder);
 
     // Run non-malleable satisfaction algorithm.
     CScriptWitness witness_nonmal;
     const bool nonmal_success = node->Satisfy(SATISFIER_CTX, witness_nonmal.stack, true) == miniscript::Availability::YES;
-    witness_nonmal.stack.push_back(std::vector<unsigned char>(script.begin(), script.end()));
+    SatisfactionToWitness(SCRIPT_CTX, witness_nonmal, script, builder);
 
     if (nonmal_success) {
-        // Non-malleable satisfactions are bounded by GetStackSize().
-        assert(witness_nonmal.stack.size() <= node->GetStackSize());
+        // Non-malleable satisfactions are bounded by the satisfaction size plus:
+        // - For P2WSH spends, the witness script
+        // - For Tapscript spends, both the witness script and the control block
+        const size_t max_stack_size{SCRIPT_CTX == MsCtx::P2WSH ? node->GetStackSize() + 1 : node->GetStackSize() + 2};
+        assert(witness_nonmal.stack.size() <= max_stack_size);
         // If a non-malleable satisfaction exists, the malleable one must also exist, and be identical to it.
         assert(mal_success);
         assert(witness_nonmal.stack == witness_mal.stack);
@@ -1097,10 +1176,14 @@ void FuzzInitSmart()
 /** Fuzz target that runs TestNode on nodes generated using ConsumeNodeStable. */
 FUZZ_TARGET_INIT(miniscript_stable, FuzzInit)
 {
-    FuzzedDataProvider provider(buffer.data(), buffer.size());
-    TestNode(GenNode([&](Type needed_type) {
-        return ConsumeNodeStable(provider, needed_type);
-    }, ""_mst), provider);
+    // Run it under both P2WSH and Tapscript contexts.
+    for (const auto ctx: {MsCtx::P2WSH, MsCtx::TAPSCRIPT}) {
+        SCRIPT_CTX = ctx;
+        FuzzedDataProvider provider(buffer.data(), buffer.size());
+        TestNode(GenNode([&](Type needed_type) {
+            return ConsumeNodeStable(provider, needed_type);
+        }, ""_mst), provider);
+    }
 }
 
 /** Fuzz target that runs TestNode on nodes generated using ConsumeNodeSmart. */
@@ -1110,6 +1193,7 @@ FUZZ_TARGET_INIT(miniscript_smart, FuzzInitSmart)
     static constexpr std::array<Type, 4> BASE_TYPES{"B"_mst, "V"_mst, "K"_mst, "W"_mst};
 
     FuzzedDataProvider provider(buffer.data(), buffer.size());
+    SCRIPT_CTX = (MsCtx)provider.ConsumeBool();
     TestNode(GenNode([&](Type needed_type) {
         return ConsumeNodeSmart(provider, needed_type);
     }, PickValue(provider, BASE_TYPES), true), provider);
@@ -1119,7 +1203,8 @@ FUZZ_TARGET_INIT(miniscript_smart, FuzzInitSmart)
 FUZZ_TARGET_INIT(miniscript_string, FuzzInit)
 {
     FuzzedDataProvider provider(buffer.data(), buffer.size());
-    auto str = provider.ConsumeRemainingBytesAsString();
+    auto str = provider.ConsumeBytesAsString(provider.remaining_bytes() - 1);
+    SCRIPT_CTX = (MsCtx)provider.ConsumeBool();
     auto parsed = miniscript::FromString(str, PARSER_CTX);
     if (!parsed) return;
 
@@ -1137,6 +1222,7 @@ FUZZ_TARGET(miniscript_script)
     const std::optional<CScript> script = ConsumeDeserializable<CScript>(fuzzed_data_provider);
     if (!script) return;
 
+    SCRIPT_CTX = (MsCtx)fuzzed_data_provider.ConsumeBool();
     const auto ms = miniscript::FromScript(*script, SCRIPT_PARSER_CONTEXT);
     if (!ms) return;
 
