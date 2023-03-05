@@ -1052,8 +1052,10 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
     assert(decoded->ToScript(PARSER_CTX) == script);
     assert(decoded->GetType() == node->GetType());
 
-    if (SCRIPT_CTX == MsCtx::P2WSH && provider.ConsumeBool() && node->GetOps() < MAX_OPS_PER_SCRIPT
-        && node->ScriptSize() < MAX_STANDARD_P2WSH_SCRIPT_SIZE) {
+    // Optionally pad the script or the witness in order to increase the sensitivity of the tests of
+    // the resources limits logic.
+    CScriptWitness witness_mal, witness_nonmal;
+    if (provider.ConsumeBool()) {
         // Under P2WSH, optionally pad the script with OP_NOPs to max op the ops limit of the constructed script.
         // This makes the script obviously not actually miniscript-compatible anymore, but the
         // signatures constructed in this test don't commit to the script anyway, so the same
@@ -1063,10 +1065,23 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
         // maximal.
         // Do not pad more than what would cause MAX_STANDARD_P2WSH_SCRIPT_SIZE to be reached, however,
         // as that also invalidates scripts.
-        int add = std::min<int>(
-            MAX_OPS_PER_SCRIPT - node->GetOps(),
-            MAX_STANDARD_P2WSH_SCRIPT_SIZE - node->ScriptSize());
-        for (int i = 0; i < add; ++i) script.push_back(OP_NOP);
+        if (SCRIPT_CTX == MsCtx::P2WSH && node->GetOps() < MAX_OPS_PER_SCRIPT
+            && node->ScriptSize() < MAX_STANDARD_P2WSH_SCRIPT_SIZE) {
+            int add = std::min<int>(
+                MAX_OPS_PER_SCRIPT - node->GetOps(),
+                MAX_STANDARD_P2WSH_SCRIPT_SIZE - node->ScriptSize());
+            for (int i = 0; i < add; ++i) script.push_back(OP_NOP);
+        }
+
+        // Under Tapscript, optionally pad the stack up to the limit minus 2 elements to assert a Miniscript
+        // would never add more than 2 elements during execution.
+        if (SCRIPT_CTX == MsCtx::TAPSCRIPT && node->GetExecStackSize() < MAX_STACK_SIZE) {
+            unsigned add{(unsigned)MAX_STACK_SIZE - node->GetExecStackSize()};
+            witness_mal.stack.resize(add);
+            witness_nonmal.stack.resize(add);
+            script.reserve(add);
+            for (unsigned i = 0; i < add; ++i) script.push_back(OP_NIP);
+        }
     }
 
     // Get the ScriptPubKey for this script, filling spend data if it's Taproot.
@@ -1074,26 +1089,26 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
     const CScript script_pubkey{ScriptPubKey(SCRIPT_CTX, script, builder)};
 
     // Run malleable satisfaction algorithm.
-    CScriptWitness witness_mal;
-    const bool mal_success = node->Satisfy(SATISFIER_CTX, witness_mal.stack, false) == miniscript::Availability::YES;
-    SatisfactionToWitness(SCRIPT_CTX, witness_mal, script, builder);
+    std::vector<std::vector<unsigned char>> stack_mal;
+    const bool mal_success = node->Satisfy(SATISFIER_CTX, stack_mal, false) == miniscript::Availability::YES;
 
     // Run non-malleable satisfaction algorithm.
-    CScriptWitness witness_nonmal;
-    const bool nonmal_success = node->Satisfy(SATISFIER_CTX, witness_nonmal.stack, true) == miniscript::Availability::YES;
-    SatisfactionToWitness(SCRIPT_CTX, witness_nonmal, script, builder);
+    std::vector<std::vector<unsigned char>> stack_nonmal;
+    const bool nonmal_success = node->Satisfy(SATISFIER_CTX, stack_nonmal, true) == miniscript::Availability::YES;
 
     if (nonmal_success) {
         // Non-malleable satisfactions are bounded by the satisfaction size plus:
         // - For P2WSH spends, the witness script
         // - For Tapscript spends, both the witness script and the control block
         const size_t max_stack_size{SCRIPT_CTX == MsCtx::P2WSH ? node->GetStackSize() + 1 : node->GetStackSize() + 2};
-        assert(witness_nonmal.stack.size() <= max_stack_size);
+        assert(stack_nonmal.size() <= max_stack_size);
         // If a non-malleable satisfaction exists, the malleable one must also exist, and be identical to it.
         assert(mal_success);
-        assert(witness_nonmal.stack == witness_mal.stack);
+        assert(stack_nonmal == stack_mal);
 
         // Test non-malleable satisfaction.
+        witness_nonmal.stack.insert(witness_nonmal.stack.end(), std::make_move_iterator(stack_nonmal.begin()), std::make_move_iterator(stack_nonmal.end()));
+        SatisfactionToWitness(SCRIPT_CTX, witness_nonmal, script, builder);
         ScriptError serror;
         bool res = VerifyScript(DUMMY_SCRIPTSIG, script_pubkey, &witness_nonmal, STANDARD_SCRIPT_VERIFY_FLAGS, CHECKER_CTX, &serror);
         // Non-malleable satisfactions are guaranteed to be valid if ValidSatisfactions().
@@ -1107,6 +1122,8 @@ void TestNode(const NodeRef& node, FuzzedDataProvider& provider)
 
     if (mal_success && (!nonmal_success || witness_mal.stack != witness_nonmal.stack)) {
         // Test malleable satisfaction only if it's different from the non-malleable one.
+        witness_mal.stack.insert(witness_mal.stack.end(), std::make_move_iterator(stack_mal.begin()), std::make_move_iterator(stack_mal.end()));
+        SatisfactionToWitness(SCRIPT_CTX, witness_mal, script, builder);
         ScriptError serror;
         bool res = VerifyScript(DUMMY_SCRIPTSIG, script_pubkey, &witness_mal, STANDARD_SCRIPT_VERIFY_FLAGS, CHECKER_CTX, &serror);
         // Malleable satisfactions are not guaranteed to be valid under any conditions, but they can only
