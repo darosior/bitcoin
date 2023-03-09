@@ -316,10 +316,21 @@ struct MaxInt {
         return a.value + b.value;
     }
 
+    friend MaxInt<I> operator-(const MaxInt<I>& a, const I& b) {
+        if (!a.valid) return {};
+        return a.value - b;
+    }
+
     friend MaxInt<I> operator|(const MaxInt<I>& a, const MaxInt<I>& b) {
         if (!a.valid) return b;
         if (!b.valid) return a;
         return std::max(a.value, b.value);
+    }
+
+    friend bool operator>(const MaxInt<I>& a, const MaxInt<I>& b) {
+        if (!a.valid) return false;
+        if (!b.valid) return true;
+        return a.value > b.value;
     }
 };
 
@@ -334,13 +345,27 @@ struct Ops {
     Ops(uint32_t in_count, MaxInt<uint32_t> in_sat, MaxInt<uint32_t> in_dsat) : count(in_count), sat(in_sat), dsat(in_dsat) {};
 };
 
-struct StackSize {
-    //! Maximum stack size to satisfy;
-    MaxInt<uint32_t> sat;
-    //! Maximum stack size to dissatisfy;
-    MaxInt<uint32_t> dsat;
+struct SatInfo {
+    //! Maximum witness size to (dis)satisfy;
+    MaxInt<uint32_t> size;
+    //! Maximum number of items pushed to (or popped from) the stack after execution.
+    MaxInt<int32_t> diff;
+    //! Maximum number of items added to the stack during execution.
+    MaxInt<int32_t> exec;
 
-    StackSize(MaxInt<uint32_t> in_sat, MaxInt<uint32_t> in_dsat) : sat(in_sat), dsat(in_dsat) {};
+    SatInfo(MaxInt<uint32_t> in_size, MaxInt<int32_t> in_diff, MaxInt<int32_t> in_exec)
+        : size(in_size), diff(in_diff), exec(in_exec) {}
+
+    SatInfo(MaxInt<uint32_t> in_size, MaxInt<int32_t> in_diff)
+        : size(in_size), diff(in_diff), exec(in_diff) {}
+
+    SatInfo() {}
+};
+
+struct StackSize {
+    SatInfo sat, dsat;
+
+    StackSize(SatInfo in_sat, SatInfo in_dsat) : sat(in_sat), dsat(in_dsat) {};
 };
 
 struct NoDupCheck {};
@@ -824,51 +849,152 @@ private:
     }
 
     internal::StackSize CalcStackSize() const {
+        // Among non-malleable satisfactions and dissatisfactions, this computes for each fragment:
+        // - The maximum witness stack size of this (dis)satisfaction;
+        // - The maximum number of elements added or removed on the stack after executing it;
+        // - The maximum number of elements added to the stack while executing it.
         switch (fragment) {
-            case Fragment::JUST_0: return {{}, 0};
+            case Fragment::JUST_0: return {{}, {0, 1}};
             case Fragment::JUST_1:
             case Fragment::OLDER:
-            case Fragment::AFTER: return {0, {}};
-            case Fragment::PK_K: return {1, 1};
-            case Fragment::PK_H: return {2, 2};
+            case Fragment::AFTER: return {{0, 1}, {}};
+            case Fragment::PK_K: return {{1, 1}, {1, 1}};
+            case Fragment::PK_H: return {{2, 0, 2}, {2, 0, 2}};
             case Fragment::SHA256:
             case Fragment::RIPEMD160:
             case Fragment::HASH256:
-            case Fragment::HASH160: return {1, {}};
+            case Fragment::HASH160: return {{1, 0, 2}, {}};
             case Fragment::ANDOR: {
-                const auto sat{(subs[0]->ss.sat + subs[1]->ss.sat) | (subs[0]->ss.dsat + subs[2]->ss.sat)};
-                const auto dsat{subs[0]->ss.dsat + subs[2]->ss.dsat};
-                return {sat, dsat};
+                const auto& x{subs[0]->ss};
+                const auto& y{subs[1]->ss};
+                const auto& z{subs[2]->ss};
+                const auto sat_size{(x.sat.size + y.sat.size) | (x.dsat.size + z.sat.size)};
+                const auto dsat_size{x.dsat.size + z.dsat.size};
+                const auto sat_diff{((x.sat.diff + y.sat.diff) | (x.dsat.diff + z.sat.diff)) - 1};
+                const auto dsat_diff{x.dsat.diff - 1 + z.dsat.diff};
+                const auto sat_exec{x.sat.exec | x.dsat.exec | (x.sat.diff - 1 + y.sat.exec) | (x.dsat.diff - 1 + z.sat.exec)};
+                const auto dsat_exec{x.dsat.exec | (x.dsat.diff - 1 + z.dsat.exec)};
+                return {{sat_size, sat_diff, sat_exec}, {dsat_size, dsat_diff, dsat_exec}};
             }
-            case Fragment::AND_V: return {subs[0]->ss.sat + subs[1]->ss.sat, {}};
-            case Fragment::AND_B: return {subs[0]->ss.sat + subs[1]->ss.sat, subs[0]->ss.dsat + subs[1]->ss.dsat};
+            case Fragment::AND_V: {
+                const auto& x{subs[0]->ss};
+                const auto& y{subs[1]->ss};
+                const auto sat_size{x.sat.size + y.sat.size};
+                const auto sat_diff{x.sat.diff + y.sat.diff};
+                const auto sat_exec{x.sat.exec | (x.sat.diff + y.sat.exec)};
+                return {{sat_size, sat_diff, sat_exec}, {}};
+            }
+            case Fragment::AND_B: {
+                const auto& x{subs[0]->ss};
+                const auto& y{subs[1]->ss};
+                const auto sat_size{x.sat.size + y.sat.size};
+                const auto dsat_size{x.dsat.size + y.dsat.size};
+                const auto sat_diff{x.sat.diff + y.sat.diff - 1};
+                const auto dsat_diff{x.dsat.diff + y.dsat.diff - 1};
+                const auto sat_exec{x.sat.exec | (x.sat.diff + y.sat.exec)};
+                const auto dsat_exec{x.dsat.exec | (x.dsat.diff + y.dsat.exec)};
+                return {{sat_size, sat_diff, sat_exec}, {dsat_size, dsat_diff, dsat_exec}};
+            }
             case Fragment::OR_B: {
-                const auto sat{(subs[0]->ss.dsat + subs[1]->ss.sat) | (subs[0]->ss.sat + subs[1]->ss.dsat)};
-                const auto dsat{subs[0]->ss.dsat + subs[1]->ss.dsat};
-                return {sat, dsat};
+                const auto& x{subs[0]->ss};
+                const auto& y{subs[1]->ss};
+                const auto sat_size{(x.dsat.size + y.sat.size) | (x.sat.size + y.dsat.size)};
+                const auto dsat_size{x.dsat.size + y.dsat.size};
+                const auto sat_diff{((x.dsat.diff + y.sat.diff) | (x.sat.diff + y.dsat.diff)) - 1};
+                const auto dsat_diff{x.dsat.diff + y.dsat.diff - 1};
+                const auto sat_exec{x.sat.exec | x.dsat.exec | (x.dsat.diff + y.sat.exec) | (x.sat.diff + y.dsat.exec)};
+                const auto dsat_exec{x.dsat.exec | (x.dsat.diff + y.dsat.exec)};
+                return {{sat_size, sat_diff, sat_exec}, {dsat_size, dsat_diff, dsat_exec}};
             }
-            case Fragment::OR_C: return {subs[0]->ss.sat | (subs[0]->ss.dsat + subs[1]->ss.sat), {}};
-            case Fragment::OR_D: return {subs[0]->ss.sat | (subs[0]->ss.dsat + subs[1]->ss.sat), subs[0]->ss.dsat + subs[1]->ss.dsat};
-            case Fragment::OR_I: return {(subs[0]->ss.sat + 1) | (subs[1]->ss.sat + 1), (subs[0]->ss.dsat + 1) | (subs[1]->ss.dsat + 1)};
-            case Fragment::MULTI: return {k + 1, k + 1};
-            case Fragment::MULTI_A: return {keys.size(), keys.size()};
+            case Fragment::OR_C: {
+                const auto& x{subs[0]->ss};
+                const auto& y{subs[1]->ss};
+                const auto sat_size{x.sat.size | (x.dsat.size + y.sat.size)};
+                const auto sat_diff{(x.sat.diff | (x.dsat.diff + y.sat.diff)) - 1};
+                const auto sat_exec{x.sat.exec | x.dsat.exec | (x.dsat.diff - 1 + y.sat.exec)};
+                return {{sat_size, sat_diff, sat_exec}, {}};
+            }
+            case Fragment::OR_D: {
+                const auto& x{subs[0]->ss};
+                const auto& y{subs[1]->ss};
+                const auto sat_size{x.sat.size | (x.dsat.size + y.sat.size)};
+                const auto dsat_size{x.dsat.size + y.dsat.size};
+                const auto sat_diff{x.sat.diff | (x.dsat.diff - 1 + y.sat.diff)};
+                const auto dsat_diff{x.dsat.diff - 1 + y.dsat.diff};
+                const auto sat_exec{x.sat.exec | x.dsat.exec | (x.sat.diff + 1) | (x.dsat.diff + y.sat.exec)};
+                const auto dsat_exec{x.dsat.exec | (x.dsat.diff - 1 + y.dsat.exec)};
+                return {{sat_size, sat_diff, sat_exec}, {dsat_size, dsat_diff, dsat_exec}};
+            }
+            case Fragment::OR_I: {
+                const auto& x{subs[0]->ss};
+                const auto& y{subs[1]->ss};
+                const auto sat_size{(x.sat.size + 1) | (y.sat.size + 1)};
+                const auto dsat_size{(x.dsat.size + 1) | (y.dsat.size + 1)};
+                const auto sat_diff{(x.sat.diff | y.sat.diff) - 1};
+                const auto dsat_diff{(x.dsat.diff | y.dsat.diff) - 1};
+                const auto sat_exec{(x.sat.exec | y.sat.exec) - 1};
+                const auto dsat_exec{(x.dsat.exec | y.dsat.exec) - 1};
+                return {{sat_size, sat_diff, sat_exec}, {dsat_size, dsat_diff, dsat_exec}};
+            }
+            case Fragment::MULTI: return {{k + 1, -k, 2 + keys.size()}, {k + 1, -k, 2 + keys.size()}};
+            case Fragment::MULTI_A: return {{keys.size(), -keys.size() + 1, 1}, {keys.size(), -keys.size() + 1, 1}};
             case Fragment::WRAP_A:
             case Fragment::WRAP_N:
-            case Fragment::WRAP_S:
-            case Fragment::WRAP_C: return subs[0]->ss;
-            case Fragment::WRAP_D: return {1 + subs[0]->ss.sat, 1};
-            case Fragment::WRAP_V: return {subs[0]->ss.sat, {}};
-            case Fragment::WRAP_J: return {subs[0]->ss.sat, 1};
+            case Fragment::WRAP_S: return subs[0]->ss;
+            case Fragment::WRAP_C: {
+                const auto& sub_sat{subs[0]->ss.sat};
+                const auto& sub_dsat{subs[0]->ss.dsat};
+                return {{sub_sat.size, sub_sat.diff - 1, sub_sat.exec}, {sub_dsat.size, sub_dsat.diff - 1, sub_dsat.exec}};
+            }
+            case Fragment::WRAP_D: return {{1 + subs[0]->ss.sat.size, subs[0]->ss.sat.diff, subs[0]->ss.sat.exec | 1}, {1, 0, 1}};
+            case Fragment::WRAP_V: return {{subs[0]->ss.sat.size, subs[0]->ss.sat.diff - 1, subs[0]->ss.sat.exec}, {}};
+            case Fragment::WRAP_J: return {{subs[0]->ss.sat.size, subs[0]->ss.sat.diff, subs[0]->ss.sat.exec | 1}, {1, 0, subs[0]->ss.dsat.exec | 1}};
             case Fragment::THRESH: {
-                auto sats = Vector(internal::MaxInt<uint32_t>(0));
-                for (const auto& sub : subs) {
-                    auto next_sats = Vector(sats[0] + sub->ss.dsat);
-                    for (size_t j = 1; j < sats.size(); ++j) next_sats.push_back((sats[j] + sub->ss.dsat) | (sats[j - 1] + sub->ss.sat));
-                    next_sats.push_back(sats[sats.size() - 1] + sub->ss.sat);
-                    sats = std::move(next_sats);
+                // The maximum satisfaction witness stack size for this fragment, indexed by threshold.
+                auto sats_size = Vector(internal::MaxInt<uint32_t>(0));
+                // Same for the stack size differential after executing this fragment.
+                auto sats_diff = Vector(internal::MaxInt<int32_t>(0));
+                // The maximum stack size at any point during execution of this fragment (or any sub
+                // fragment thereoff), indexed by threshold.
+                auto sats_exec = Vector(internal::MaxInt<int32_t>(0));
+                for (size_t i = 0; i < subs.size(); ++i) {
+                    // Start with the (non-malleable) dissatisfaction size.
+                    auto next_sats_size = Vector(sats_size[0] + subs[i]->ss.dsat.size);
+                    // Whether to account for OP_ADD that drops one element from the stack (-2 + 1).
+                    auto add_diff = (i > 0 && i < subs.size() - 1) ? -1 : 0;
+                    // The total difference in stack size after dissatisfying the first i first fragments.
+                    auto next_sats_diff = Vector(sats_diff[0] + subs[i]->ss.dsat.diff + add_diff);
+                    // Does the stack size gets bigger when dissatifying this fragment than the previous ones?
+                    auto next_sats_exec = Vector(sats_exec[0] | (sats_diff[0] + subs[i]->ss.dsat.exec));
+                    // Update what combination of sat/dsat is the largest per threshold.
+                    for (size_t j = 1; j < sats_size.size(); ++j) {
+                        // Which is larger, k-1 satisfaction and satifying this sub, or k satisfaction and dissatisfying
+                        // this one?
+                        next_sats_size.push_back((sats_size[j] + subs[i]->ss.dsat.size) | (sats_size[j - 1] + subs[i]->ss.sat.size));
+                        // Same for size of the stack after satisfying k of the past i fragments.
+                        next_sats_diff.push_back((sats_diff[j] + subs[i]->ss.dsat.diff) | (sats_diff[j - 1] + subs[i]->ss.sat.diff) + add_diff);
+                        // Update the maximum stack size for satisfying k subs with the largest of the maximum cost of
+                        // satisfying k-1 subs (implying we satisfy this one), the cost of dissatisfying this sub
+                        // after the satisfaction of j subs beforehand, and the cost of satisfying this sub after the
+                        // dissatisfaction of j-1 subs beforehand.
+                        next_sats_exec.push_back(sats_exec[j] | sats_exec[j - 1] | (sats_diff[j] + subs[i]->ss.dsat.exec) | (sats_diff[j - 1] + subs[i]->ss.sat.exec));
+                    }
+                    // Finally, push a new element that corresponds to the size of satisfying all past i subs.
+                    next_sats_size.push_back(sats_size[sats_size.size() - 1] + subs[i]->ss.sat.size);
+                    // Same for the stack size differential after execution.
+                    next_sats_diff.push_back(sats_diff[sats_diff.size() - 1] + subs[i]->ss.sat.diff + add_diff);
+                    // Update the maximum stack size during execution when satisfying all past i sub-fragments.
+                    next_sats_exec.push_back(sats_exec[sats_exec.size() - 1] | (sats_diff[sats_diff.size() - 1] + subs[i]->ss.sat.exec));
+                    // Now on to the next sub.
+                    sats_size = std::move(next_sats_size);
+                    sats_diff = std::move(next_sats_diff);
+                    sats_exec = std::move(next_sats_exec);
                 }
-                assert(k <= sats.size());
-                return {sats[k], sats[0]};
+                assert(k <= sats_size.size() && sats_diff.size() == sats_size.size() && sats_size.size() == sats_exec.size());
+                // Also take into account the threshold push.
+                auto sat_exec{sats_exec[k] | (sats_diff[k] + 1)};
+                auto dsat_exec{sats_exec[0] | (sats_diff[0] + 1)};
+                return {{sats_size[k], sats_diff[k], sat_exec}, {sats_size[0], sats_diff[0], dsat_exec}};
             }
         }
         assert(false);
@@ -1194,12 +1320,21 @@ public:
     }
 
     //! Return the maximum number of stack elements needed to satisfy this script non-malleably.
-    uint32_t GetStackSize() const { return ss.sat.value; }
+    uint32_t GetStackSize() const { return ss.sat.size.value; }
 
-    //! Check the maximum stack size for this script against the policy limit.
+    //! Return the maximum size of the stack during execution of this script.
+    int32_t GetExecStackSize() const {
+        return ss.sat.size.value + std::max(ss.sat.exec.value, 0);
+    }
+
+    //! Check the maximum stack size for this script against the limits.
     template <typename Ctx> bool CheckStackSize(const Ctx& ctx) const {
-        // TODO: MAX_STACK_SIZE during script execution under Tapscript.
-        return GetStackSize() <= MAX_STANDARD_P2WSH_STACK_ITEMS;
+        if (ctx.MsContext() == MiniscriptContext::P2WSH && GetStackSize() > MAX_STANDARD_P2WSH_STACK_ITEMS) {
+            return false;
+        }
+        // Since in Tapscript there is no standardness limit on the script and witness sizes, we may run
+        // into the maximum stack size while executing the script. Make sure it doesn't happen.
+        return GetExecStackSize() <= MAX_STACK_SIZE;
     }
 
     //! Return the expression type.
