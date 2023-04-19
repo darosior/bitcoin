@@ -1978,6 +1978,15 @@ bool LegacyScriptPubKeyMan::DeleteRecords()
     return batch.EraseRecords(DBKeys::LEGACY_TYPES);
 }
 
+std::optional<int32_t> DescriptorScriptPubKeyMan::DerivIndex(const CScript& script) const {
+    LOCK(cs_desc_man);
+    auto spkman_it = m_map_script_pub_keys.find(script);
+    if (spkman_it == m_map_script_pub_keys.end()) return {};
+    auto deriv_it = spkman_it->second.find(this);
+    if (deriv_it == spkman_it->second.end()) return {};
+    return deriv_it->second;
+}
+
 util::Result<CTxDestination> DescriptorScriptPubKeyMan::GetNewDestination(const OutputType type)
 {
     // Returns true if this descriptor supports getting new addresses. Conditions where we may be unable to fetch them (e.g. locked) are caught later
@@ -2020,7 +2029,7 @@ util::Result<CTxDestination> DescriptorScriptPubKeyMan::GetNewDestination(const 
 isminetype DescriptorScriptPubKeyMan::IsMine(const CScript& script) const
 {
     LOCK(cs_desc_man);
-    if (m_map_script_pub_keys.count(script) > 0) {
+    if (DerivIndex(script)) {
         return ISMINE_SPENDABLE;
     }
     return ISMINE_NO;
@@ -2154,7 +2163,7 @@ bool DescriptorScriptPubKeyMan::TopUp(unsigned int size)
         // Add all of the scriptPubKeys to the scriptPubKey set
         new_spks.insert(scripts_temp.begin(), scripts_temp.end());
         for (const CScript& script : scripts_temp) {
-            m_map_script_pub_keys[script] = i;
+            m_map_script_pub_keys[script][this] = i;
         }
         for (const auto& pk_pair : out_keys.pubkeys) {
             const CPubKey& pubkey = pk_pair.second;
@@ -2188,7 +2197,7 @@ std::vector<WalletDestination> DescriptorScriptPubKeyMan::MarkUnusedAddresses(co
     LOCK(cs_desc_man);
     std::vector<WalletDestination> result;
     if (IsMine(script)) {
-        int32_t index = m_map_script_pub_keys[script];
+        int32_t index = m_map_script_pub_keys[script][this];
         if (index >= m_wallet_descriptor.next_index) {
             WalletLogPrintf("%s: Detected a used keypool item at index %d, mark all keypool items up to this item as used\n", __func__, index);
             auto out_keys = std::make_unique<FlatSigningProvider>();
@@ -2370,15 +2379,8 @@ int64_t DescriptorScriptPubKeyMan::GetTimeFirstKey() const
 std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvider(const CScript& script, bool include_private) const
 {
     LOCK(cs_desc_man);
-
-    // Find the index of the script
-    auto it = m_map_script_pub_keys.find(script);
-    if (it == m_map_script_pub_keys.end()) {
-        return nullptr;
-    }
-    int32_t index = it->second;
-
-    return GetSigningProvider(index, include_private);
+    if (auto index = DerivIndex(script)) return GetSigningProvider(*index, include_private);
+    return nullptr;
 }
 
 std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvider(const CPubKey& pubkey) const
@@ -2606,10 +2608,10 @@ void DescriptorScriptPubKeyMan::SetCache(const DescriptorCache& cache)
         // Add all of the scriptPubKeys to the scriptPubKey set
         new_spks.insert(scripts_temp.begin(), scripts_temp.end());
         for (const CScript& script : scripts_temp) {
-            if (m_map_script_pub_keys.count(script) != 0) {
-                throw std::runtime_error(strprintf("Error: Already loaded script at index %d as being at index %d", i, m_map_script_pub_keys[script]));
+            if (auto index = DerivIndex(script)) {
+                throw std::runtime_error(strprintf("Error: Already loaded script at index %d as being at index %d", i, *index));
             }
-            m_map_script_pub_keys[script] = i;
+            m_map_script_pub_keys[script][this] = i;
         }
         for (const auto& pk_pair : out_keys.pubkeys) {
             const CPubKey& pubkey = pk_pair.second;
@@ -2673,10 +2675,12 @@ std::unordered_set<CScript, SaltedSipHasher> DescriptorScriptPubKeyMan::GetScrip
 {
     LOCK(cs_desc_man);
     std::unordered_set<CScript, SaltedSipHasher> script_pub_keys;
-    script_pub_keys.reserve(m_map_script_pub_keys.size());
 
-    for (auto const& [script_pub_key, index] : m_map_script_pub_keys) {
-        if (index >= minimum_index) script_pub_keys.insert(script_pub_key);
+    for (auto const& [script_pub_key, index_map] : m_map_script_pub_keys) {
+        auto it = index_map.find(this);
+        if (it != index_map.end() && it->second >= minimum_index) {
+            script_pub_keys.insert(script_pub_key);
+        }
     }
     return script_pub_keys;
 }

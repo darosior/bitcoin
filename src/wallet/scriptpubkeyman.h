@@ -546,17 +546,20 @@ public:
 class DescriptorScriptPubKeyMan : public ScriptPubKeyMan
 {
 private:
-    using ScriptPubKeyMap = std::map<CScript, int32_t>; // Map of scripts to descriptor range index
     using PubKeyMap = std::map<CPubKey, int32_t>; // Map of pubkeys involved in scripts to descriptor range index
     using CryptedKeyMap = std::map<CKeyID, std::pair<CPubKey, std::vector<unsigned char>>>;
     using KeyMap = std::map<CKeyID, CKey>;
 
-    ScriptPubKeyMap m_map_script_pub_keys GUARDED_BY(cs_desc_man);
+    std::map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>> m_map_script_pub_keys GUARDED_BY(cs_desc_man);
+    size_t m_spk_cache_index{0};
     PubKeyMap m_map_pubkeys GUARDED_BY(cs_desc_man);
     int32_t m_max_cached_index = -1;
 
     KeyMap m_map_keys GUARDED_BY(cs_desc_man);
     CryptedKeyMap m_map_crypted_keys GUARDED_BY(cs_desc_man);
+
+    //! Get the derivation index for this script if it's from our descriptor.
+    std::optional<int32_t> DerivIndex(const CScript& script) const EXCLUSIVE_LOCKS_REQUIRED(cs_desc_man);
 
     //! keeps track of whether Unlock has run a thorough check before
     bool m_decryption_thoroughly_checked = false;
