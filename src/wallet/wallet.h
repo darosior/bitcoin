@@ -340,8 +340,9 @@ private:
     // ScriptPubKeyMan::GetID. In many cases it will be the hash of an internal structure
     std::map<uint256, std::unique_ptr<ScriptPubKeyMan>> m_spk_managers;
 
+    mutable RecursiveMutex cs_spk_map;
     //! Cache of descriptor ScriptPubKeys used for IsMine. Maps ScriptPubKey to set of spkms
-    DescriptorScriptPubKeyMan::ScriptPubKeyMap m_cached_spks;
+    DescriptorScriptPubKeyMan::ScriptPubKeyMap m_cached_spks GUARDED_BY(cs_spk_map);
 
     /**
      * Catch wallet up to current chain, scanning new blocks, updating the best

@@ -523,7 +523,7 @@ public:
 
     /** Get the DescriptorScriptPubKeyMans (with private keys) that have the same scriptPubKeys as this LegacyScriptPubKeyMan.
      * Does not modify this ScriptPubKeyMan. */
-    std::optional<MigrationData> MigrateToDescriptor(std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>& cached_spks);
+    std::optional<MigrationData> MigrateToDescriptor(RecursiveMutex& cs_spk_map, std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>& cached_spks);
     /** Delete all the records ofthis LegacyScriptPubKeyMan from disk*/
     bool DeleteRecords();
 };
@@ -554,7 +554,9 @@ private:
     using CryptedKeyMap = std::map<CKeyID, std::pair<CPubKey, std::vector<unsigned char>>>;
     using KeyMap = std::map<CKeyID, CKey>;
 
-    ScriptPubKeyMap& m_map_script_pub_keys GUARDED_BY(cs_desc_man);
+    RecursiveMutex& cs_spk_map;
+
+    ScriptPubKeyMap& m_map_script_pub_keys GUARDED_BY(cs_spk_map);
     size_t m_spk_cache_index{0};
     PubKeyMap m_map_pubkeys GUARDED_BY(cs_desc_man);
     int32_t m_max_cached_index = -1;
@@ -588,14 +590,16 @@ protected:
   WalletDescriptor m_wallet_descriptor GUARDED_BY(cs_desc_man);
 
 public:
-    DescriptorScriptPubKeyMan(WalletStorage& storage, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, WalletDescriptor& descriptor, int64_t keypool_size)
+    DescriptorScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spkmap, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, WalletDescriptor& descriptor, int64_t keypool_size)
         :   ScriptPubKeyMan(storage, topup_callback),
-            m_map_script_pub_keys(spk_map), // FIXME get a lock from the wallet too.
+            cs_spk_map(cs_spkmap),
+            m_map_script_pub_keys(spk_map),
             m_keypool_size(keypool_size),
             m_wallet_descriptor(descriptor)
         {}
-    DescriptorScriptPubKeyMan(WalletStorage& storage, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, int64_t keypool_size)
+    DescriptorScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spkmap, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, int64_t keypool_size)
         :   ScriptPubKeyMan(storage, topup_callback),
+            cs_spk_map(cs_spkmap),
             m_map_script_pub_keys(spk_map),
             m_keypool_size(keypool_size)
         {}

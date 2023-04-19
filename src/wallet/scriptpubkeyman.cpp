@@ -1719,8 +1719,9 @@ std::unordered_set<CScript, SaltedSipHasher> LegacyScriptPubKeyMan::GetScriptPub
     return spks;
 }
 
-std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>& cached_spks)
+std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(RecursiveMutex& cs_spk_map, std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>& cached_spks)
 {
+    AssertLockHeld(cs_spk_map);
     LOCK(cs_KeyStore);
     if (m_storage.IsLocked()) {
         return std::nullopt;
@@ -1786,7 +1787,7 @@ std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(std::uno
         WalletDescriptor w_desc(std::move(desc), creation_time, 0, 0, 0);
 
         // Make the DescriptorScriptPubKeyMan and get the scriptPubKeys
-        auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cached_spks, m_topup_callback, w_desc, m_keypool_size));
+        auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, m_topup_callback, w_desc, m_keypool_size));
         desc_spk_man->AddDescriptorKey(key, key.GetPubKey());
         desc_spk_man->TopUp();
         auto desc_spks = desc_spk_man->GetScriptPubKeys();
@@ -1831,7 +1832,7 @@ std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(std::uno
             WalletDescriptor w_desc(std::move(desc), 0, 0, chain_counter, 0);
 
             // Make the DescriptorScriptPubKeyMan and get the scriptPubKeys
-            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cached_spks, m_topup_callback, w_desc, m_keypool_size));
+            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, m_topup_callback, w_desc, m_keypool_size));
             desc_spk_man->AddDescriptorKey(master_key.key, master_key.key.GetPubKey());
             desc_spk_man->TopUp();
             auto desc_spks = desc_spk_man->GetScriptPubKeys();
@@ -1893,7 +1894,7 @@ std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(std::uno
         } else {
             // Make the DescriptorScriptPubKeyMan and get the scriptPubKeys
             WalletDescriptor w_desc(std::move(desc), creation_time, 0, 0, 0);
-            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cached_spks, m_topup_callback, w_desc, m_keypool_size));
+            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, m_topup_callback, w_desc, m_keypool_size));
             for (const auto& keyid : privkeyids) {
                 CKey key;
                 if (!GetKey(keyid, key)) {
@@ -1979,7 +1980,7 @@ bool LegacyScriptPubKeyMan::DeleteRecords()
 }
 
 std::optional<int32_t> DescriptorScriptPubKeyMan::DerivIndex(const CScript& script) const {
-    LOCK(cs_desc_man);
+    AssertLockHeld(cs_spk_map);
     auto spkman_it = m_map_script_pub_keys.find(script);
     if (spkman_it == m_map_script_pub_keys.end()) return {};
     auto deriv_it = spkman_it->second.find(this);
@@ -2028,7 +2029,7 @@ util::Result<CTxDestination> DescriptorScriptPubKeyMan::GetNewDestination(const 
 
 isminetype DescriptorScriptPubKeyMan::IsMine(const CScript& script) const
 {
-    LOCK(cs_desc_man);
+    LOCK(cs_spk_map);
     if (DerivIndex(script)) {
         return ISMINE_SPENDABLE;
     }
@@ -2129,6 +2130,7 @@ std::map<CKeyID, CKey> DescriptorScriptPubKeyMan::GetKeys() const
 bool DescriptorScriptPubKeyMan::TopUp(unsigned int size)
 {
     LOCK(cs_desc_man);
+    LOCK(cs_spk_map);
     std::set<CScript> new_spks;
     unsigned int target_size;
     if (size > 0) {
@@ -2195,6 +2197,7 @@ bool DescriptorScriptPubKeyMan::TopUp(unsigned int size)
 std::vector<WalletDestination> DescriptorScriptPubKeyMan::MarkUnusedAddresses(const CScript& script)
 {
     LOCK(cs_desc_man);
+    LOCK(cs_spk_map);
     std::vector<WalletDestination> result;
     if (IsMine(script)) {
         int32_t index = m_map_script_pub_keys[script][this];
@@ -2597,6 +2600,7 @@ uint256 DescriptorScriptPubKeyMan::GetID() const
 void DescriptorScriptPubKeyMan::SetCache(const DescriptorCache& cache)
 {
     LOCK(cs_desc_man);
+    LOCK(cs_spk_map);
     std::set<CScript> new_spks;
     m_wallet_descriptor.cache = cache;
     for (int32_t i = m_wallet_descriptor.range_start; i < m_wallet_descriptor.range_end; ++i) {
@@ -2674,6 +2678,7 @@ std::unordered_set<CScript, SaltedSipHasher> DescriptorScriptPubKeyMan::GetScrip
 std::unordered_set<CScript, SaltedSipHasher> DescriptorScriptPubKeyMan::GetScriptPubKeys(int32_t minimum_index) const
 {
     LOCK(cs_desc_man);
+    LOCK(cs_spk_map);
     std::unordered_set<CScript, SaltedSipHasher> script_pub_keys;
 
     for (auto const& [script_pub_key, index_map] : m_map_script_pub_keys) {
@@ -2739,6 +2744,7 @@ void DescriptorScriptPubKeyMan::UpgradeDescriptorCache()
 void DescriptorScriptPubKeyMan::UpdateWalletDescriptor(WalletDescriptor& descriptor)
 {
     LOCK(cs_desc_man);
+    LOCK(cs_spk_map);
     std::string error;
     if (!CanUpdateToWalletDescriptor(descriptor, error)) {
         throw std::runtime_error(std::string(__func__) + ": " + error);
