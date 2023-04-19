@@ -170,11 +170,8 @@ class ScriptPubKeyMan
 protected:
     WalletStorage& m_storage;
 
-    //! Callback function for after TopUp completes containing any scripts that were added to this SPKMan
-    std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> m_topup_callback;
-
 public:
-    explicit ScriptPubKeyMan(WalletStorage& storage, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback) : m_storage(storage), m_topup_callback(topup_callback) {}
+    explicit ScriptPubKeyMan(WalletStorage& storage) : m_storage(storage) {}
     virtual ~ScriptPubKeyMan() {};
     virtual util::Result<CTxDestination> GetNewDestination(const OutputType type) { return util::Error{Untranslated("Not supported")}; }
     virtual isminetype IsMine(const CScript& script) const { return ISMINE_NO; }
@@ -370,7 +367,7 @@ private:
 
     bool TopUpChain(CHDChain& chain, unsigned int size);
 public:
-    LegacyScriptPubKeyMan(WalletStorage& storage, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, int64_t keypool_size) : ScriptPubKeyMan(storage, topup_callback), m_keypool_size(keypool_size) {}
+    LegacyScriptPubKeyMan(WalletStorage& storage, int64_t keypool_size) : ScriptPubKeyMan(storage), m_keypool_size(keypool_size) {}
 
     util::Result<CTxDestination> GetNewDestination(const OutputType type) override;
     isminetype IsMine(const CScript& script) const override;
@@ -523,7 +520,7 @@ public:
 
     /** Get the DescriptorScriptPubKeyMans (with private keys) that have the same scriptPubKeys as this LegacyScriptPubKeyMan.
      * Does not modify this ScriptPubKeyMan. */
-    std::optional<MigrationData> MigrateToDescriptor(RecursiveMutex& cs_spk_map, std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>& cached_spks);
+    std::optional<MigrationData> MigrateToDescriptor(RecursiveMutex& cs_spk_map, std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>& cached_spks) EXCLUSIVE_LOCKS_REQUIRED(cs_spk_map);
     /** Delete all the records ofthis LegacyScriptPubKeyMan from disk*/
     bool DeleteRecords();
 };
@@ -590,15 +587,15 @@ protected:
   WalletDescriptor m_wallet_descriptor GUARDED_BY(cs_desc_man);
 
 public:
-    DescriptorScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spkmap, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, WalletDescriptor& descriptor, int64_t keypool_size)
-        :   ScriptPubKeyMan(storage, topup_callback),
+    DescriptorScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spkmap, ScriptPubKeyMap& spk_map, WalletDescriptor& descriptor, int64_t keypool_size)
+        :   ScriptPubKeyMan(storage),
             cs_spk_map(cs_spkmap),
             m_map_script_pub_keys(spk_map),
             m_keypool_size(keypool_size),
             m_wallet_descriptor(descriptor)
         {}
-    DescriptorScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spkmap, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, int64_t keypool_size)
-        :   ScriptPubKeyMan(storage, topup_callback),
+    DescriptorScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spkmap, ScriptPubKeyMap& spk_map, int64_t keypool_size)
+        :   ScriptPubKeyMan(storage),
             cs_spk_map(cs_spkmap),
             m_map_script_pub_keys(spk_map),
             m_keypool_size(keypool_size)

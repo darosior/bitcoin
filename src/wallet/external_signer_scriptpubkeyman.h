@@ -13,11 +13,11 @@ namespace wallet {
 class ExternalSignerScriptPubKeyMan : public DescriptorScriptPubKeyMan
 {
   public:
-  ExternalSignerScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spk_map, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, WalletDescriptor& descriptor, int64_t keypool_size)
-      :   DescriptorScriptPubKeyMan(storage, cs_spk_map, spk_map, topup_callback, descriptor, keypool_size)
+  ExternalSignerScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spk_map, ScriptPubKeyMap& spk_map, WalletDescriptor& descriptor, int64_t keypool_size)
+      :   DescriptorScriptPubKeyMan(storage, cs_spk_map, spk_map, descriptor, keypool_size)
       {}
-  ExternalSignerScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spk_map, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, int64_t keypool_size)
-      :   DescriptorScriptPubKeyMan(storage, cs_spk_map, spk_map, topup_callback, keypool_size)
+  ExternalSignerScriptPubKeyMan(WalletStorage& storage, RecursiveMutex& cs_spk_map, ScriptPubKeyMap& spk_map, int64_t keypool_size)
+      :   DescriptorScriptPubKeyMan(storage, cs_spk_map, spk_map, keypool_size)
       {}
 
   /** Provide a descriptor at setup time

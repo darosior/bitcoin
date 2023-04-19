@@ -3563,7 +3563,7 @@ void CWallet::SetupLegacyScriptPubKeyMan()
         return;
     }
 
-    auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new LegacyScriptPubKeyMan(*this, std::bind(&CWallet::CacheNewScriptPubKeys, this, std::placeholders::_1, std::placeholders::_2), m_keypool_size));
+    auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new LegacyScriptPubKeyMan(*this, m_keypool_size));
     for (const auto& type : LEGACY_OUTPUT_TYPES) {
         m_internal_spk_managers[type] = spk_manager.get();
         m_external_spk_managers[type] = spk_manager.get();
@@ -3593,10 +3593,10 @@ void CWallet::LoadDescriptorScriptPubKeyMan(uint256 id, WalletDescriptor& desc)
 {
     LOCK(cs_spk_map);
     if (IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER)) {
-        auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new ExternalSignerScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, std::bind(&CWallet::CacheNewScriptPubKeys, this, std::placeholders::_1, std::placeholders::_2), desc, m_keypool_size));
+        auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new ExternalSignerScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, desc, m_keypool_size));
         m_spk_managers[id] = std::move(spk_manager);
     } else {
-        auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, std::bind(&CWallet::CacheNewScriptPubKeys, this, std::placeholders::_1, std::placeholders::_2), desc, m_keypool_size));
+        auto spk_manager = std::unique_ptr<ScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, desc, m_keypool_size));
         m_spk_managers[id] = std::move(spk_manager);
     }
 }
@@ -3608,7 +3608,7 @@ void CWallet::SetupDescriptorScriptPubKeyMans(const CExtKey& master_key)
 
     for (bool internal : {false, true}) {
         for (OutputType t : OUTPUT_TYPES) {
-            auto spk_manager = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, std::bind(&CWallet::CacheNewScriptPubKeys, this, std::placeholders::_1, std::placeholders::_2), m_keypool_size));
+            auto spk_manager = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, m_keypool_size));
             if (IsCrypted()) {
                 if (IsLocked()) {
                     throw std::runtime_error(std::string(__func__) + ": Wallet is locked, cannot setup new descriptors");
@@ -3665,7 +3665,7 @@ void CWallet::SetupDescriptorScriptPubKeyMans()
                     continue;
                 }
                 OutputType t =  *desc->GetOutputType();
-                auto spk_manager = std::unique_ptr<ExternalSignerScriptPubKeyMan>(new ExternalSignerScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, std::bind(&CWallet::CacheNewScriptPubKeys, this, std::placeholders::_1, std::placeholders::_2), m_keypool_size));
+                auto spk_manager = std::unique_ptr<ExternalSignerScriptPubKeyMan>(new ExternalSignerScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, m_keypool_size));
                 spk_manager->SetupDescriptor(std::move(desc));
                 uint256 id = spk_manager->GetID();
                 m_spk_managers[id] = std::move(spk_manager);
@@ -3782,7 +3782,7 @@ ScriptPubKeyMan* CWallet::AddWalletDescriptor(WalletDescriptor& desc, const Flat
         spk_man->UpdateWalletDescriptor(desc);
     } else {
         LOCK(cs_spk_map);
-        auto new_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, std::bind(&CWallet::CacheNewScriptPubKeys, this, std::placeholders::_1, std::placeholders::_2), desc, m_keypool_size));
+        auto new_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, cs_spk_map, m_cached_spks, desc, m_keypool_size));
         spk_man = new_spk_man.get();
 
         // Save the descriptor to memory
@@ -4333,9 +4333,5 @@ util::Result<MigrationResult> MigrateLegacyToDescriptor(const std::string& walle
         return util::Error{error};
     }
     return res;
-}
-
-void CWallet::CacheNewScriptPubKeys(const std::set<CScript>& spks, ScriptPubKeyMan* spkm)
-{
 }
 } // namespace wallet

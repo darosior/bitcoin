@@ -1787,7 +1787,7 @@ std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(Recursiv
         WalletDescriptor w_desc(std::move(desc), creation_time, 0, 0, 0);
 
         // Make the DescriptorScriptPubKeyMan and get the scriptPubKeys
-        auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, m_topup_callback, w_desc, m_keypool_size));
+        auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, w_desc, m_keypool_size));
         desc_spk_man->AddDescriptorKey(key, key.GetPubKey());
         desc_spk_man->TopUp();
         auto desc_spks = desc_spk_man->GetScriptPubKeys();
@@ -1832,7 +1832,7 @@ std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(Recursiv
             WalletDescriptor w_desc(std::move(desc), 0, 0, chain_counter, 0);
 
             // Make the DescriptorScriptPubKeyMan and get the scriptPubKeys
-            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, m_topup_callback, w_desc, m_keypool_size));
+            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, w_desc, m_keypool_size));
             desc_spk_man->AddDescriptorKey(master_key.key, master_key.key.GetPubKey());
             desc_spk_man->TopUp();
             auto desc_spks = desc_spk_man->GetScriptPubKeys();
@@ -1894,7 +1894,7 @@ std::optional<MigrationData> LegacyScriptPubKeyMan::MigrateToDescriptor(Recursiv
         } else {
             // Make the DescriptorScriptPubKeyMan and get the scriptPubKeys
             WalletDescriptor w_desc(std::move(desc), creation_time, 0, 0, 0);
-            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, m_topup_callback, w_desc, m_keypool_size));
+            auto desc_spk_man = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(m_storage, cs_spk_map, cached_spks, w_desc, m_keypool_size));
             for (const auto& keyid : privkeyids) {
                 CKey key;
                 if (!GetKey(keyid, key)) {
@@ -2189,7 +2189,6 @@ bool DescriptorScriptPubKeyMan::TopUp(unsigned int size)
     // By this point, the cache size should be the size of the entire range
     assert(m_wallet_descriptor.range_end - 1 == m_max_cached_index);
 
-    m_topup_callback(new_spks, this);
     NotifyCanGetAddressesChanged();
     return true;
 }
@@ -2628,8 +2627,6 @@ void DescriptorScriptPubKeyMan::SetCache(const DescriptorCache& cache)
         }
         m_max_cached_index++;
     }
-    // Make sure the wallet knows about our new spks
-    m_topup_callback(new_spks, this);
 }
 
 bool DescriptorScriptPubKeyMan::AddKey(const CKeyID& key_id, const CKey& key)
