@@ -27,6 +27,7 @@ enum class OutputType;
 struct bilingual_str;
 
 namespace wallet {
+
 // Wallet storage things that ScriptPubKeyMans need in order to be able to store things to the wallet database.
 // It provides access to things that are part of the entire wallet and not specific to a ScriptPubKeyMan such as
 // wallet flags, wallet version, encryption keys, encryption status, and the database itself. This allows a
@@ -522,7 +523,7 @@ public:
 
     /** Get the DescriptorScriptPubKeyMans (with private keys) that have the same scriptPubKeys as this LegacyScriptPubKeyMan.
      * Does not modify this ScriptPubKeyMan. */
-    std::optional<MigrationData> MigrateToDescriptor();
+    std::optional<MigrationData> MigrateToDescriptor(std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>& cached_spks);
     /** Delete all the records ofthis LegacyScriptPubKeyMan from disk*/
     bool DeleteRecords();
 };
@@ -545,12 +546,15 @@ public:
 
 class DescriptorScriptPubKeyMan : public ScriptPubKeyMan
 {
+public:
+    using ScriptPubKeyMap = std::unordered_map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>, SaltedSipHasher>;
+
 private:
     using PubKeyMap = std::map<CPubKey, int32_t>; // Map of pubkeys involved in scripts to descriptor range index
     using CryptedKeyMap = std::map<CKeyID, std::pair<CPubKey, std::vector<unsigned char>>>;
     using KeyMap = std::map<CKeyID, CKey>;
 
-    std::map<CScript, std::map<const DescriptorScriptPubKeyMan*, int32_t>> m_map_script_pub_keys GUARDED_BY(cs_desc_man);
+    ScriptPubKeyMap& m_map_script_pub_keys GUARDED_BY(cs_desc_man);
     size_t m_spk_cache_index{0};
     PubKeyMap m_map_pubkeys GUARDED_BY(cs_desc_man);
     int32_t m_max_cached_index = -1;
@@ -584,13 +588,15 @@ protected:
   WalletDescriptor m_wallet_descriptor GUARDED_BY(cs_desc_man);
 
 public:
-    DescriptorScriptPubKeyMan(WalletStorage& storage, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, WalletDescriptor& descriptor, int64_t keypool_size)
+    DescriptorScriptPubKeyMan(WalletStorage& storage, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, WalletDescriptor& descriptor, int64_t keypool_size)
         :   ScriptPubKeyMan(storage, topup_callback),
+            m_map_script_pub_keys(spk_map), // FIXME get a lock from the wallet too.
             m_keypool_size(keypool_size),
             m_wallet_descriptor(descriptor)
         {}
-    DescriptorScriptPubKeyMan(WalletStorage& storage, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, int64_t keypool_size)
+    DescriptorScriptPubKeyMan(WalletStorage& storage, ScriptPubKeyMap& spk_map, std::function<void(const std::set<CScript>&, ScriptPubKeyMan*)> topup_callback, int64_t keypool_size)
         :   ScriptPubKeyMan(storage, topup_callback),
+            m_map_script_pub_keys(spk_map),
             m_keypool_size(keypool_size)
         {}
 

@@ -341,7 +341,7 @@ private:
     std::map<uint256, std::unique_ptr<ScriptPubKeyMan>> m_spk_managers;
 
     //! Cache of descriptor ScriptPubKeys used for IsMine. Maps ScriptPubKey to set of spkms
-    std::unordered_map<CScript, std::unordered_set<ScriptPubKeyMan*>, SaltedSipHasher> m_cached_spks;
+    DescriptorScriptPubKeyMan::ScriptPubKeyMap m_cached_spks;
 
     /**
      * Catch wallet up to current chain, scanning new blocks, updating the best
@@ -945,7 +945,7 @@ public:
     bool MigrateToSQLite(bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     //! Get all of the descriptors from a legacy wallet
-    std::optional<MigrationData> GetDescriptorsForLegacy(bilingual_str& error) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    std::optional<MigrationData> GetDescriptorsForLegacy(bilingual_str& error) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     //! Adds the ScriptPubKeyMans given in MigrationData to this wallet, removes LegacyScriptPubKeyMan,
     //! and where needed, moves tx and address book entries to watchonly_wallet or solvable_wallet
