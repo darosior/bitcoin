@@ -5654,8 +5654,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     // Produce a vector with all candidates for sending
                     std::vector<std::set<uint256>::iterator> vInvTx;
                     vInvTx.reserve(tx_relay->m_tx_inventory_to_send.size());
-                    for (std::set<uint256>::iterator it = tx_relay->m_tx_inventory_to_send.begin(); it != tx_relay->m_tx_inventory_to_send.end(); it++) {
-                        vInvTx.push_back(it);
+                    for (std::set<uint256>::iterator it = tx_relay->m_tx_inventory_to_send.begin(); it != tx_relay->m_tx_inventory_to_send.end();) {
+                        // Drop it if not in mempool anymore
+                        if (!m_mempool.exists(peer->m_wtxid_relay ? GenTxid::Wtxid(*it) : GenTxid::Txid(*it))) {
+                            it = tx_relay->m_tx_inventory_to_send.erase(it);
+                            continue;
+                        }
+                        vInvTx.push_back(it++);
                     }
                     const CFeeRate filterrate{tx_relay->m_fee_filter_received.load()};
                     // Topologically and fee-rate sort the inventory we send for privacy and priority reasons.
