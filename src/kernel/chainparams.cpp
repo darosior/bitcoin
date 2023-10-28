@@ -146,6 +146,7 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY] = SetupDeployment{.activate = 0x30000000, .abandon = 0, .never = true};
         consensus.vDeployments[Consensus::DEPLOYMENT_CHECKTEMPLATEVERIFY] = SetupDeployment{.activate = 0x60007700, .abandon = 0x40007700, .never = true};
         consensus.vDeployments[Consensus::DEPLOYMENT_ANYPREVOUT] = SetupDeployment{.activate = 0x60007600, .abandon = 0x40007600, .never = true};
+        consensus.vDeployments[Consensus::DEPLOYMENT_OP_CAT] = SetupDeployment{.activate = 0x62000100, .abandon = 0x42000100, .never = true};
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000b1f3b93b65b16d035a82be84"};
         consensus.defaultAssumeValid = uint256{"00000000000000000001b658dd1120e82e66d2790811f89ede9742ada3ed6d77"}; // 886157
@@ -270,6 +271,7 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY] = SetupDeployment{.activate = 0x30000000, .abandon = 0, .never = true};
         consensus.vDeployments[Consensus::DEPLOYMENT_CHECKTEMPLATEVERIFY] = SetupDeployment{.activate = 0x60007700, .abandon = 0x40007700, .never = true};
         consensus.vDeployments[Consensus::DEPLOYMENT_ANYPREVOUT] = SetupDeployment{.activate = 0x60007600, .abandon = 0x40007600, .never = true};
+        consensus.vDeployments[Consensus::DEPLOYMENT_OP_CAT] = SetupDeployment{.activate = 0x62000100, .abandon = 0x42000100, .never = true};
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000015f5e0c9f13455b0eb17"};
         consensus.defaultAssumeValid = uint256{"00000000000003fc7967410ba2d0a8a8d50daedc318d43e8baf1a9782c236a57"}; // 3974606
@@ -503,6 +505,15 @@ public:
             .activate = 0x60007600,
             .abandon = 0x40007600,
         };
+        consensus.vDeployments[Consensus::DEPLOYMENT_OP_CAT] = SetupDeployment{
+            .year = 2024,
+            .number = 1,
+            .revision = 0,
+            .start = 1704085200, // 2024-01-01
+            .timeout = 2019704400, // 2034-01-01
+            .activate = 0x62000100,
+            .abandon = 0x42000100,
+        };
 
         RenounceDeployments(options.renounce, consensus.vDeployments);
 
@@ -576,7 +587,7 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY] = SetupDeployment{.start = 0, .timeout = Consensus::HereticalDeployment::NO_TIMEOUT, .activate = 0x30000000, .abandon = 0x50000000};
         consensus.vDeployments[Consensus::DEPLOYMENT_CHECKTEMPLATEVERIFY] = SetupDeployment{.activate = 0x60007700, .abandon = 0x40007700, .always = true};
         consensus.vDeployments[Consensus::DEPLOYMENT_ANYPREVOUT] = SetupDeployment{.activate = 0x60007600, .abandon = 0x40007600, .always = true};
-
+        consensus.vDeployments[Consensus::DEPLOYMENT_OP_CAT] = SetupDeployment{.activate = 0x62000100, .abandon = 0x42000100, .always = true};
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
