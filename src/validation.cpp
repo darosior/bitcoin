@@ -3754,7 +3754,7 @@ std::vector<unsigned char> ChainstateManager::GenerateCoinbaseCommitment(CBlock&
     int commitpos = GetWitnessCommitmentIndex(block);
     std::vector<unsigned char> ret(32, 0x00);
     if (commitpos == NO_WITNESS_COMMITMENT) {
-        uint256 witnessroot = BlockWitnessMerkleRoot(block, nullptr);
+        uint256 witnessroot = BlockWitnessMerkleRoot(block);
         CHash256().Write(witnessroot).Write(ret).Finalize(witnessroot);
         CTxOut out;
         out.nValue = 0;
@@ -3893,8 +3893,7 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT)) {
         int commitpos = GetWitnessCommitmentIndex(block);
         if (commitpos != NO_WITNESS_COMMITMENT) {
-            bool malleated = false;
-            uint256 hashWitness = BlockWitnessMerkleRoot(block, &malleated);
+            uint256 hashWitness = BlockWitnessMerkleRoot(block);
             // The malleation check is ignored; as the transaction tree itself
             // already does not permit it, it is impossible to trigger in the
             // witness tree.
