@@ -54,6 +54,8 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& ma
  */
 int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& inputs, uint32_t flags);
 
+int64_t GetExecutedSigops(const CTransaction& tx, const CCoinsViewCache& inputs);
+
 /**
  * Check if transaction is final and can be included in a block with the
  * specified height and time. Consensus critical.

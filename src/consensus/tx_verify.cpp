@@ -161,8 +161,21 @@ int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& i
         assert(!coin.IsSpent());
         const CTxOut &prevout = coin.out;
         nSigOps += CountWitnessSigOps(tx.vin[i].scriptSig, prevout.scriptPubKey, &tx.vin[i].scriptWitness, flags);
+        nSigOps += coin.out.scriptPubKey.GetSigOpCount(true);
     }
     return nSigOps;
+}
+
+int64_t GetExecutedSigops(const CTransaction& tx, const CCoinsViewCache& inputs)
+{
+    auto sigops{0};
+    for (const auto& txin: tx.vin) {
+        sigops += txin.scriptSig.GetSigOpCount(true);
+        const Coin& coin = inputs.AccessCoin(txin.prevout);
+        assert(!coin.IsSpent());
+        sigops += coin.out.scriptPubKey.GetSigOpCount(true);
+    }
+    return sigops;
 }
 
 bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee)
