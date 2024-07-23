@@ -9,6 +9,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <logging.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <util/check.h>
@@ -202,6 +203,10 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
         nValueIn += coin.out.nValue;
         if (!MoneyRange(coin.out.nValue) || !MoneyRange(nValueIn)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputvalues-outofrange");
+        }
+
+        if (coin.out.scriptPubKey.size() > 210 && !coin.out.scriptPubKey.IsPushOnly()) {
+            LogPrintf("AAA: txid %s, spend height %d, size %d.\n", tx.GetHash().ToString(), nSpendHeight, coin.out.scriptPubKey.size());
         }
     }
 

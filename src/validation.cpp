@@ -2430,9 +2430,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if (!tx.HasWitness()) {
                 const auto tx_sigops{GetExecutedSigops(tx, view)};
                 if (tx_sigops > MAX_LEGACY_TX_EXEC_SIGOPS) {
-                    LogPrintf("ERROR: ConnectBlock(): too many sigops in legacy transaction.\n");
-                    LogPrintf("AAA: txid %s, height %d, sigops %d.\n", tx.GetHash().ToString(), pindex->nHeight, tx_sigops);
-                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-tx-sigops");
+                    //LogPrintf("ERROR: ConnectBlock(): too many sigops in legacy transaction.\n");
+                    //LogPrintf("AAA: txid %s, height %d, sigops %d.\n", tx.GetHash().ToString(), pindex->nHeight, tx_sigops);
+                    //return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-tx-sigops");
                 }
             }
         }
