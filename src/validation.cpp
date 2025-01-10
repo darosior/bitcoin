@@ -2693,6 +2693,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             break;
         }
 
+        // Prevent extreme block validation times by limiting the number of legacy signature operations.
+        if (DeploymentActiveAt(*pindex, m_chainman, Consensus::DEPLOYMENT_CLEANUP)) {
+            if (!tx.IsCoinBase() && GetLegacySigOps(tx, view) > MAX_TX_LEGACY_SIGOPS) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-tx-sigops", "too many legacy sigops");
+                break;
+            }
+        }
+
         if (!tx.IsCoinBase())
         {
             std::vector<CScriptCheck> vChecks;

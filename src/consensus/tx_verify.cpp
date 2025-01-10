@@ -161,6 +161,24 @@ int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& i
     return nSigOps;
 }
 
+unsigned int GetLegacySigOps(const CTransaction& tx, const CCoinsViewCache& inputs)
+{
+    Assert(!tx.IsCoinBase());
+    unsigned int sigops{0};
+
+    for (unsigned i{0}; i < tx.vin.size(); ++i) {
+        sigops += tx.vin[i].scriptSig.GetSigOpCount(true);
+        const auto& coin{inputs.AccessCoin(tx.vin[i].prevout)};
+        assert(!coin.IsSpent());
+        sigops += coin.out.scriptPubKey.GetSigOpCount(true);
+        if (coin.out.scriptPubKey.IsPayToScriptHash()) {
+            sigops += coin.out.scriptPubKey.GetSigOpCount(tx.vin[i].scriptSig);
+        }
+    }
+
+    return sigops;
+}
+
 bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee)
 {
     // are the actual inputs available?

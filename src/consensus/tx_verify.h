@@ -55,6 +55,16 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& ma
 int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& inputs, uint32_t flags);
 
 /**
+ * Count potentially executed legacy signature operations in validating this transaction.
+ * TODO: precondition not iscoinbase.
+ *
+ * @param[in] tx     Transaction for which we are computing the cost
+ * @param[in] inputs Map of previous transactions that have outputs we're spending
+ * @return Number of executed legacy signature operations
+ */
+unsigned int GetLegacySigOps(const CTransaction& tx, const CCoinsViewCache& inputs);
+
+/**
  * Check if transaction is final and can be included in a block with the
  * specified height and time. Consensus critical.
  */
