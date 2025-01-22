@@ -74,14 +74,14 @@ static bool ProcessPCP()
             LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "portmap: gateway [IPv4]: %s\n", gateway4->ToStringAddr());
 
             // Open a port mapping on whatever local address we have toward the gateway.
-            struct in_addr inaddr_any;
-            inaddr_any.s_addr = htonl(INADDR_ANY);
-            auto res = PCPRequestPortMap(pcp_nonce, *gateway4, CNetAddr(inaddr_any), private_port, requested_lifetime);
-            MappingError* pcp_err = std::get_if<MappingError>(&res);
-            if (pcp_err && *pcp_err == MappingError::UNSUPP_VERSION) {
-                LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "portmap: Got unsupported PCP version response, falling back to NAT-PMP\n");
-                res = NATPMPRequestPortMap(*gateway4, private_port, requested_lifetime);
-            }
+            //struct in_addr inaddr_any;
+            //inaddr_any.s_addr = htonl(INADDR_ANY);
+            //auto res = PCPRequestPortMap(pcp_nonce, *gateway4, CNetAddr(inaddr_any), private_port, requested_lifetime);
+            //MappingError* pcp_err = std::get_if<MappingError>(&res);
+            //if (pcp_err && *pcp_err == MappingError::UNSUPP_VERSION) {
+                LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "portmap: disabled PCP, falling back to NAT-PMP\n");
+                auto res = NATPMPRequestPortMap(*gateway4, private_port, requested_lifetime);
+            //}
             handle_mapping(res);
         }
 
@@ -91,13 +91,14 @@ static bool ProcessPCP()
             LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "portmap: Could not determine IPv6 default gateway\n");
         } else {
             LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "portmap: gateway [IPv6]: %s\n", gateway6->ToStringAddr());
+            LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "portmap: disabled IPV6\n");
 
             // Try to open pinholes for all routable local IPv6 addresses.
-            for (const auto &addr: GetLocalAddresses()) {
-                if (!addr.IsRoutable() || !addr.IsIPv6()) continue;
-                auto res = PCPRequestPortMap(pcp_nonce, *gateway6, addr, private_port, requested_lifetime);
-                handle_mapping(res);
-            }
+            //for (const auto &addr: GetLocalAddresses()) {
+            //    if (!addr.IsRoutable() || !addr.IsIPv6()) continue;
+            //    auto res = PCPRequestPortMap(pcp_nonce, *gateway6, addr, private_port, requested_lifetime);
+            //    handle_mapping(res);
+            //}
         }
 
         // Log message if we got NO_RESOURCES.
