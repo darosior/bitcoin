@@ -566,7 +566,7 @@ BOOST_AUTO_TEST_CASE(test_big_witness_transaction)
     CTransaction tx(deserialize, TX_WITH_WITNESS, ssout);
 
     // check all inputs concurrently, with the cache
-    PrecomputedTransactionData txdata(tx);
+    auto txdata{std::make_shared<PrecomputedTransactionData>(tx)};
     CCheckQueue<CScriptCheck> scriptcheckqueue(/*batch_size=*/128, /*worker_threads_num=*/20);
     CCheckQueueControl<CScriptCheck> control(&scriptcheckqueue);
 
@@ -584,7 +584,7 @@ BOOST_AUTO_TEST_CASE(test_big_witness_transaction)
 
     for(uint32_t i = 0; i < mtx.vin.size(); i++) {
         std::vector<CScriptCheck> vChecks;
-        vChecks.emplace_back(coins[tx.vin[i].prevout.n].out, tx, signature_cache, i, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS, false, &txdata);
+        vChecks.emplace_back(coins[tx.vin[i].prevout.n].out, tx, signature_cache, i, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS, false, txdata);
         control.Add(std::move(vChecks));
     }
 
