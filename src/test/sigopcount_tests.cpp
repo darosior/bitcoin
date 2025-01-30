@@ -14,6 +14,7 @@
 #include <test/util/setup_common.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -226,6 +227,85 @@ BOOST_AUTO_TEST_CASE(GetTxSigOpCost)
         assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) == 2);
         assert(VerifyWithFlag(CTransaction(creationTx), spendingTx, flags) == SCRIPT_ERR_CHECKMULTISIGVERIFY);
     }
+}
+
+BOOST_AUTO_TEST_CASE(legacysigops)
+{
+    CMutableTransaction tx;
+    CCoinsView coins;
+    CCoinsViewCache coins_cache{&coins};
+
+    // An empty transaction has no potentially executed legacy sigops.
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 0);
+
+    // Introducing an input that spends a script with a single CHECKSIG will count it.
+    COutPoint op{*Txid::FromHex("2d05f0c9c3e1c226e63b5fac240137687544cf631cd616fd34fd188fc9020866"), 0};
+    tx.vin.push_back(CTxIn{op});
+    coins_cache.AddCoin(op, Coin(CTxOut{42, CScript() << OP_CHECKSIG}, 141, false), false);
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 1);
+
+    // Adding a CHECKSIG to the scriptSig will be counted too.
+    tx.vin[0].scriptSig << OP_CHECKSIG;
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 2);
+
+    // Now if we add an input that spends a CHECKMULTISIG, it will be counted as the number of associated pubkeys.
+    ++op.n;
+    tx.vin.push_back(CTxIn{op});
+    CScript spk{CScript() << 16 << OP_CHECKMULTISIG};
+    coins_cache.AddCoin(op, Coin(CTxOut{341341341, spk}, 21, true), false);
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 18);
+
+    // Now if we add a CHECKSIGADD it would not be counted since it cannot be used in legacy context.
+    tx.vin[1].scriptSig << OP_CHECKSIGADD;
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 18);
+
+    // But a CHECKMULTISIG would be counted alright.
+    tx.vin[1].scriptSig << 1 << OP_CHECKMULTISIG;
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 19);
+
+    // A CHECKMULTISIG and a CHECKSIGVERIFY inside P2SH are counted.
+    ++op.n;
+    tx.vin.push_back(CTxIn{op});
+    CScript redeem_script{CScript() << 1 << OP_CHECKMULTISIG << OP_CHECKSIGVERIFY};
+    CScript p2sh_script{GetScriptForDestination(ScriptHash(redeem_script))};
+    BOOST_CHECK(p2sh_script.IsPayToScriptHash());
+    tx.vin.push_back(CTxIn{op});
+    tx.vin[2].scriptSig << ToByteVector(redeem_script);
+    coins_cache.AddCoin(op, Coin(CTxOut{3434, p2sh_script}, 35, true), false);
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 21);
+
+    // Now we add a coin from a different transaction with a ton of sigops from mixed opcodes, they'll all get counted.
+    COutPoint sec_op{*Txid::FromHex("fe28050b93faea61fa88c4c630f0e1f0a1c24d0082dd0e10d369e13212128f33"), 30};
+    tx.vin.push_back(CTxIn{sec_op});
+    CScript large_spk{CScript() << 2};
+    large_spk << 17 << OP_CHECKMULTISIGVERIFY;
+    for (int i{0}; i < 174; ++i) large_spk << OP_CHECKSIG;
+    coins_cache.AddCoin(sec_op, Coin(CTxOut{31313131, large_spk}, 32, false), false);
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), 215); // NOTE: 17 pubkeys in CMS get counted as 20 sigops.
+
+    // Finally add inputs with a bunch of CHECKSIG's until we reach the legacy sigops limit.
+    for (int i{215}; i < (int)MAX_TX_LEGACY_SIGOPS; i += 5) {
+        ++sec_op.n;
+        tx.vin.push_back(CTxIn{sec_op});
+        for (int j{0}; j < 5; ++j) tx.vin.back().scriptSig << OP_CHECKSIGVERIFY;
+        coins_cache.AddCoin(sec_op, Coin(CTxOut{i, CScript{}}, i, false), false);
+    }
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), MAX_TX_LEGACY_SIGOPS);
+
+    // Adding one more will make it reach a higher value and would fail the check in ConnectBlock past consensus cleanup activation.
+    ++op.n;
+    tx.vin.push_back(CTxIn{op});
+    CScript spk2{CScript() << OP_CHECKSIG};
+    coins_cache.AddCoin(op, Coin(CTxOut{90909090, spk2}, 112, true), false);
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), MAX_TX_LEGACY_SIGOPS + 1);
+
+    // Changing other fields in the transaction have no incidence whatsoever on the returned value.
+    tx.version = 113;
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), MAX_TX_LEGACY_SIGOPS + 1);
+    tx.nLockTime = 130;
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), MAX_TX_LEGACY_SIGOPS + 1);
+    tx.vin[tx.vin.size() / 2].nSequence = 147;
+    BOOST_CHECK_EQUAL(GetLegacySigOps(CTransaction(tx), coins_cache), MAX_TX_LEGACY_SIGOPS + 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
