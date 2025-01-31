@@ -374,6 +374,7 @@ BASE_SCRIPTS = [
     'feature_asmap.py',
     'feature_fastprune.py',
     'feature_framework_miniwallet.py',
+    'mining_timewarp.py',
     'mempool_unbroadcast.py',
     'mempool_compatibility.py',
     'mempool_accept_wtxid.py',
