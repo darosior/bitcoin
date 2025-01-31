@@ -39,6 +39,12 @@ int64_t GetMinimumTime(const CBlockIndex* pindexPrev, const int64_t difficulty_a
     if (height % difficulty_adjustment_interval == 0) {
         min_time = std::max<int64_t>(min_time, pindexPrev->GetBlockTime() - MAX_TIMEWARP_TESTNET);
     }
+    // Account for negative interval rule.
+    if (height % difficulty_adjustment_interval == difficulty_adjustment_interval - 1) {
+        int int_start_height{height - (int)difficulty_adjustment_interval + 1};
+        const CBlockIndex* int_start_block{Assert(pindexPrev->GetAncestor(int_start_height))};
+        min_time = std::max<int64_t>(min_time, int_start_block->GetBlockTime());
+    }
     return min_time;
 }
 
