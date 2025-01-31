@@ -30,6 +30,13 @@ static constexpr unsigned int LOCKTIME_VERIFY_SEQUENCE = (1 << 0);
 /**
  * Maximum number of seconds that the timestamp of the first
  * block of a difficulty adjustment period is allowed to
+ * be earlier than the last block of the previous period.
+ */
+static constexpr int64_t MAX_TIMEWARP{600 * 12};
+
+/**
+ * Maximum number of seconds that the timestamp of the first
+ * block of a difficulty adjustment period is allowed to
  * be earlier than the last block of the previous period (BIP94).
  */
 static constexpr int64_t MAX_TIMEWARP_TESTNET = 600;
