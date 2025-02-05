@@ -22,7 +22,7 @@ struct Dersig100Setup : public TestChain100Setup {
 
 bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
                        const CCoinsViewCache& inputs, unsigned int flags, bool cacheSigStore,
-                       bool cacheFullScriptStore, std::shared_ptr<PrecomputedTransactionData>& txdata,
+                       bool cacheFullScriptStore, std::shared_ptr<PrecomputedTransactionData> txdata,
                        ValidationCache& validation_cache,
                        std::vector<CScriptCheck>* pvChecks) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 

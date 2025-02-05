@@ -138,7 +138,7 @@ const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locato
 
 bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
                        const CCoinsViewCache& inputs, unsigned int flags, bool cacheSigStore,
-                       bool cacheFullScriptStore, std::shared_ptr<PrecomputedTransactionData>& txdata,
+                       bool cacheFullScriptStore, std::shared_ptr<PrecomputedTransactionData> txdata,
                        ValidationCache& validation_cache,
                        std::vector<CScriptCheck>* pvChecks = nullptr)
                        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -396,7 +396,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 * */
 static bool CheckInputsFromMempoolAndCache(const CTransaction& tx, TxValidationState& state,
                 const CCoinsViewCache& view, const CTxMemPool& pool,
-                unsigned int flags, std::shared_ptr<PrecomputedTransactionData>& txdata, CCoinsViewCache& coins_tip,
+                unsigned int flags, std::shared_ptr<PrecomputedTransactionData> txdata, CCoinsViewCache& coins_tip,
                 ValidationCache& validation_cache)
                 EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs)
 {
@@ -2162,7 +2162,7 @@ ValidationCache::ValidationCache(const size_t script_execution_cache_bytes, cons
  */
 bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
                        const CCoinsViewCache& inputs, unsigned int flags, bool cacheSigStore,
-                       bool cacheFullScriptStore, std::shared_ptr<PrecomputedTransactionData>& txdata,
+                       bool cacheFullScriptStore, std::shared_ptr<PrecomputedTransactionData> txdata,
                        ValidationCache& validation_cache,
                        std::vector<CScriptCheck>* pvChecks)
 {
@@ -2643,7 +2643,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     {
         if (!state.IsValid()) break;
         const CTransaction &tx = *(block.vtx[i]);
-        auto txdata{std::make_shared<PrecomputedTransactionData>()};
 
         nInputs += tx.vin.size();
 
@@ -2695,7 +2694,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             std::vector<CScriptCheck> vChecks;
             bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
             TxValidationState tx_state;
-            if (fScriptChecks && !CheckInputScripts(tx, tx_state, view, flags, fCacheResults, fCacheResults, txdata, m_chainman.m_validation_cache, parallel_script_checks ? &vChecks : nullptr)) {
+            if (fScriptChecks && !CheckInputScripts(tx, tx_state, view, flags, fCacheResults, fCacheResults, {}, m_chainman.m_validation_cache, parallel_script_checks ? &vChecks : nullptr)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                               tx_state.GetRejectReason(), tx_state.GetDebugMessage());
