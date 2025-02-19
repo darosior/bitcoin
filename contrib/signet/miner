@@ -102,6 +102,7 @@ def generate_psbt(tmpl, reward_spk, *, blocktime=None, poolid=None):
         scriptSig = CScript(b"" + scriptSig + CScriptOp.encode_op_pushdata(poolid))
 
     cbtx = CTransaction()
+    cbtx.nLockTime = tmpl["height"] - 1
     cbtx.vin = [CTxIn(COutPoint(0, 0xffffffff), scriptSig, 0xffffffff)]
     cbtx.vout = [CTxOut(tmpl["coinbasevalue"], reward_spk)]
     cbtx.vin[0].nSequence = 2**32-2
