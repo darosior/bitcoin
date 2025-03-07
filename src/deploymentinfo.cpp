@@ -17,6 +17,10 @@ const struct VBDeploymentInfo VersionBitsDeploymentInfo[Consensus::MAX_VERSION_B
         /*.name =*/ "taproot",
         /*.gbt_force =*/ true,
     },
+    {
+        /*.name =*/ "cleanup",
+        /*.gbt_force =*/ true, // FIXME: should be false?
+    }
 };
 
 std::string DeploymentName(Consensus::BuriedDeployment dep)
