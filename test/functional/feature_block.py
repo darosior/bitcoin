@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test block processing."""
 import copy
+import random
 import time
 
 from test_framework.blocktools import (
@@ -25,6 +26,7 @@ from test_framework.messages import (
     SEQUENCE_FINAL,
     uint256_from_compact,
     uint256_from_str,
+    MAX_SEQUENCE_NONFINAL,
 )
 from test_framework.p2p import P2PDataStore
 from test_framework.script import (
@@ -1328,6 +1330,37 @@ class FullBlockTest(BitcoinTestFramework):
         b_cb34.hashMerkleRoot = b_cb34.calc_merkle_root()
         b_cb34.solve()
         self.send_blocks([b_cb34], success=False, reject_reason='bad-cb-height', reconnect=True)
+
+        # A block with its coinbase's nLockTime incorrectly set, or unenforced locktime is invalid.
+        self.log.info("Reject a block with an invalid coinbase locktime")
+        tip_pre_cb_tests = chain1_tip + 2
+        def test_mutated_cb(label, reject_reason, f_lt, txin_seq):
+            """Test the validity of a block by mutating its coinbase's nLockTime and nSequence."""
+            b = self.next_block(label)
+            b.vtx[0].nLockTime = f_lt(b.vtx[0].nLockTime)
+            b.vtx[0].vin[0].nSequence = txin_seq
+            b.vtx[0].rehash()
+            b.hashMerkleRoot = b.calc_merkle_root()
+            b.solve()
+            success = reject_reason is None
+            self.send_blocks([b], success=success, reject_reason=reject_reason, reconnect=not success)
+        self.move_tip(tip_pre_cb_tests)
+        self.log.info(" - An nLocktime too low with a non-final nSequence will be rejected")
+        test_mutated_cb("cb_lt_low", "bad-cb-locktime", lambda lock_time: lock_time - 1, MAX_SEQUENCE_NONFINAL)
+        self.move_tip(tip_pre_cb_tests)
+        self.log.info(" - An nLocktime too high with a non-final nSequence will fail the locktime check")
+        test_mutated_cb("cb_lt_nonfinal", "bad-txns-nonfinal", lambda lock_time: lock_time + 1, MAX_SEQUENCE_NONFINAL)
+        self.move_tip(tip_pre_cb_tests)
+        self.log.info(" - An nLocktime too high with a final nSequence will fail the nLockTime value check")
+        test_mutated_cb("cb_lt_high", "bad-cb-locktime", lambda lock_time: lock_time + 1, SEQUENCE_FINAL)
+        self.move_tip(tip_pre_cb_tests)
+        self.log.info(" - A correct nLocktime with a final nSequence will fail the nSequence value check")
+        test_mutated_cb("cb_seq_final", "bad-cb-sequence", lambda lock_time: lock_time, SEQUENCE_FINAL)
+        self.move_tip(tip_pre_cb_tests)
+        self.log.info(" - A correct nLocktime with a non-final nSequence will succeed")
+        test_mutated_cb("cb_seq_max_nonfinal", None, lambda lock_time: lock_time, MAX_SEQUENCE_NONFINAL)
+        self.log.info(" - A correct nLocktime with any non-final nSequence will succeed")
+        test_mutated_cb("cb_seq_any_nonfinal", None, lambda lock_time: lock_time, random.randint(0, MAX_SEQUENCE_NONFINAL - 1))
 
     # Helper methods
     ################
