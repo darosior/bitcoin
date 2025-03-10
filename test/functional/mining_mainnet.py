@@ -45,6 +45,9 @@ class MiningMainnetTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.chain = "" # main
+        # Disable the consensus cleanup for this check as the hardcoded block's coinbases
+        # use nLockTime=0.
+        self.extra_args = [["-vbparams=cleanup:0:0"]]
 
     def add_options(self, parser):
         parser.add_argument(

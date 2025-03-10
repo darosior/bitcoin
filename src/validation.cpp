@@ -4305,6 +4305,18 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         }
     }
 
+    // Make sure the coinbase's locktime is set to the block height minus one.
+    // FIXME: should we never make it active for the genesis block instead of checking it here?
+    if (nHeight > 0 && DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CLEANUP)) {
+        Assert(!block.vtx.empty() && block.vtx[0] && !block.vtx[0]->vin.empty());
+        if (block.vtx[0]->nLockTime != (uint32_t)nHeight - 1) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-locktime", "block height mismatch in coinbase nLockTime");
+        }
+        if (block.vtx[0]->vin[0].nSequence == CTxIn::SEQUENCE_FINAL) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-sequence", "locktime is disabled for coinbase");
+        }
+    }
+
     // Validation for witness commitments.
     // * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
     //   coinbase (where 0x0000....0000 is used instead).
