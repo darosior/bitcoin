@@ -4284,10 +4284,15 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
                                       pindexPrev->GetMedianTimePast() :
                                       block.GetBlockTime()};
 
-    // Check that all transactions are finalized
+    // Check that all transactions are finalized and none are 64-byte long, as those may cause the block to be
+    // malleable. See https://gnusha.org/pi/bitcoindev/CAFp6fsGtEm9p-ZQF_XqfqyQGzZK7BS2SNp2z680QBsJiFDraEA@mail.gmail.com.
+    const bool check_txs_size{DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CONSENSUSCLEANUP)};
     for (const auto& tx : block.vtx) {
         if (!IsFinalTx(*tx, nHeight, nLockTimeCutoff)) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal", "non-final transaction");
+        }
+        if (check_txs_size && GetSerializeSize(TX_NO_WITNESS(tx)) == INVALID_TX_NONWITNESS_SIZE) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-size", "block contains a 64 bytes transaction");
         }
     }
 

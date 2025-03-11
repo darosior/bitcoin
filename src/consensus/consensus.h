@@ -43,4 +43,10 @@ static constexpr int64_t MAX_TIMEWARP_TESTNET = 600;
 /** The maximum number of potentially executed legacy signature operations in a single standard tx */
 static constexpr unsigned int MAX_TX_LEGACY_SIGOPS{2'500};
 
+/**
+ * 64 bytes transactions are invalid due to serious flaws in the Merkle tree algorithm
+ * that make it so that such transactions may be re-interpreted as inner nodes.
+ */
+static constexpr unsigned int INVALID_TX_NONWITNESS_SIZE{64};
+
 #endif // BITCOIN_CONSENSUS_CONSENSUS_H
