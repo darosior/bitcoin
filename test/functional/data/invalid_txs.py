@@ -112,7 +112,8 @@ class InputMissing(BadTxTemplate):
 # tree depth commitment (CVE-2017-12842)
 class SizeExactly64(BadTxTemplate):
     reject_reason = "tx-size-small"
-    valid_in_block = True
+    valid_in_block = False
+    block_reject_reason = "bad-txns-size"
 
     def get_tx(self):
         tx = CTransaction()
