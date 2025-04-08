@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <key_io.h>
 #include <policy/packages.h>
@@ -568,6 +569,152 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
 
     // Configuration where tx has multiple generations of descendants is not tested because that is
     // equivalent to the tx with multiple generations of ancestors.
+}
+
+BOOST_FIXTURE_TEST_CASE(amount_constraints, BasicTestingSetup)
+{
+    CCoinsView coins_dummy;
+    CCoinsViewCache coins(&coins_dummy);
+    CKey key;
+    key.MakeNewKey(true);
+    CScript dummy_spk;
+    CMutableTransaction tx_create, tx_spend;
+    CAmount dummy_fee;
+    TxValidationState state;
+
+    const auto taproot_spk{CScript() << OP_1 << XOnlyPubKey{key.GetPubKey()}};
+    std::vector<COutPoint> outpoints;
+    tx_create.vout.resize(1);
+    for (int i{0}; i < 10; ++i) {
+        tx_create.vout[0] = CTxOut(1 << i, taproot_spk);
+        outpoints.push_back(COutPoint(tx_create.GetHash(), 0));
+        AddCoins(coins, CTransaction(tx_create), false);
+    }
+
+    // ===== Sanity checks =====
+
+    // No annex
+    tx_spend.vin.push_back(CTxIn(outpoints[0]));
+    tx_spend.vout.push_back(CTxOut(1, dummy_spk));
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+
+    // Annex with a sweep to the one output.
+    tx_spend.vin[0].scriptWitness.stack = {
+        {}, // dummy sig element
+        {ANNEX_TAG,
+         0x01, // Vector size
+         0x00, 0x00, 0x00, 0x00, // Index 0, ConstraintType::SWEEP
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // Amount 0 (for SWEEP)
+    };
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+
+    // Decrease the output value by one sat, should fail the constraint.
+    tx_spend.vout[0].nValue -= 1;
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("Output at index 0 is constrained to have value at least 1 but has value 0") != std::string::npos);
+
+    // Using a non-zero amount with SWEEP is invalid.
+    tx_spend.vin[0].scriptWitness.stack[1][6] = 0x01; // Amount 1
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("bad-txns-annex-sweep-nonzero-amount") != std::string::npos);
+
+    // Could use deduct with an amount but it'll fail the constraint again.
+    tx_spend.vin[0].scriptWitness.stack[1][5] = 0x01; // ConstraintType::DEDUCT
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("Output at index 0 is constrained to have value at least 1 but has value 0") != std::string::npos);
+
+    // Setting a correct value for the output will pass the constraint with deduct.
+    tx_spend.vout[0].nValue += 1;
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+
+    // DEDUCT only covers the specified amount. Check this by spending the 2 sats coin instead.
+    tx_spend.vin[0].prevout = outpoints[1];
+    tx_spend.vout[0].nValue = 2;
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    tx_spend.vout[0].nValue = 1; // The constraint is only to deduct 1
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+
+    // Check bounds. You can deduct 2 from the 2 sats coin, but not 3.
+    tx_spend.vin[0].scriptWitness.stack[1][6] = 0x02; // Amount 2
+    tx_spend.vout[0].nValue = 2;
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    tx_spend.vin[0].scriptWitness.stack[1][6] = 0x03; // Amount 3
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("bad-txns-annex-deduct-overflow") != std::string::npos);
+
+    // Can't constrain an output that doesn't exist.
+    tx_spend.vin[0].scriptWitness.stack[1][2] = 0x01;
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("bad-txns-annex-output-out-of-range") != std::string::npos);
+
+    // ===== Demonstration =====
+    // This implements the examples from Salvatore's post: https://delvingbitcoin.org/t/op-checkcontractverify-and-its-amount-semantic/1527#p-4551-examples-5
+
+    // Start by resetting the transaction.
+    tx_spend.vin.clear();
+    tx_spend.vout.clear();
+
+    // many-to-1: spend coins that are 4, 8 and 16 sats into a single output.
+    tx_spend.vout.push_back(CTxOut{4 + 8 + 16, dummy_spk});
+    for (int i{2}; i < 5; ++i) {
+        tx_spend.vin.push_back(CTxIn(outpoints[i]));
+        tx_spend.vin[tx_spend.vin.size() - 1].scriptWitness.stack = {
+            {}, // dummy sig element
+            {ANNEX_TAG,
+             0x01, // Vector size
+             0x00, 0x00, 0x00, 0x00, // Index 0, ConstraintType::SWEEP
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // Amount 0 (for SWEEP)
+        };
+    }
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+
+    // many-to-1: all coins must be swept into the first output, taking one sat into another will
+    // fail validation.
+    tx_spend.vout[0].nValue -= 1;
+    tx_spend.vout.push_back(CTxOut{1, dummy_spk});
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("Output at index 0 is constrained to have value at least 28 but has value 27") != std::string::npos);
+
+    // Clear the transaction again.
+    tx_spend.vin.clear();
+    tx_spend.vout.clear();
+
+    // send partial amount: split the 32 sats coin into two outputs, a 20 sats one and a 12 sats one.
+    tx_spend.vin.push_back(CTxIn(outpoints[5]));
+    tx_spend.vin[0].scriptWitness.stack = {
+        {}, // dummy sig element
+        {ANNEX_TAG,
+         0x02, // Vector size
+         0x00, 0x00, 0x00, 0x01, // Index 0, ConstraintType::DEDUCT
+         0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Amount 20
+         0x01, 0x00, 0x00, 0x00, // Index 1, ConstraintType::SWEEP
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // Amount 0 (for SWEEP)
+    };
+    tx_spend.vout = {CTxOut{20, dummy_spk}, CTxOut{12, dummy_spk}};
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+
+    // send partial amount: stealing a sat from one output to fees will fail validation.
+    tx_spend.vout[1].nValue -= 1;
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("Output at index 1 is constrained to have value at least 12 but has value 11") != std::string::npos);
+    tx_spend.vout[1].nValue += 1;
+
+    // send partial amount, and aggregate: add the 64 sats coin, to also be swept in the second output.
+    tx_spend.vin.push_back(CTxIn(outpoints[6]));
+    tx_spend.vin[1].scriptWitness.stack = {
+        {}, // dummy sig element
+        {ANNEX_TAG,
+         0x01, // Vector size
+         0x01, 0x00, 0x00, 0x00, // Index 1, ConstraintType::SWEEP
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // Amount 0
+    };
+    tx_spend.vout[1].nValue += 64;
+    BOOST_CHECK(Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+
+    // send partial amount, and aggregate: can't steal a sat from the added input!
+    tx_spend.vout[1].nValue -= 1;
+    BOOST_CHECK(!Consensus::CheckTxInputs(CTransaction(tx_spend), state, coins, 0, dummy_fee));
+    BOOST_CHECK(state.ToString().find("Output at index 1 is constrained to have value at least 76 but has value 75") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

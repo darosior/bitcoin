@@ -11,6 +11,9 @@
 #include <consensus/validation.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
+#include <script/script.h>
+#include <span.h>
+#include <streams.h>
 #include <util/check.h>
 #include <util/moneystr.h>
 
@@ -161,6 +164,89 @@ int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& i
     return nSigOps;
 }
 
+//! Mask used to extract the constraint type from the output index.
+static constexpr uint32_t CONSTRAINT_TYPE_MASK{0xFFU << 24};
+
+/** Type of constraint to apply on the value of the output at the specified index. */
+enum class ConstraintType: uint8_t {
+    //! Transfer all this input's (remaining) value to the specified output.
+    SWEEP,
+    //! Transfer part of this input's value to the specified output.
+    DEDUCT,
+    NUM_TYPES,
+};
+
+/** A constraint applied on the transfer of an input's value. */
+struct AmountConstraint {
+    //! First 8 bits are the constraint type. Last 24 bits are the output index.
+    uint32_t index;
+    //! Amount covered by this constraint. Must be 0 if constraint type is SWEEP.
+    uint64_t amount;
+
+    // Of course a real implementation would use an optimized serialization. We use a simple one here
+    // for demonstration purposes.
+    SERIALIZE_METHODS(AmountConstraint, obj) { READWRITE(obj.index, obj.amount); }
+};
+
+/**
+ * Quick and dirty "amount covenant" through the annex.
+ *
+ * This intends to replicate the semantics proposed by Salvatore Ingala for OP_CCV: https://delvingbitcoin.org/t/op-checkcontractverify-and-its-amount-semantic/1527.
+ *
+ * We interpret the annex as a list of constraints on how this input's value is transferred to the
+ * transaction outputs (see AmountConstraint above). This is accomplished by keeping a list of the
+ * minimum amount for each output in the transaction. By going through each constraint in each of
+ * the transaction's inputs, we bump the minimum amount for the output at the specified index. Then
+ * we'll assert the value of each output in the transaction is at least as much as specified in the
+ * list.
+ */
+static bool RecordAmountConstraints(const CTxIn& txin, const CAmount pre_amount, std::vector<CAmount>& amounts, TxValidationState& state)
+{
+    const auto& stack{txin.scriptWitness.stack};
+    if (stack.size() < 2) return true;
+
+    const auto& annex{stack.back()};
+    if (annex.empty() || annex.front() != ANNEX_TAG) return true;
+
+    std::vector<AmountConstraint> amount_constraints;
+    SpanReader{{&annex[1], annex.size() - 1}} >> amount_constraints; // FIXME: catch exception.
+
+    auto in_amount{static_cast<uint64_t>(pre_amount)};
+    for (const auto constraint: amount_constraints) {
+        const auto type{static_cast<ConstraintType>((constraint.index & CONSTRAINT_TYPE_MASK) >> 24)};
+        const auto out_index{constraint.index & ~CONSTRAINT_TYPE_MASK};
+
+        if (type >= ConstraintType::NUM_TYPES) return true;
+        if (out_index >= amounts.size()) {
+            // FIXME: should we return true for upgradability reasons? The presence of the output should
+            // be guaranteed by other means anyways.
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-annex-output-out-of-range");
+        }
+
+        if (type == ConstraintType::SWEEP) {
+            if (constraint.amount != 0) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-annex-sweep-nonzero-amount");
+            }
+            amounts[out_index] += in_amount;
+            in_amount = 0;
+            return true;
+        }
+
+        if (type == ConstraintType::DEDUCT) {
+            if (constraint.amount > in_amount) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-annex-deduct-overflow");
+            }
+            in_amount -= constraint.amount;
+            amounts[out_index] += constraint.amount;
+            continue;
+        }
+
+        assert(!"All constraint types must have been covered.");
+    }
+
+    return true;
+}
+
 bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee)
 {
     // are the actual inputs available?
@@ -170,6 +256,7 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
     }
 
     CAmount nValueIn = 0;
+    std::vector<CAmount> out_constraints(tx.vout.size(), 0); // Record the minimum value of each output in the transaction.
     for (unsigned int i = 0; i < tx.vin.size(); ++i) {
         const COutPoint &prevout = tx.vin[i].prevout;
         const Coin& coin = inputs.AccessCoin(prevout);
@@ -186,6 +273,15 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
         if (!MoneyRange(coin.out.nValue) || !MoneyRange(nValueIn)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputvalues-outofrange");
         }
+
+        // If any amount constraint was set in this input, bump the minimum value of specified outputs.
+        int wit_version;
+        std::vector<unsigned char> wit_prog;
+        if (coin.out.scriptPubKey.IsWitnessProgram(wit_version, wit_prog)
+            && wit_version == 1 && wit_prog.size() == WITNESS_V1_TAPROOT_SIZE
+            && !RecordAmountConstraints(tx.vin[i], coin.out.nValue, out_constraints, state)) {
+            return false; // state filled in by RecordAmountConstraints()
+        }
     }
 
     const CAmount value_out = tx.GetValueOut();
@@ -198,6 +294,14 @@ bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, 
     const CAmount txfee_aux = nValueIn - value_out;
     if (!MoneyRange(txfee_aux)) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-fee-outofrange");
+    }
+
+    // Make sure the outputs respect any constraint that was set in the transaction's inputs.
+    for (size_t i{0}; i < tx.vout.size(); ++i) {
+        if (tx.vout[i].nValue < out_constraints[i]) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-amount-constraint",
+                strprintf("Output at index %u is constrained to have value at least %i but has value %i", i, out_constraints[i], tx.vout[i].nValue));
+        }
     }
 
     txfee = txfee_aux;
