@@ -28,6 +28,12 @@ static const size_t MIN_SERIALIZABLE_TRANSACTION_WEIGHT = WITNESS_SCALE_FACTOR *
 static constexpr unsigned int LOCKTIME_VERIFY_SEQUENCE = (1 << 0);
 
 /**
+ * Defines how many seconds earlier the timestamp of the first block in a difficulty adjustment
+ * period can be compared to the last block of the previous period (BIP54).
+ */
+static constexpr int64_t MAX_TIMEWARP{600 * 12};
+
+/**
  * Maximum number of seconds that the timestamp of the first
  * block of a difficulty adjustment period is allowed to
  * be earlier than the last block of the previous period (BIP94).
