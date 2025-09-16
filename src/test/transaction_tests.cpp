@@ -35,6 +35,7 @@
 
 #include <functional>
 #include <map>
+#include <ranges>
 #include <string>
 
 #include <boost/test/unit_test.hpp>
@@ -1112,6 +1113,1159 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
     AddCoins(coins, CTransaction(tx_create_p2pk), 0, false);
     BOOST_CHECK_GT(p2sh_inputs_count * MAX_P2SH_SIGOPS + p2pk_inputs_count * 1, MAX_TX_LEGACY_SIGOPS);
     BOOST_CHECK(!::AreInputsStandard(CTransaction(tx_max_sigops), coins));
+}
+
+/** Get the (non-extended) child private key at the provided derivation index. */
+static CKey GetKeyAt(CExtKey parent_xprv, unsigned int idx)
+{
+    CExtKey child_xprv;
+    Assert(parent_xprv.Derive(child_xprv, idx));
+    return child_xprv.key;
+}
+
+/** Generate an ECDSA signature for a specified input. */
+static std::vector<uint8_t> SignInput(const CKey& key, const CScript& spent_script, CMutableTransaction& tx, unsigned idx, unsigned type = SIGHASH_ALL)
+{
+    const CAmount dummy{0};
+    std::vector<uint8_t> sig;
+    const auto sighash{SignatureHash(spent_script, tx, idx, type, dummy, SigVersion::BASE)};
+    Assert(key.Sign(sighash, sig));
+    sig.push_back(static_cast<uint8_t>(type));
+    return sig;
+}
+
+/** Verify a transaction input's script against consensus rules. */
+static bool VerifyTxin(const CScript& spent_script, CMutableTransaction& tx, unsigned idx, std::vector<CTxOut>&& spent_outputs, const CAmount& amount)
+{
+    Assert(idx < tx.vin.size());
+    PrecomputedTransactionData txdata;
+    txdata.Init(tx, std::forward<std::vector<CTxOut>>(spent_outputs), /*force=*/true);
+    const auto checker{MutableTransactionSignatureChecker(&tx, idx, amount, txdata, MissingDataBehavior::ASSERT_FAIL)};
+    return VerifyScript(tx.vin[idx].scriptSig, spent_script, &tx.vin[idx].scriptWitness, MANDATORY_SCRIPT_VERIFY_FLAGS, checker);
+}
+
+/** Verify a Segwit v0 input's script. */
+static bool VerifyTxin(const CScript& spent_script, CMutableTransaction& tx, unsigned idx, const CAmount& amount)
+{
+    return VerifyTxin(spent_script, tx, idx, {}, amount);
+}
+
+/** Verify a legacy input's script. */
+static bool VerifyTxin(const CScript& spent_script, CMutableTransaction& tx, unsigned idx)
+{
+    return VerifyTxin(spent_script, tx, idx, {}, 0);
+}
+
+/** Get a list of all coins spent by this transaction. All coins must be in cache. */
+template<typename T>
+static std::vector<CTxOut> RecordSpent(const CCoinsViewCache& coins, const T& tx)
+{
+    std::vector<CTxOut> spent_outputs(tx.vin.size());
+    for (size_t i{0}; i < tx.vin.size(); ++i) {
+        const auto coin{*Assert(coins.GetCoin(tx.vin[i].prevout))};
+        spent_outputs[i] = std::move(coin.out);
+    }
+    return spent_outputs;
+}
+
+/**
+ * Test the BIP54 per-transaction limit on legacy signature operations in inputs. We perform
+ * extensive tests of the new limit from a few different perspective. These extensive tests will
+ * also be used to generate test vectors to help validate the BIP's semantics and re-implementation
+ * of this logic. There are broadly 3 categories to this test. First, we check the bounds of the
+ * new limit under various semi-realistic conditions: valid transactions with different combinations
+ * of inputs and outputs types. Then, we exercise the new limit under some historical block chain
+ * transactions known to be BIP54-invalid. Finally, we exercise some specific details and edge
+ * cases of the implementation.
+ */
+BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
+{
+    // All keys in this test are derived from this seed using BIP32.
+    CExtKey xprv;
+    static constexpr std::array<const std::byte, 5> seed{{std::byte{'B'}, std::byte{'I'}, std::byte{'P'}, std::byte{'5'}, std::byte{'4'}}};
+    xprv.SetSeed(seed);
+
+    // For all following test cases we will use a transaction with outputs of various types.
+    CMutableTransaction tx;
+    tx.vout.emplace_back(0, GetScriptForDestination(PubKeyDestination(GetKeyAt(xprv, 1).GetPubKey())));
+    tx.vout.emplace_back(0, GetScriptForDestination(PKHash(GetKeyAt(xprv, 2).GetPubKey())));
+    const auto ms_script{CScript{} << OP_2 << ToByteVector(GetKeyAt(xprv, 2).GetPubKey()) << ToByteVector(GetKeyAt(xprv, 3).GetPubKey())
+                        << ToByteVector(GetKeyAt(xprv, 4).GetPubKey()) << OP_3 << OP_CHECKMULTISIG};
+    tx.vout.emplace_back(0, ms_script);
+    tx.vout.emplace_back(0, GetScriptForDestination(ScriptHash(ms_script)));
+    tx.vout.emplace_back(0, GetScriptForDestination(WitnessV0KeyHash(GetKeyAt(xprv, 5).GetPubKey())));
+    tx.vout.emplace_back(0, GetScriptForDestination(WitnessV0ScriptHash(ms_script)));
+    tx.vout.emplace_back(0, GetScriptForDestination(WitnessV1Taproot(XOnlyPubKey{GetKeyAt(xprv, 6).GetPubKey()})));
+    tx.vout.emplace_back(0, GetScriptForDestination(PayToAnchor()));
+    tx.vout.emplace_back(0, GetScriptForDestination(WitnessUnknown(8, {42, 42, 42})));
+
+    // Reach the 2'500 limit using only CHECKSIG's in a bare Script.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx_copy{tx};
+
+        // Use the first derivation as the private key to use in spent coins.
+        const CKey privkey{GetKeyAt(xprv, 0)};
+        const auto pubkey{privkey.GetPubKey()};
+
+        // Create a spent Script that accounts for exactly a hundred sigops.
+        auto spent_script{CScript() << ToByteVector(pubkey)};
+        for (int i{0}; i < 99; ++i) {
+            spent_script << OP_2DUP << OP_CHECKSIGVERIFY;
+        }
+        spent_script << OP_CHECKSIG;
+
+        // Reach 2500 sigops: one more sigop and we'll exceed the limit.
+        for (int i{0}; i < 25; ++i) {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(i, spent_script);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+            tx_copy.vin.emplace_back(tx_create.GetHash(), 0);
+        }
+
+        // Sign each input. Make sure all transaction inputs are valid.
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig << SignInput(privkey, spent_script, tx_copy, i);
+            Assert(VerifyTxin(spent_script, tx_copy, i));
+        }
+
+        // We don't exceed the limit yet.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Add one more input with a single CHECKSIG.
+        auto spent_script2{CScript() << ToByteVector(pubkey) << OP_CHECKSIG};
+        CMutableTransaction tx_create_last;
+        const auto idx{tx_copy.vin.size()};
+        const auto value{static_cast<CAmount>(idx)};
+        tx_create_last.vout.emplace_back(value, spent_script2);
+        AddCoins(coins, CTransaction(tx_create_last), 0, false);
+        tx_copy.vin.emplace_back(tx_create_last.GetHash(), 0);
+
+        // Sign it and make sure it's valid.
+        tx_copy.vin.back().scriptSig = CScript{} << SignInput(privkey, spent_script2, tx_copy, idx);
+        Assert(VerifyTxin(spent_script2, tx_copy, idx));
+
+        // Now we bump into the limit.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Now malleate a bunch of unrelated fields to demonstrate how changing those does not affect
+        // the BIP54 sigops calculation.
+        tx_copy.version = 42;
+        tx_copy.nLockTime = 21;
+        tx_copy.vout = {tx_copy.vout.begin() + 2, tx_copy.vout.end()};
+        tx_copy.vout[0].nValue = 50;
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].nSequence = 84 * i;
+        }
+
+        // Resign inputs as we just invalidated the signatures.
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            CScript& script{spent_script};
+            if (i == tx_copy.vin.size() - 1) script = spent_script2;
+            tx_copy.vin[i].scriptSig = CScript{} << SignInput(privkey, script, tx_copy, i);
+            Assert(VerifyTxin(script, tx_copy, i));
+        }
+
+        // The number of accounted sigops hasn't changed. We still exceed the limit.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Drop the last input with the single CHECKSIG, and resign everything.
+        tx_copy.vin.pop_back();
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig = CScript{} << SignInput(privkey, spent_script, tx_copy, i);
+            Assert(VerifyTxin(spent_script, tx_copy, i));
+        }
+
+        // Now we don't exceed the limit anymore.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+    }
+
+    // Reach the 2'500 limit using only CHECKSIG's in a P2SH redeemScript.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx_copy{tx};
+
+        // Use the second derivation as the private key to use in spent coins.
+        const CKey privkey{GetKeyAt(xprv, 1)};
+        const auto pubkey{privkey.GetPubKey()};
+
+        // Create a redeem Script that accounts for exactly a hundred sigops.
+        auto redeem_script{CScript() << ToByteVector(pubkey)};
+        for (int i{0}; i < 99; ++i) {
+            redeem_script = redeem_script << OP_2DUP << OP_CHECKSIGVERIFY;
+        }
+        redeem_script << OP_CHECKSIG;
+        const auto spk{GetScriptForDestination(ScriptHash(redeem_script))};
+
+        // Reach 2500 sigops: one more sigop and we'll exceed the limit. Contrary
+        // to the bare Script version, here we'll use a single creation tx.
+        CMutableTransaction tx_create;
+        for (int i{0}; i < 25; ++i) {
+            tx_create.vout.emplace_back(i, spk);
+        }
+        const auto prev_txid{tx_create.GetHash()};
+        for (int i{0}; i < 25; ++i) {
+            tx_copy.vin.emplace_back(prev_txid, i);
+        }
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+
+        // Sign each input. Make sure all transaction inputs are valid.
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig << SignInput(privkey, redeem_script, tx_copy, i) << ToByteVector(redeem_script);
+            Assert(VerifyTxin(spk, tx_copy, i));
+        }
+
+        // We don't exceed the limit yet.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Add one more input with a single CHECKSIG (a bare P2PK, to mix input types).
+        auto spent_script{CScript() << ToByteVector(pubkey) << OP_CHECKSIG};
+        CMutableTransaction tx_create_last;
+        const auto idx{tx_copy.vin.size()};
+        const auto value{static_cast<CAmount>(idx)};
+        tx_create_last.vout.emplace_back(value, spent_script);
+        AddCoins(coins, CTransaction(tx_create_last), 0, false);
+        tx_copy.vin.emplace_back(tx_create_last.GetHash(), 0);
+
+        // Sign it and make sure it's valid.
+        tx_copy.vin.back().scriptSig << SignInput(privkey, spent_script, tx_copy, idx);
+        Assert(VerifyTxin(spent_script, tx_copy, idx));
+
+        // Now we bump into the limit.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+    }
+
+    // Create a transaction spending 250 7-of-10 bare multisigs with 10 different public keys.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx_copy{tx};
+
+        // Get 10 private keys to create the multisig.
+        std::vector<CKey> privkeys;
+        for (int i{0}; i < 10; ++i) {
+            privkeys.push_back(GetKeyAt(xprv, 10 + i));
+        }
+
+        // A 7-of-10 multisig.
+        auto spent_script{CScript() << OP_7};
+        for (const auto& pk: privkeys) {
+            spent_script << ToByteVector(pk.GetPubKey());
+        }
+        spent_script << OP_10 << OP_CHECKMULTISIG;
+
+        // Spend 250 of those in a single transaction, reaching the 2500 sigops limit.
+        for (int i{0}; i < 250; ++i) {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(i, spent_script);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+            tx_copy.vin.emplace_back(tx_create.GetHash(), 0);
+        }
+
+        // Sign each input. Make sure all transaction inputs are valid. Sign using ACP so we
+        // don't invalidate the signatures when adding an input below.
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig << OP_0 << OP_0 << OP_0 << OP_0;
+            for (const auto& pk: privkeys | std::views::take(7)) {
+                tx_copy.vin[i].scriptSig << SignInput(pk, spent_script, tx_copy, i, SIGHASH_ALL | SIGHASH_ANYONECANPAY);
+            }
+            Assert(VerifyTxin(spent_script, tx_copy, i));
+        }
+
+        // We don't exceed the limit yet.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Add a 1-of-1 CHECKMULTISIG input.
+        auto single_spent_script{CScript{} << OP_1 << ToByteVector(privkeys.front().GetPubKey()) << OP_1 << OP_CHECKMULTISIG};
+        CMutableTransaction tx_create_single;
+        const auto idx{tx_copy.vin.size()};
+        const auto value{static_cast<CAmount>(idx)};
+        tx_create_single.vout.emplace_back(value, single_spent_script);
+        AddCoins(coins, CTransaction(tx_create_single), 0, false);
+        tx_copy.vin.emplace_back(tx_create_single.GetHash(), 0);
+
+        // Sign the 1-of-1 CMS.
+        tx_copy.vin.back().scriptSig << OP_0 << SignInput(privkeys.front(), single_spent_script, tx_copy, idx);
+        Assert(VerifyTxin(single_spent_script, tx_copy, idx));
+
+        // Now we do exceed the limit.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+    }
+
+    // Create a transaction spending 125 16-of-17 bare multisigs. This demonstrates how
+    // a pubkey count >16 will be accounted as 20 keys. This also repeats the same public
+    // key and does not use ACP.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx_copy{tx};
+
+        // Get a single private key to repeat in the multisig.
+        const auto privkey{GetKeyAt(xprv, 20)};
+        const auto pubkey{privkey.GetPubKey()};
+
+        // A 16-of-17 multisig with the same key repeated 17 times.
+        auto spent_script{CScript() << OP_16};
+        for (int i{0}; i < 17; ++i) {
+            spent_script << ToByteVector(pubkey);
+        }
+        spent_script << 17 << OP_CHECKMULTISIG;
+
+        // Spend 125 of those in a single transaction, reaching the 2500 sigops limit.
+        for (int i{0}; i < 125; ++i) {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(i, spent_script);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+            tx_copy.vin.emplace_back(tx_create.GetHash(), 0);
+        }
+
+        // Sign each input. Make sure all transaction inputs are valid.
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig << OP_0 << OP_0;
+            const auto sig{SignInput(privkey, spent_script, tx_copy, i)};
+            for (int j{0}; j < 16; ++j) {
+                tx_copy.vin[i].scriptSig << sig;
+            }
+            Assert(VerifyTxin(spent_script, tx_copy, i));
+        }
+
+        // We don't exceed the limit yet.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Add one more input with a single sigop (a P2PKH to mix input types).
+        auto spk{GetScriptForDestination(PKHash(pubkey))};
+        CMutableTransaction tx_create_last;
+        const auto idx{tx_copy.vin.size()};
+        const auto value{static_cast<CAmount>(idx)};
+        tx_create_last.vout.emplace_back(value, spk);
+        AddCoins(coins, CTransaction(tx_create_last), 0, false);
+        tx_copy.vin.emplace_back(tx_create_last.GetHash(), 0);
+
+        // Sign it and make sure it's valid.
+        tx_copy.vin.back().scriptSig << SignInput(privkey, spk, tx_copy, idx) << ToByteVector(pubkey);
+        Assert(VerifyTxin(spk, tx_copy, idx));
+
+        // Resign all previous inputs which were invalidated by adding a new input.
+        for (size_t i{0}; i < idx; ++i) {
+            tx_copy.vin[i].scriptSig << OP_0 << OP_0;
+            const auto sig{SignInput(privkey, spent_script, tx_copy, i)};
+            for (int j{0}; j < 16; ++j) {
+                tx_copy.vin[i].scriptSig << sig;
+            }
+            Assert(VerifyTxin(spent_script, tx_copy, i));
+        }
+
+        // Now we bump into the limit.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+    }
+
+    // Exceed the 2'500 limit using 18-of-18's CHECKMULTISIGs in an intentionally contrived P2SH redeemScript.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx_copy{tx};
+
+        // Use a single private key, we'll copy the key to create the multisigs.
+        const CKey privkey{GetKeyAt(xprv, 30)};
+        const auto pubkey{privkey.GetPubKey()};
+
+        // Create a redeem script performing two 18-of-18 CHECKMULTISIG's.
+        auto redeem_script{CScript() << ToByteVector(pubkey)};
+        // From a stack `<sig> <pk>`, create `<sig> <pk> <> {<sig>}*18 <pk>`
+        redeem_script << OP_DUP << OP_TOALTSTACK << OP_OVER << OP_0 << OP_SWAP << OP_DUP << OP_2DUP << OP_2DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_FROMALTSTACK;
+        // From a stack `<sig> <pk> <> {<sig>}*18 <pk>`, create `<sig> <pk> <> {<sig>}*18 <18> {<pk>}*18 <18> CMSVERIFY`
+        redeem_script << 18 << OP_SWAP << OP_DUP << OP_2DUP << OP_2DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_3DUP << 18 << OP_CHECKMULTISIGVERIFY;
+        // From a stack `<sig> <pk>`, create `<> {<sig>}*18 <pk>`
+        redeem_script << OP_0 << OP_ROT << OP_ROT << OP_TOALTSTACK << OP_DUP << OP_2DUP << OP_2DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_FROMALTSTACK;
+        // From a stack `<> {<sig>}*18 <pk>`, create `<> {<sig>}*18 <18> {<pk>}*18 <18> CHECKMULTISIG`
+        redeem_script << 18 << OP_SWAP << OP_DUP << OP_2DUP << OP_2DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_3DUP << 18 << OP_CHECKMULTISIG;
+        const auto spk{GetScriptForDestination(ScriptHash(redeem_script))};
+
+        // Reach 2400 sigops with 62 inputs.
+        CMutableTransaction tx_create;
+        for (int i{0}; i < 62; ++i) {
+            tx_create.vout.emplace_back(i, spk);
+        }
+        const auto prev_txid{tx_create.GetHash()};
+        for (int i{0}; i < 62; ++i) {
+            tx_copy.vin.emplace_back(prev_txid, i);
+        }
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+
+        // Sign each input. Make sure all transaction inputs are valid.
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig << SignInput(privkey, redeem_script, tx_copy, i) << ToByteVector(redeem_script);
+            Assert(VerifyTxin(spk, tx_copy, i));
+        }
+
+        // We don't exceed the limit yet.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Add one more input with the same spent script.
+        const auto idx{tx_copy.vin.size()};
+        const auto value{static_cast<CAmount>(idx)};
+        tx_create.vout.emplace_back(value, spk);
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+        tx_copy.vin.emplace_back(tx_create.GetHash(), idx);
+
+        // Re-sign each input.
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig << SignInput(privkey, redeem_script, tx_copy, i) << ToByteVector(redeem_script);
+            Assert(VerifyTxin(spk, tx_copy, i));
+        }
+
+        // We now reached 2600 sigops. We exceed the limit.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+    }
+
+    // Now reach exactly 2500 sigops with a transaction mixing CMS-only input, CHECKSIG-only input, an input with
+    // a mix of both, and 3 more of the same but under P2SH. Then we'll check we do exceed the limit by adding one
+    // more legacy sigop, but not by adding non-legacy sigops for various existing non-legacy input types. This
+    // test also demonstrates how sigops in unexecuted branches still account toward the limit.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx_copy{tx};
+
+        // A script with 100 CHECKSIG's which takes a single sig as input.
+        const auto cs_only_privkey{GetKeyAt(xprv, 40)};
+        const auto cs_only_pubkey{cs_only_privkey.GetPubKey()};
+        auto cs_only_script{CScript{} << ToByteVector(cs_only_pubkey)};
+        for (int i{0}; i < 99; ++i) {
+            cs_only_script << OP_2DUP << OP_CHECKSIGVERIFY;
+        }
+        cs_only_script << OP_CHECKSIG;
+
+        // A script with 9 1-of-20 CHECKMULTISIG's which takes 9 sigs as input.
+        CScript cms_only_barescript;
+        for (int i{0}; i < 9; ++i) {
+            const auto privkey{GetKeyAt(xprv, 41 + i)};
+            const auto pubkey{privkey.GetPubKey()};
+            cms_only_barescript << OP_0 << OP_SWAP << OP_1;
+            for (int j{0}; j < 20; ++j) cms_only_barescript << ToByteVector(pubkey);
+            if (i < 9 - 1) {
+                cms_only_barescript << 20 << OP_CHECKMULTISIGVERIFY;
+            } else {
+                cms_only_barescript << 20 << OP_CHECKMULTISIG;
+            }
+        }
+
+        // A script with 50 CHECKSIG's and 5 19-of-19 CHECKMULTISIG's which takes as input
+        // one signature for all CHECKSIG's and then the inputs to the 5 CMS.
+        const auto mixed_bare_privkey{GetKeyAt(xprv, 50)};
+        const auto mixed_bare_pubkey{mixed_bare_privkey.GetPubKey()};
+        auto mixed_barescript{CScript{} << ToByteVector(mixed_bare_pubkey)};
+        for (int i{0}; i < 49; ++i) {
+            mixed_barescript << OP_2DUP << OP_CHECKSIGVERIFY;
+        }
+        mixed_barescript << OP_CHECKSIGVERIFY;
+        for (int i{0}; i < 5; ++i) {
+            mixed_barescript << 19;
+            for (int j{0}; j < 19; ++j) mixed_barescript << ToByteVector(mixed_bare_pubkey);
+            mixed_barescript << 19;
+            if (i < 5 - 1) {
+                mixed_barescript << OP_CHECKMULTISIGVERIFY;
+            } else {
+                mixed_barescript << OP_CHECKMULTISIG;
+            }
+        }
+
+        // A P2SH with 100 CHECKSIG's.
+        const auto cs_only_p2sh{GetScriptForDestination(ScriptHash(cs_only_script))};
+
+        // A P2SH with 8 16-of-16 CHECKMULTISIG's. Takes the inputs to all 8 CMS.
+        CScript cms_only_redeem_script;
+        for (int i{0}; i < 8; ++i) {
+            const auto privkey{GetKeyAt(xprv, 51 + i)};
+            const auto pubkey{privkey.GetPubKey()};
+            cms_only_redeem_script << OP_16 << ToByteVector(pubkey) << OP_DUP << OP_2DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_16;
+            if (i < 8 - 1) {
+                cms_only_redeem_script << OP_CHECKMULTISIGVERIFY;
+            } else {
+                cms_only_redeem_script << OP_CHECKMULTISIG;
+            }
+        }
+        const auto cms_only_p2sh{GetScriptForDestination(ScriptHash(cms_only_redeem_script))};
+
+        // A P2SH with 9 13-of-13 CMS followed by 9 CHECKSIGs. The 9 CHECKMULTISIG's are in
+        // a non-executed Script branch. Takes as input a single signature for the CHECKSIG's.
+        const auto mixed_p2sh_privkey{GetKeyAt(xprv, 50)};
+        const auto mixed_p2sh_pubkey{mixed_p2sh_privkey.GetPubKey()};
+        auto mixed_redeem_script{CScript{} << OP_0 << OP_IF};
+        for (int i{0}; i < 9; ++i) {
+            mixed_redeem_script << OP_13 << ToByteVector(mixed_p2sh_pubkey) << OP_DUP << OP_2DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_13 << OP_CHECKMULTISIGVERIFY;
+        }
+        mixed_redeem_script << OP_ENDIF << ToByteVector(mixed_p2sh_pubkey);
+        for (int i{0}; i < 4; ++i) {
+            mixed_redeem_script << OP_2DUP << OP_CHECKSIGVERIFY;
+        }
+        mixed_redeem_script << OP_CHECKSIG;
+        const auto mixed_p2sh{GetScriptForDestination(ScriptHash(mixed_redeem_script))};
+
+        // Now create the spending transaction. To start it will spend 2 inputs with a
+        // bare script filled with CHECKSIG's. That's 200 sigops accounted for.
+        for (int i{0}; i < 2; ++i) {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(i, cs_only_script);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+            tx_copy.vin.emplace_back(tx_create.GetHash(), 0);
+        }
+
+        // Sign those two first inputs. (With ACP so we can add more inputs.)
+        for (size_t i{0}; i < tx_copy.vin.size(); ++i) {
+            tx_copy.vin[i].scriptSig << SignInput(cs_only_privkey, cs_only_script, tx_copy, i, SIGHASH_ALL | SIGHASH_ANYONECANPAY);
+            Assert(VerifyTxin(cs_only_script, tx_copy, i));
+        }
+
+        // Then it will spend 10 inputs with bare multisigs, bringing it to 2000 sigops
+        // accounted for in total.
+        {
+            CMutableTransaction tx_create;
+            for (int i{0}; i < 10; ++i) {
+                tx_create.vout.emplace_back(i, cms_only_barescript);
+            }
+            const auto prev_txid{tx_create.GetHash()};
+            for (int i{0}; i < 10; ++i) {
+                tx_copy.vin.emplace_back(prev_txid, i);
+            }
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+        }
+
+        // Sign those ten additional inputs. (With ACP so we can add more inputs.)
+        for (size_t i{2}; i < tx_copy.vin.size(); ++i) {
+            for (size_t j{0}; j < 9; ++j) {
+                // We used indexes from 41 through 49 for the 9 CMS.
+                const auto privkey{GetKeyAt(xprv, 49 - j)};
+                const auto sig{SignInput(privkey, cms_only_barescript, tx_copy, i, SIGHASH_ALL | SIGHASH_ANYONECANPAY)};
+                tx_copy.vin[i].scriptSig << sig;
+            }
+            Assert(VerifyTxin(cms_only_barescript, tx_copy, i));
+        }
+
+        // And it will spend one input for a bare Script with mixed CMS and CHECKSIGs. That's
+        // now 2150 sigops accounted in total.
+        {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(422421, mixed_barescript);
+            const auto prev_txid{tx_create.GetHash()};
+            tx_copy.vin.emplace_back(prev_txid, 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+        }
+
+        // Sign this input (still ACP). Use ops in the scriptSig for a change.
+        {
+            const auto idx{tx_copy.vin.size() - 1};
+            const auto sig{SignInput(mixed_bare_privkey, mixed_barescript, tx_copy, idx, SIGHASH_ALL | SIGHASH_ANYONECANPAY)};
+            for (size_t i{0}; i < 5; ++i) {
+                tx_copy.vin[idx].scriptSig << OP_0 << sig << OP_DUP << OP_2DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_3DUP << OP_3DUP;
+            }
+            tx_copy.vin[idx].scriptSig << sig; // For the CHECKSIG's
+            Assert(VerifyTxin(mixed_barescript, tx_copy, idx));
+        }
+
+        // It will spend a single p2sh input with only CHECKSIGs, getting to 2250 sigops.
+        {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(181827, cs_only_p2sh);
+            const auto prev_txid{tx_create.GetHash()};
+            tx_copy.vin.emplace_back(prev_txid, 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+        }
+
+        // Sign this input (still ACP).
+        {
+            const auto idx{tx_copy.vin.size() - 1};
+            const auto sig{SignInput(cs_only_privkey, cs_only_script, tx_copy, idx, SIGHASH_ALL | SIGHASH_ANYONECANPAY)};
+            tx_copy.vin[idx].scriptSig << sig << ToByteVector(cs_only_script);
+            Assert(VerifyTxin(cs_only_p2sh, tx_copy, idx));
+        }
+
+        // It will spend a single p2sh input only CMS's, getting to 2378 sigops.
+        {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(999, cms_only_p2sh);
+            const auto prev_txid{tx_create.GetHash()};
+            tx_copy.vin.emplace_back(prev_txid, 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+        }
+
+        // Sign the P2SH multisigs, still with ACP.
+        {
+            const auto idx{tx_copy.vin.size() - 1};
+            for (int i{0}; i < 8; ++i) {
+                // Traverse the derivation indexes used to create them (51 through 58) in reverse order.
+                const auto privkey{GetKeyAt(xprv, 58 - i)};
+                const auto sig{SignInput(privkey, cms_only_redeem_script, tx_copy, idx, SIGHASH_ALL | SIGHASH_ANYONECANPAY)};
+                tx_copy.vin[idx].scriptSig << OP_0;
+                for (int j{0}; j < 16; ++j) {
+                    tx_copy.vin[idx].scriptSig << sig;
+                }
+            }
+            tx_copy.vin[idx].scriptSig << ToByteVector(cms_only_redeem_script);
+            Assert(VerifyTxin(cms_only_p2sh, tx_copy, idx));
+        }
+
+        // It will finally spend a single p2sh input with mixed CS - CMS, getting
+        // to 2500 sigops.
+        {
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(776, mixed_p2sh);
+            const auto prev_txid{tx_create.GetHash()};
+            tx_copy.vin.emplace_back(prev_txid, 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+        }
+
+        // Sign this final input. It only needs one signature for the CHECKSIG's because
+        // the CMS are not executed.
+        {
+            const auto idx{tx_copy.vin.size() - 1};
+            const auto sig{SignInput(mixed_p2sh_privkey, mixed_redeem_script, tx_copy, idx, SIGHASH_ALL | SIGHASH_ANYONECANPAY)};
+            tx_copy.vin[idx].scriptSig << sig << ToByteVector(mixed_redeem_script);
+            Assert(VerifyTxin(mixed_p2sh, tx_copy, idx));
+        }
+
+        // We reached exactly 2500 sigops, we don't exceed the limit.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+
+        // Now we are going to add an input and make sure we exceed the limit or not as
+        // expected. This is the index of this input.
+        const auto idx{tx_copy.vin.size()};
+
+        // Adding a P2PK input will make us exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 60)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto spent_script{CScript{} << ToByteVector(pubkey) << OP_CHECKSIG};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10101, spent_script);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            const auto sig{SignInput(privkey, spent_script, tx_copy2, idx)};
+            tx_copy2.vin[idx].scriptSig << sig;
+            Assert(VerifyTxin(spent_script, tx_copy2, idx));
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding a P2PKH input will make us exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 60)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto spk{GetScriptForDestination(PKHash(pubkey))};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10101, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            const auto sig{SignInput(privkey, spk, tx_copy2, idx)};
+            tx_copy2.vin[idx].scriptSig << sig << ToByteVector(pubkey);
+            Assert(VerifyTxin(spk, tx_copy2, idx));
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding a 1-of-1 bare multisig input will make us exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 61)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto spent_script{CScript{} << OP_1 << ToByteVector(pubkey) << OP_1 << OP_CHECKMULTISIG};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10102, spent_script);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            const auto sig{SignInput(privkey, spent_script, tx_copy2, idx)};
+            tx_copy2.vin[idx].scriptSig << OP_0 << sig;
+            Assert(VerifyTxin(spent_script, tx_copy2, idx));
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending an empty Script but having a sigop in the scriptSig
+        // will make us exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 62)};
+            const auto pubkey{privkey.GetPubKey()};
+            const CScript spent_script;
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10103, spent_script);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            const auto signed_script{CScript{} << ToByteVector(pubkey) << OP_CHECKSIG};
+            const auto sig{SignInput(privkey, signed_script, tx_copy2, idx)};
+            tx_copy2.vin[idx].scriptSig << sig << ToByteVector(pubkey) << OP_CHECKSIG;
+            Assert(VerifyTxin(spent_script, tx_copy2, idx));
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a single CHECKSIG in a p2sh will make us exceed the
+        // limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 63)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto redeem_script{CScript{} << ToByteVector(pubkey) << OP_CHECKSIG};
+            const auto spk{GetScriptForDestination(ScriptHash(redeem_script))};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10104, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            const auto sig{SignInput(privkey, redeem_script, tx_copy2, idx)};
+            tx_copy2.vin[idx].scriptSig << sig << ToByteVector(redeem_script);
+            Assert(VerifyTxin(spk, tx_copy2, idx));
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a 1of1 multisig in a p2sh will make us exceed the
+        // limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 64)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto redeem_script{CScript{} << OP_1 << ToByteVector(pubkey) << OP_1 << OP_CHECKMULTISIG};
+            const auto spk{GetScriptForDestination(ScriptHash(redeem_script))};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10105, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            const auto sig{SignInput(privkey, redeem_script, tx_copy2, idx)};
+            tx_copy2.vin[idx].scriptSig << OP_0 << sig << ToByteVector(redeem_script);
+            Assert(VerifyTxin(spk, tx_copy2, idx));
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending an invalid Script but containing a CHECKSIG will
+        // make us exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+            const auto spent_script{CScript{} << OP_0 << OP_CHECKSIG};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10106, spent_script);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending an invalid p2sh but containing a CHECKMULTISIG
+        // will make us exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto redeem_script{CScript{} << OP_RETURN << OP_CHECKMULTISIG};
+            const auto spk{GetScriptForDestination(ScriptHash(redeem_script))};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10107, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+            tx_copy2.vin[idx].scriptSig << ToByteVector(redeem_script);
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a P2WPKH will not exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+            FillableSigningProvider keystore;
+            SignatureData dummy_sigdata;
+
+            const auto privkey{GetKeyAt(xprv, 65)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto keyhash{WitnessV0KeyHash(pubkey)};
+            const auto spk{GetScriptForDestination(keyhash)};
+            Assert(keystore.AddKeyPubKey(privkey, pubkey));
+
+            const CAmount value{10108};
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(value, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
+            Assert(VerifyTxin(spk, tx_copy2, idx, value));
+
+            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a P2WSH will not exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+            FillableSigningProvider keystore;
+            SignatureData dummy_sigdata;
+
+            const auto privkey{GetKeyAt(xprv, 66)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto witscript{CScript{} << OP_1 << ToByteVector(pubkey) << OP_1 << OP_CHECKMULTISIG};
+            const auto witprogram{WitnessV0ScriptHash(witscript)};
+            const auto spk{GetScriptForDestination(witprogram)};
+            Assert(keystore.AddKeyPubKey(privkey, pubkey));
+            Assert(keystore.AddCScript(witscript));
+
+            const CAmount value{10109};
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(value, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
+            Assert(VerifyTxin(spk, tx_copy2, idx, value));
+
+            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a P2SH-P2WPKH will not exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+            FillableSigningProvider keystore;
+            SignatureData dummy_sigdata;
+
+            const auto privkey{GetKeyAt(xprv, 67)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto keyhash{WitnessV0KeyHash(pubkey)};
+            const auto witprogram{GetScriptForDestination(keyhash)};
+            const auto spk{GetScriptForDestination(ScriptHash(witprogram))};
+            Assert(keystore.AddKeyPubKey(privkey, pubkey));
+            Assert(keystore.AddCScript(witprogram));
+
+            const CAmount value{10110};
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(value, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
+            Assert(VerifyTxin(spk, tx_copy2, idx, value));
+
+            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a P2SH-P2WSH will not exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+            FillableSigningProvider keystore;
+            SignatureData dummy_sigdata;
+
+            const auto privkey{GetKeyAt(xprv, 68)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto witscript{CScript{} << ToByteVector(pubkey) << OP_CHECKSIG};
+            const auto witprogram{GetScriptForDestination(WitnessV0ScriptHash(witscript))};
+            const auto spk{GetScriptForDestination(ScriptHash(witprogram))};
+            Assert(keystore.AddKeyPubKey(privkey, pubkey));
+            Assert(keystore.AddCScript(witscript));
+            Assert(keystore.AddCScript(witprogram));
+
+            const CAmount value{10111};
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(value, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
+            Assert(VerifyTxin(spk, tx_copy2, idx, value));
+
+            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a Taproot through the key path will not exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+            FlatSigningProvider keystore;
+            SignatureData sigdata;
+
+            const auto privkey{GetKeyAt(xprv, 69)};
+            const auto pubkey{privkey.GetPubKey()};
+            TaprootBuilder builder;
+            builder.Finalize(XOnlyPubKey{pubkey});
+            const auto spk{GetScriptForDestination(builder.GetOutput())};
+            keystore.keys[pubkey.GetID()] = privkey;
+
+            const CAmount value{10112};
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(value, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            sigdata.tr_spenddata = builder.GetSpendData();
+            auto spent_outputs{RecordSpent(coins, tx_copy2)};
+            Assert(SignSignature(keystore, spk, tx_copy2, idx, value, std::vector<CTxOut>(spent_outputs), SIGHASH_ALL, sigdata));
+            Assert(VerifyTxin(spk, tx_copy2, idx, std::move(spent_outputs), value));
+
+            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a Taproot through the key path will not exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+            FlatSigningProvider keystore;
+            SignatureData sigdata;
+
+            const auto privkey{GetKeyAt(xprv, 70)};
+            const auto pubkey{privkey.GetPubKey()};
+            TaprootBuilder builder;
+            const auto leaf_script{CScript{} << ToByteVector(XOnlyPubKey{pubkey}) << OP_CHECKSIG};
+            builder.Add(0, ToByteVector(leaf_script), TAPROOT_LEAF_TAPSCRIPT);
+            builder.Finalize(XOnlyPubKey::NUMS_H);
+            const auto spk{GetScriptForDestination(builder.GetOutput())};
+            keystore.keys[pubkey.GetID()] = privkey;
+
+            const CAmount value{10113};
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(value, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            sigdata.tr_spenddata = builder.GetSpendData();
+            auto spent_outputs{RecordSpent(coins, tx_copy2)};
+            Assert(SignSignature(keystore, spk, tx_copy2, idx, value, std::vector<CTxOut>(spent_outputs), SIGHASH_ALL, sigdata));
+            Assert(VerifyTxin(spk, tx_copy2, idx, std::move(spent_outputs), value));
+
+            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a future witness program does not somehow make us exceed
+        // the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 71)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto spk{GetScriptForDestination(WitnessUnknown(4, ToByteVector(pubkey)))};
+
+            const CAmount value{10114};
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(value, spk);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            tx_copy2.vin.back().scriptWitness.stack.push_back({0x42, 0x42});
+            const auto sig{ParseHex("5da6d1157e4f2c45fa8441152f01e3e96898fd0c39326a47327d3bd024c4f6a2083e954ac803f8cb539aba8e31cdd9554a92309f47d489aa6a431ab262efa15a")};
+            tx_copy2.vin.back().scriptWitness.stack.push_back(std::move(sig));
+            tx_copy2.vin.back().scriptWitness.stack.push_back(ToByteVector(pubkey));
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+
+        // Adding an input spending a bare Script with no sigop but with a sigop in the
+        // scriptSig will make us exceed the limit.
+        {
+            CMutableTransaction tx_copy2{tx_copy};
+
+            const auto privkey{GetKeyAt(xprv, 72)};
+            const auto pubkey{privkey.GetPubKey()};
+            const auto spent_script{CScript{} << OP_2 << OP_2 << OP_ADD << OP_4 << OP_EQUAL};
+
+            CMutableTransaction tx_create;
+            tx_create.vout.emplace_back(10101, spent_script);
+            tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
+            tx_copy2.vin.back().scriptSig << OP_0 << ToByteVector(pubkey) << OP_CHECKSIG << OP_DROP;
+            AddCoins(coins, CTransaction(tx_create), 0, false);
+
+            const auto sig{SignInput(privkey, spent_script, tx_copy2, idx)};
+            tx_copy2.vin[idx].scriptSig << sig;
+            Assert(VerifyTxin(spent_script, tx_copy2, idx));
+
+            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+        }
+    }
+
+    // Some historical transactions which would have exceeded the BIP54 sigops limit. For
+    // a full list of such transactions, see this mailing list post:
+    // https://gnusha.org/pi/bitcoindev/49dyqqkf5NqGlGdinp6SELIoxzE_ONh3UIj6-EB8S804Id5yROq-b1uGK8DUru66eIlWuhb5R3nhRRutwuYjemiuOOBS2FQ4KWDnEh0wLuA=@protonmail.com/
+    struct HistoricalTx {
+        const std::vector<CTxOut> spent_outputs;
+        const CTransaction tx;
+    };
+    std::vector<HistoricalTx> historical_txs;
+
+    // This is bea1c2b87fee95a203c5b5d9f3e5d0f472385c34cb5af02d0560aab973169683.
+    {
+        DataStream stream(ParseHex("0100000001cce43bcf04bec97d9389e2e92705723a6f5869770dde262312fbcccdaba35c9702000000fd2703510000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004cc9afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafffffffff01905f0100000000001976a9140af76822b5d13fd23b7b9380184c66e9a543368388ac00000000"));
+        const std::vector<CTxOut> spent_outputs = {
+            CTxOut{100000, CScript{} << OP_HASH160 << ParseHex("923fdf3ff05b994004e374c69c8a2196c9e79344") << OP_EQUAL},
+        };
+        historical_txs.push_back({
+            .spent_outputs = std::move(spent_outputs),
+            .tx = CTransaction{deserialize, TX_WITH_WITNESS, stream},
+        });
+    }
+
+    // This is 62fc8d091a7c597783981f00b889d72d24ad5e3e224dbe1c2a317aabef89217e.
+    {
+        DataStream stream(ParseHex("0100000002321438a932139c6642dfd5c14f231aed8988e3519e116ed96600db86a3511c3001000000cd51004cc963afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf68ffffffff321438a932139c6642dfd5c14f231aed8988e3519e116ed96600db86a3511c3002000000cd51004cc963afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf68ffffffff01905f0100000000001976a9140af770d29305bc0cfee379cac4d3f932dfb343de88ac00000000"));
+        const std::vector<CTxOut> spent_outputs = {
+            CTxOut{50000, CScript{} << OP_HASH160 << ParseHex("a9395da5c22d266bb90ea2cc695a92ffd68c5597") << OP_EQUAL},
+            CTxOut{50000, CScript{} << OP_HASH160 << ParseHex("a9395da5c22d266bb90ea2cc695a92ffd68c5597") << OP_EQUAL},
+        };
+        historical_txs.push_back({
+            .spent_outputs = std::move(spent_outputs),
+            .tx = CTransaction{deserialize, TX_WITH_WITNESS, stream},
+        });
+    }
+
+    for (const auto& tx: historical_txs) {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+
+        for (size_t i{0}; i < tx.tx.vin.size(); ++i) {
+            const auto& spent_txo{tx.spent_outputs[i]};
+            CMutableTransaction mtx{tx.tx};
+            Assert(VerifyTxin(spent_txo.scriptPubKey, mtx, i));
+            coins.AddCoin(tx.tx.vin[i].prevout, Coin(spent_txo, 0, false), false);
+        }
+
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(tx.tx, coins));
+    }
+
+    // Now we move on to test some pathological transactions to demonstrates edge cases of the
+    // sigop accounting functions. Those transactions would already be invalid anyways, but
+    // this is useful to generate explicit test vectors.
+
+    // CheckSigopsBIP54() does not validate Script. It will count also for (some) invalid Scripts.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx2;
+
+        // Create an unspendable bare Script which exceeds 2500 sigops.
+        CScript spk;
+        for (unsigned i{0}; i < MAX_TX_LEGACY_SIGOPS + 1; ++i) {
+            spk << OP_CHECKSIGVERIFY;
+        }
+
+        CMutableTransaction tx_create;
+        tx_create.vout.emplace_back(0, spk);
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+        tx2.vin.emplace_back(tx_create.GetHash(), 0);
+
+        // CheckSigopsBIP54 will return false despite the Script being invalid.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+    }
+
+    // CheckSigopsBIP54 uses GetSigOpCount, which will only count the number of sigops in
+    // CHECKMULTISIG operations accurately if the CMS / CMSVERIFY opcode is directly preceded
+    // by OP_1-OP_16 and will always count it for 20 sigops otherwise. The previous tests have
+    // exercised OP_0 and various counts >16. This exercises having another opcode as the count.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx2;
+
+        // The first CMS will have OP_INVALIDOPCODE as its "last op", and count for 20. All the
+        // following 124 CMS will have the previous CMS as their "last op", and will similarly
+        // count for 20.
+        CScript spk;
+        for (unsigned i{0}; i < MAX_TX_LEGACY_SIGOPS / 20 + 1; ++i) {
+            spk << OP_CHECKMULTISIG;
+        }
+
+        CMutableTransaction tx_create;
+        tx_create.vout.emplace_back(0, spk);
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+        tx2.vin.emplace_back(tx_create.GetHash(), 0);
+
+        // CheckSigopsBIP54 will return false because there is 125 CMS that account for 20 each.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+    }
+
+    // Note this is also a limitation for legitimate Scripts, for instance if the arguments to
+    // CMS are decided dynamically.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx2;
+
+        const auto privkey{GetKeyAt(xprv, 100)};
+        const auto pubkey{privkey.GetPubKey()};
+
+        // Start with a dummy multisig which can be either a 1of1 or a 1of2. Then pad the Script
+        // with 2481 dummy CHECKSIG's.
+        auto spk{CScript{} << OP_IF << OP_1 << ToByteVector(pubkey) << OP_1 << OP_ELSE};
+        spk << OP_1 << ToByteVector(pubkey) << ToByteVector(pubkey) << OP_2 << OP_ENDIF << OP_CHECKMULTISIG;
+        for (unsigned i{0}; i < MAX_TX_LEGACY_SIGOPS - 20 + 1; ++i) {
+            spk << OP_CHECKSIG;
+        }
+
+        CMutableTransaction tx_create;
+        tx_create.vout.emplace_back(0, spk);
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+        tx2.vin.emplace_back(tx_create.GetHash(), 0);
+
+        // CheckSigopsBIP54 will return false because the first CHECKMULTISIG counts for 20 sigops.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+    }
+
+    // In case of parsing error, CheckSigopsBIP54 will count sigops up to the point with incorrect encoding.
+    // Here we have 2501 sigops and an invalid PUSHDATA1. This will fail the check.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx2;
+
+        CScript spk;
+        for (unsigned i{0}; i < MAX_TX_LEGACY_SIGOPS + 1; ++i) {
+            spk << OP_CHECKSIG;
+        }
+        spk.push_back(static_cast<uint8_t>(OP_PUSHDATA1));
+        spk.push_back(0x01);
+
+        CMutableTransaction tx_create;
+        tx_create.vout.emplace_back(0, spk);
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+        tx2.vin.emplace_back(tx_create.GetHash(), 0);
+
+        // CheckSigopsBIP54 will return false because 2501 sigops were counted before encountering the error.
+        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+    }
+
+    // Now we have 2500 CHECKSIGs before the PUSHDATA2 parsing error, and one after. This will pass the check.
+    {
+        CCoinsView coins_dummy;
+        CCoinsViewCache coins(&coins_dummy);
+        CMutableTransaction tx2;
+
+        CScript spk;
+        for (unsigned i{0}; i < MAX_TX_LEGACY_SIGOPS; ++i) {
+            spk << OP_CHECKSIG;
+        }
+        spk.push_back(static_cast<uint8_t>(OP_PUSHDATA2));
+        spk.push_back(0x42);
+        spk.push_back(0x42);
+        spk << OP_CHECKSIG;
+
+        CMutableTransaction tx_create;
+        tx_create.vout.emplace_back(0, spk);
+        AddCoins(coins, CTransaction(tx_create), 0, false);
+        tx2.vin.emplace_back(tx_create.GetHash(), 0);
+
+        // CheckSigopsBIP54 will return true because 2500 sigops were counted before encountering the error.
+        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
