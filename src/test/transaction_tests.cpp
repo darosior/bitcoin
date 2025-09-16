@@ -42,6 +42,9 @@
 
 #include <univalue.h>
 
+// Uncomment if you want to output updated JSON tests.
+// #define UPDATE_JSON_TESTS
+
 using namespace util::hex_literals;
 using util::SplitString;
 using util::ToString;
@@ -1168,6 +1171,54 @@ static std::vector<CTxOut> RecordSpent(const CCoinsViewCache& coins, const T& tx
     return spent_outputs;
 }
 
+/** A test vector for the per-transaction sigop limit in BIP54. */
+struct BIP54SigopsTestVector {
+    //! The transaction being evaluated.
+    const CTransaction spending_tx;
+    //! The outputs corresponding to the transaction's inputs.
+    const std::vector<CTxOut> spent_outputs;
+    //! Whether this transaction passes the BIP54 sigops check.
+    const bool success;
+    //! Description of the test vector.
+    const std::string comment;
+
+    explicit BIP54SigopsTestVector(CTransaction tx, std::vector<CTxOut> spent_txos, bool valid, std::string com):
+        spending_tx{std::move(tx)}, spent_outputs{std::move(spent_txos)}, success{valid}, comment{std::move(com)} {}
+
+    UniValue GetJson() const
+    {
+        UniValue json{UniValue::VOBJ}, spent_txos{UniValue::VARR};
+        for (const auto& txo: spent_outputs) {
+            DataStream ssTxo;
+            ssTxo << txo;
+            spent_txos.push_back(HexStr(ssTxo));
+        }
+        json.pushKV("spent_outputs", std::move(spent_txos));
+        json.pushKV("spending_tx", EncodeHexTx(spending_tx));
+        json.pushKV("success", success);
+        json.pushKV("comment", comment);
+        return json;
+    }
+};
+
+/** Check this transaction does not exceed the BIP54 sigops limit, and record it as a test vector. */
+static void CheckWithinBIP54Limits(CTransaction tx, const CCoinsViewCache& coins, std::vector<BIP54SigopsTestVector>& test_vectors, std::string comment)
+{
+    BOOST_CHECK_MESSAGE(Consensus::CheckSigopsBIP54(tx, coins), comment);
+
+    auto spent_outputs{RecordSpent(coins, tx)};
+    test_vectors.emplace_back(tx, std::move(spent_outputs), /*valid=*/true, std::move(comment));
+}
+
+/** Check this transaction exceeds the BIP54 sigops limit, and record it as a test vector. */
+static void CheckExceedsBIP54Limits(CTransaction tx, const CCoinsViewCache& coins, std::vector<BIP54SigopsTestVector>& test_vectors, std::string comment)
+{
+    BOOST_CHECK_MESSAGE(!Consensus::CheckSigopsBIP54(tx, coins), comment);
+
+    auto spent_outputs{RecordSpent(coins, tx)};
+    test_vectors.emplace_back(tx, std::move(spent_outputs), /*valid=*/false, std::move(comment));
+}
+
 /**
  * Test the BIP54 per-transaction limit on legacy signature operations in inputs. We perform
  * extensive tests of the new limit from a few different perspective. These extensive tests will
@@ -1198,6 +1249,9 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
     tx.vout.emplace_back(0, GetScriptForDestination(WitnessV1Taproot(XOnlyPubKey{GetKeyAt(xprv, 6).GetPubKey()})));
     tx.vout.emplace_back(0, GetScriptForDestination(PayToAnchor()));
     tx.vout.emplace_back(0, GetScriptForDestination(WitnessUnknown(8, {42, 42, 42})));
+
+    // Record the test vectors.
+    std::vector<BIP54SigopsTestVector> test_vectors;
 
     // Reach the 2'500 limit using only CHECKSIG's in a bare Script.
     {
@@ -1231,7 +1285,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // We don't exceed the limit yet.
-        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckWithinBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "Bare Script inputs totalling 2500 CHECKSIGs");
 
         // Add one more input with a single CHECKSIG.
         auto spent_script2{CScript() << ToByteVector(pubkey) << OP_CHECKSIG};
@@ -1247,7 +1301,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         Assert(VerifyTxin(spent_script2, tx_copy, idx));
 
         // Now we bump into the limit.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "Bare Script inputs totalling 2501 CHECKSIGs");
 
         // Now malleate a bunch of unrelated fields to demonstrate how changing those does not affect
         // the BIP54 sigops calculation.
@@ -1268,7 +1322,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // The number of accounted sigops hasn't changed. We still exceed the limit.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "Bare Script inputs totalling 2501 CHECKSIGs and unrelated transaction fields malleated");
 
         // Drop the last input with the single CHECKSIG, and resign everything.
         tx_copy.vin.pop_back();
@@ -1279,6 +1333,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
 
         // Now we don't exceed the limit anymore.
         BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckWithinBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "Bare Script inputs totalling 2500 CHECKSIGs and unrelated transaction fields malleated");
     }
 
     // Reach the 2'500 limit using only CHECKSIG's in a P2SH redeemScript.
@@ -1318,7 +1373,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // We don't exceed the limit yet.
-        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckWithinBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "P2SH inputs totalling 2500 CHECKSIGs");
 
         // Add one more input with a single CHECKSIG (a bare P2PK, to mix input types).
         auto spent_script{CScript() << ToByteVector(pubkey) << OP_CHECKSIG};
@@ -1335,6 +1390,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
 
         // Now we bump into the limit.
         BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "P2SH inputs totalling 2500 CHECKSIGs + 1 P2PK input");
     }
 
     // Create a transaction spending 250 7-of-10 bare multisigs with 10 different public keys.
@@ -1375,7 +1431,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // We don't exceed the limit yet.
-        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckWithinBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "Bare Script inputs totalling 250 7-of-10 CHECKMULTISIGs");
 
         // Add a 1-of-1 CHECKMULTISIG input.
         auto single_spent_script{CScript{} << OP_1 << ToByteVector(privkeys.front().GetPubKey()) << OP_1 << OP_CHECKMULTISIG};
@@ -1391,7 +1447,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         Assert(VerifyTxin(single_spent_script, tx_copy, idx));
 
         // Now we do exceed the limit.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "Bare Script inputs totalling 250 7-of-10 CHECKMULTISIGs + 1 1-of-1 CHECKMULTISIG");
     }
 
     // Create a transaction spending 125 16-of-17 bare multisigs. This demonstrates how
@@ -1432,7 +1488,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // We don't exceed the limit yet.
-        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckWithinBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "P2SH inputs totalling 125 16-of-17 CHECKMULTISIGs");
 
         // Add one more input with a single sigop (a P2PKH to mix input types).
         auto spk{GetScriptForDestination(PKHash(pubkey))};
@@ -1459,6 +1515,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
 
         // Now we bump into the limit.
         BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "P2SH inputs totalling 125 16-of-17 CHECKMULTISIGs + 1 P2PKH input");
     }
 
     // Exceed the 2'500 limit using 18-of-18's CHECKMULTISIGs in an intentionally contrived P2SH redeemScript.
@@ -1501,7 +1558,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // We don't exceed the limit yet.
-        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckWithinBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "62 inputs with a contrived P2SH redeemScript executing 2 18-of-18 CHECKMULTISIGs");
 
         // Add one more input with the same spent script.
         const auto idx{tx_copy.vin.size()};
@@ -1517,7 +1574,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // We now reached 2600 sigops. We exceed the limit.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "62 inputs with a contrived P2SH redeemScript executing 2 18-of-18 CHECKMULTISIGs");
     }
 
     // Now reach exactly 2500 sigops with a transaction mixing CMS-only input, CHECKSIG-only input, an input with
@@ -1727,7 +1784,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         }
 
         // We reached exactly 2500 sigops, we don't exceed the limit.
-        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy), coins));
+        CheckWithinBIP54Limits(CTransaction(tx_copy), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops");
 
         // Now we are going to add an input and make sure we exceed the limit or not as
         // expected. This is the index of this input.
@@ -1750,7 +1807,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin[idx].scriptSig << sig;
             Assert(VerifyTxin(spent_script, tx_copy2, idx));
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2PK input");
         }
 
         // Adding a P2PKH input will make us exceed the limit.
@@ -1770,7 +1827,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin[idx].scriptSig << sig << ToByteVector(pubkey);
             Assert(VerifyTxin(spk, tx_copy2, idx));
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2PKH input");
         }
 
         // Adding a 1-of-1 bare multisig input will make us exceed the limit.
@@ -1790,7 +1847,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin[idx].scriptSig << OP_0 << sig;
             Assert(VerifyTxin(spent_script, tx_copy2, idx));
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a bare 1-of-1 multisig input");
         }
 
         // Adding an input spending an empty Script but having a sigop in the scriptSig
@@ -1812,7 +1869,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin[idx].scriptSig << sig << ToByteVector(pubkey) << OP_CHECKSIG;
             Assert(VerifyTxin(spent_script, tx_copy2, idx));
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + an input with a CHECKSIG in the scriptSig");
         }
 
         // Adding an input spending a single CHECKSIG in a p2sh will make us exceed the
@@ -1834,7 +1891,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin[idx].scriptSig << sig << ToByteVector(redeem_script);
             Assert(VerifyTxin(spk, tx_copy2, idx));
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2SH input with a single CHECKSIG");
         }
 
         // Adding an input spending a 1of1 multisig in a p2sh will make us exceed the
@@ -1856,7 +1913,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin[idx].scriptSig << OP_0 << sig << ToByteVector(redeem_script);
             Assert(VerifyTxin(spk, tx_copy2, idx));
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2SH input with 1-of-1 CHECMULTISIG");
         }
 
         // Adding an input spending an invalid Script but containing a CHECKSIG will
@@ -1870,7 +1927,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin.emplace_back(tx_create.GetHash(), 0);
             AddCoins(coins, CTransaction(tx_create), 0, false);
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + an input spending an invalid bare Script containing a CHECKSIG");
         }
 
         // Adding an input spending an invalid p2sh but containing a CHECKMULTISIG
@@ -1887,7 +1944,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             AddCoins(coins, CTransaction(tx_create), 0, false);
             tx_copy2.vin[idx].scriptSig << ToByteVector(redeem_script);
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + an input spending an invalid p2sh containing a CHECKMULTISIG");
         }
 
         // Adding an input spending a P2WPKH will not exceed the limit.
@@ -1911,7 +1968,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
             Assert(VerifyTxin(spk, tx_copy2, idx, value));
 
-            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckWithinBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2WPKH input");
         }
 
         // Adding an input spending a P2WSH will not exceed the limit.
@@ -1937,7 +1994,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
             Assert(VerifyTxin(spk, tx_copy2, idx, value));
 
-            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckWithinBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2WSH input");
         }
 
         // Adding an input spending a P2SH-P2WPKH will not exceed the limit.
@@ -1963,7 +2020,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
             Assert(VerifyTxin(spk, tx_copy2, idx, value));
 
-            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckWithinBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2SH-P2WPKH input");
         }
 
         // Adding an input spending a P2SH-P2WSH will not exceed the limit.
@@ -1990,7 +2047,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             Assert(SignSignature(keystore, spk, tx_copy2, idx, value, SIGHASH_ALL, dummy_sigdata));
             Assert(VerifyTxin(spk, tx_copy2, idx, value));
 
-            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckWithinBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a P2SH-P2WSH input");
         }
 
         // Adding an input spending a Taproot through the key path will not exceed the limit.
@@ -2017,7 +2074,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             Assert(SignSignature(keystore, spk, tx_copy2, idx, value, std::vector<CTxOut>(spent_outputs), SIGHASH_ALL, sigdata));
             Assert(VerifyTxin(spk, tx_copy2, idx, std::move(spent_outputs), value));
 
-            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckWithinBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a Taproot key path spend input");
         }
 
         // Adding an input spending a Taproot through the key path will not exceed the limit.
@@ -2046,7 +2103,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             Assert(SignSignature(keystore, spk, tx_copy2, idx, value, std::vector<CTxOut>(spent_outputs), SIGHASH_ALL, sigdata));
             Assert(VerifyTxin(spk, tx_copy2, idx, std::move(spent_outputs), value));
 
-            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckWithinBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a Taproot script path spend input");
         }
 
         // Adding an input spending a future witness program does not somehow make us exceed
@@ -2068,7 +2125,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin.back().scriptWitness.stack.push_back(ToByteVector(pubkey));
             AddCoins(coins, CTransaction(tx_create), 0, false);
 
-            BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckWithinBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + a future Segwit program input");
         }
 
         // Adding an input spending a bare Script with no sigop but with a sigop in the
@@ -2090,7 +2147,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             tx_copy2.vin[idx].scriptSig << sig;
             Assert(VerifyTxin(spent_script, tx_copy2, idx));
 
-            BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx_copy2), coins));
+            CheckExceedsBIP54Limits(CTransaction(tx_copy2), coins, test_vectors, "Mixed input types reaching exactly 2500 BIP54-sigops + an input with one CHECKSIG in the scriptSig");
         }
     }
 
@@ -2139,7 +2196,8 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
             coins.AddCoin(tx.tx.vin[i].prevout, Coin(spent_txo, 0, false), false);
         }
 
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(tx.tx, coins));
+        std::string comment{"Historical Bitcoin transaction "};
+        CheckExceedsBIP54Limits(CTransaction(tx.tx), coins, test_vectors, std::move(comment) + tx.tx.GetHash().ToString());
     }
 
     // Now we move on to test some pathological transactions to demonstrates edge cases of the
@@ -2164,7 +2222,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         tx2.vin.emplace_back(tx_create.GetHash(), 0);
 
         // CheckSigopsBIP54 will return false despite the Script being invalid.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx2), coins, test_vectors, "Invalid bare script with 2501 CHECKSIGs");
     }
 
     // CheckSigopsBIP54 uses GetSigOpCount, which will only count the number of sigops in
@@ -2190,7 +2248,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         tx2.vin.emplace_back(tx_create.GetHash(), 0);
 
         // CheckSigopsBIP54 will return false because there is 125 CMS that account for 20 each.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx2), coins, test_vectors, "Invalid bare script with 125 CHECMULTISIGs each accounted for 20 BIP54-sigops");
     }
 
     // Note this is also a limitation for legitimate Scripts, for instance if the arguments to
@@ -2217,7 +2275,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         tx2.vin.emplace_back(tx_create.GetHash(), 0);
 
         // CheckSigopsBIP54 will return false because the first CHECKMULTISIG counts for 20 sigops.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx2), coins, test_vectors, "Invalid bare script with 1 CHECKMULTISIG accounted for 20 sigops + 2481 CHECKSIGs");
     }
 
     // In case of parsing error, CheckSigopsBIP54 will count sigops up to the point with incorrect encoding.
@@ -2240,7 +2298,7 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         tx2.vin.emplace_back(tx_create.GetHash(), 0);
 
         // CheckSigopsBIP54 will return false because 2501 sigops were counted before encountering the error.
-        BOOST_CHECK(!Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+        CheckExceedsBIP54Limits(CTransaction(tx2), coins, test_vectors, "Bare Script with malformed PUSHDATA1 after counting 2501 BIP54-sigops");
     }
 
     // Now we have 2500 CHECKSIGs before the PUSHDATA2 parsing error, and one after. This will pass the check.
@@ -2264,8 +2322,20 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
         tx2.vin.emplace_back(tx_create.GetHash(), 0);
 
         // CheckSigopsBIP54 will return true because 2500 sigops were counted before encountering the error.
-        BOOST_CHECK(Consensus::CheckSigopsBIP54(CTransaction(tx2), coins));
+        CheckWithinBIP54Limits(CTransaction(tx2), coins, test_vectors, "Bare Script with malformed PUSHDATA2 after counting 2500 BIP54-sigops");
     }
+
+    // Optionally dump test vectors as JSON. Uncomment UPDATE_JSON_TESTS at the top of this file to use.
+#ifdef UPDATE_JSON_TESTS
+    UniValue json_vectors{UniValue::VARR};
+    for (const auto& test_vector: test_vectors) {
+        json_vectors.push_back(test_vector.GetJson());
+    }
+    const auto json_str{json_vectors.write(4)};
+    FILE* file = fsbridge::fopen("bip54_sigops.json.gen", "w");
+    fputs(json_str.c_str(), file);
+    fclose(file);
+#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()
