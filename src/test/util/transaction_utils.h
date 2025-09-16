@@ -39,12 +39,16 @@ void BulkTransaction(CMutableTransaction& tx, int32_t target_weight);
  * @param txTo       The spending transaction.
  * @param nIn        The index of the input in `txTo` referring the output being spent.
  * @param amount     The value of the output being spent.
+ * @param spent_outputs The txos corresponding to the inputs' prevouts.
  * @param nHashType  Signature hash type.
  * @param sig_data   Additional data provided to solve a script. Filled with the resulting satisfying
  *                   script and whether the satisfaction is complete.
  *
  * @return           True if the produced script is entirely satisfying `fromPubKey`.
  **/
+bool SignSignature(const SigningProvider &provider, const CScript& fromPubKey, CMutableTransaction& txTo,
+                   unsigned int nIn, const CAmount& amount, std::vector<CTxOut>&& spent_outputs, int nHashType,
+                   SignatureData& sig_data);
 bool SignSignature(const SigningProvider &provider, const CScript& fromPubKey, CMutableTransaction& txTo,
                    unsigned int nIn, const CAmount& amount, int nHashType, SignatureData& sig_data);
 bool SignSignature(const SigningProvider &provider, const CTransaction& txFrom, CMutableTransaction& txTo,
