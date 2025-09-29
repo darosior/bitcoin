@@ -109,7 +109,8 @@ int main(int argc, char* argv[])
     kernel::CacheSizes cache_sizes{DEFAULT_KERNEL_CACHE};
 
     // SETUP: Chainstate
-    auto chainparams = CChainParams::Main();
+    auto opts = CChainParams::MainNetOptions{};
+    auto chainparams = CChainParams::Main(opts);
     const ChainstateManager::Options chainman_opts{
         .chainparams = *chainparams,
         .datadir = abs_datadir,
