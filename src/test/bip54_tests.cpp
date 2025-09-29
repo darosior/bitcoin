@@ -8,17 +8,24 @@
 #include <coins.h>
 #include <consensus/consensus.h>
 #include <consensus/tx_verify.h>
+#include <consensus/validation.h>
 #include <core_io.h>
 #include <key.h>
 #include <policy/policy.h>
+#include <primitives/block.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
 #include <script/solver.h>
 #include <streams.h>
+#include <test/data/bip54_timestamps.json.h>
+#include <test/util/json.h>
+#include <test/util/setup_common.h>
 #include <test/util/transaction_utils.h>
 #include <univalue.h>
+#include <util/chaintype.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
+#include <validation.h>
 
 #include <ranges>
 #include <string>
@@ -1270,6 +1277,45 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
 #ifdef UPDATE_JSON_TESTS
     WriteJSONTestVectors(test_vectors, "bip54_sigops.json.gen");
 #endif
+}
+
+/** Process chains of headers from the BIP54 test vectors for timewarp and Murch-Zawy fixes. */
+BOOST_AUTO_TEST_CASE(bip54_timestamps)
+{
+    const auto tests{read_json(json_tests::bip54_timestamps)};
+
+    for (const auto& test: tests.getValues()) {
+        // Get the data for this test case.
+        const auto is_valid{test["valid"].get_bool()};
+        const auto& comment{test["comment"].get_str()};
+        const auto headers_hex{test["header_chain"].getValues()};
+        std::vector<CBlockHeader> headers;
+        for (const auto& header: headers_hex) {
+            headers.emplace_back();
+            BOOST_REQUIRE(DecodeHexBlockHeader(headers.back(), header.get_str()));
+        }
+
+        // All invalid test vectors fail on rules newly introduced by BIP54, which is a soft fork. Therefore
+        // all cases will pass without the rules active.
+        {
+            auto test_setup{TestingSetup{ChainType::MAIN}};
+            BlockValidationState state;
+            BOOST_CHECK(test_setup.m_node.chainman->ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, /*ppindex=*/nullptr));
+            BOOST_CHECK(state.IsValid());
+        }
+
+        // Now assert the validity status of each case under the new rules.
+        {
+            auto test_setup{TestingSetup{ChainType::MAIN, {.extra_args = {"-vbparams=consensuscleanup:-1:-1"}}}};
+            BlockValidationState state;
+            const bool res{test_setup.m_node.chainman->ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, /*ppindex=*/nullptr)};
+            BOOST_CHECK_MESSAGE(res == is_valid, comment);
+            if (!is_valid) {
+                const auto reason{state.GetRejectReason()};
+                BOOST_CHECK_MESSAGE(reason == "time-timewarp-attack" || reason == "time-negative-interval", comment);
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
