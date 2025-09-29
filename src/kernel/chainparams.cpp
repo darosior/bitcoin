@@ -110,7 +110,7 @@ void CChainParams::ApplyDeploymentOptions(const DeploymentOptions& opts)
  */
 class CMainParams : public CChainParams {
 public:
-    CMainParams() {
+    CMainParams(const MainNetOptions& opts) {
         m_chain_type = ChainType::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -146,6 +146,8 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 709632; // Approximately November 12th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].threshold = 1815; // 90%
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].period = 2016;
+
+        ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000dee8e2a309ad8a9820433c68"};
         consensus.defaultAssumeValid = uint256{"00000000000000000000611fd22f2df7c8fbd0688745c3a6c3bb5109cc2a12cb"}; // 912683
@@ -231,7 +233,7 @@ public:
  */
 class CTestNetParams : public CChainParams {
 public:
-    CTestNetParams() {
+    CTestNetParams(const TestNetOptions& opts) {
         m_chain_type = ChainType::TESTNET;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -265,6 +267,8 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].threshold = 1512; // 75%
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].period = 2016;
+
+        ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000016dd270dd94fac1d7632"};
         consensus.defaultAssumeValid = uint256{"0000000000000065c6c38258e201971a3fdfcc2ceee0dd6e85a6c022d45dee34"}; // 4550000
@@ -328,7 +332,7 @@ public:
  */
 class CTestNet4Params : public CChainParams {
 public:
-    CTestNet4Params() {
+    CTestNet4Params(const TestNetOptions& opts) {
         m_chain_type = ChainType::TESTNET4;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -361,6 +365,8 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].threshold = 1512; // 75%
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].period = 2016;
+
+        ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000034a4690fe592dc49c7c"};
         consensus.defaultAssumeValid = uint256{"000000000000000180a58e7fa3b0db84b5ea76377524894f53660d93ac839d9b"}; // 91000
@@ -500,6 +506,8 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].threshold = 1815; // 90%
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].period = 2016;
+
+        ApplyDeploymentOptions(options.dep_opts);
 
         // message start is defined as the first 4 bytes of the sha256d of the block script
         HashWriter h{};
@@ -653,19 +661,19 @@ std::unique_ptr<const CChainParams> CChainParams::RegTest(const RegTestOptions& 
     return std::make_unique<const CRegTestParams>(options);
 }
 
-std::unique_ptr<const CChainParams> CChainParams::Main()
+std::unique_ptr<const CChainParams> CChainParams::Main(const MainNetOptions& options)
 {
-    return std::make_unique<const CMainParams>();
+    return std::make_unique<const CMainParams>(options);
 }
 
-std::unique_ptr<const CChainParams> CChainParams::TestNet()
+std::unique_ptr<const CChainParams> CChainParams::TestNet(const TestNetOptions& options)
 {
-    return std::make_unique<const CTestNetParams>();
+    return std::make_unique<const CTestNetParams>(options);
 }
 
-std::unique_ptr<const CChainParams> CChainParams::TestNet4()
+std::unique_ptr<const CChainParams> CChainParams::TestNet4(const TestNetOptions& options)
 {
-    return std::make_unique<const CTestNet4Params>();
+    return std::make_unique<const CTestNet4Params>(options);
 }
 
 std::vector<int> CChainParams::GetAvailableSnapshotHeights() const
