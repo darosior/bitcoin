@@ -22,28 +22,42 @@
 using namespace std::chrono_literals;
 
 //! Uncomment to prefill the headers up to height 2015 instead of mining them.
-//#define PREFILL_FIRST_HEADERS
+#define PREFILL_HEADERS
 
-#ifdef PREFILL_FIRST_HEADERS
+#ifdef PREFILL_HEADERS
 #include <test/bip54_premined_headers.h>
 
-/** Fill the chain with the 2015 first mined headers. */
-void PrefillHeaders(std::vector<CBlockHeader>& header_chain)
+template<typename T>
+static void FillHeaders(std::vector<CBlockHeader>& header_chain, const T& headers_hex)
 {
-    static_assert(std::size(PREMINED_HEADERS) == 2015); // Blocks up to height 2015 without the genesis block.
-    Assert(header_chain.size() == 1); // Only has the genesis block.
-    for (const auto str: PREMINED_HEADERS) {
+    for (const auto str: headers_hex) {
         header_chain.emplace_back();
         Assert(DecodeHexBlockHeader(header_chain.back(), std::string{str}));
     }
 }
 
-#endif // PREFILL_FIRST_HEADERS
+/** Fill the chain with the 2015 first mined headers. */
+static void PrefillFirstHeaders(std::vector<CBlockHeader>& header_chain)
+{
+    static_assert(std::size(FIRST_PREMINED_HEADERS) == 2015); // Blocks up to height 2015 without the genesis block.
+    Assert(header_chain.size() == 1); // Only has the genesis block.
+    FillHeaders(header_chain, FIRST_PREMINED_HEADERS);
+}
+
+/** Fill the chain with the 2015 first mined headers of the second difficulty adjustment period. */
+static void PrefillSecondHeaders(std::vector<CBlockHeader>& header_chain)
+{
+    //static_assert(std::size(SECOND_PREMINED_HEADERS) == 2015); // Blocks from height 2016 to height 4030
+    Assert(header_chain.size() == 2016); // Has blocks 0 through 2015 (first retarget period)
+    FillHeaders(header_chain, SECOND_PREMINED_HEADERS);
+}
+
+#endif // PREFILL_HEADERS
 
 BOOST_FIXTURE_TEST_SUITE(bip54_header_miner, BasicTestingSetup)
 
 //! Genesis block header as hex.
-constexpr std::string_view GENESIS_HEADER{"010000006bda3a09be117c461fcd20256907a93a2ead15139b162013172a05a0000000000000000000000000000000000000000000000000000000000000000000000000ceca5f49ffff001d0bc4cc08"};
+constexpr std::string_view GENESIS_HEADER{"0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c"};
 
 /**
  * A multithreaded header-only miner.
@@ -57,12 +71,13 @@ class HeaderMiner {
 
     void MineOne(CBlockHeader header, Consensus::Params params)
     {
+        uint64_t steps{0};
         while (!CheckProofOfWorkImpl(header.GetHash(), header.nBits, params)) {
             if (m_found.test()) return;
             if (++header.nNonce == 0) {
                 auto arith{UintToArith256(header.hashMerkleRoot)};
-                Assert(++arith <= STEPS);
-                header.hashMerkleRoot = ArithToUint256(arith);
+                Assert(++steps != STEPS);
+                header.hashMerkleRoot = ArithToUint256(arith + steps);
             }
         }
         m_header.store(header);
@@ -71,7 +86,7 @@ class HeaderMiner {
     }
 
 public:
-    static constexpr uint32_t STEPS{100'000};
+    static constexpr uint64_t STEPS{1LU << 57};
 
     CBlockHeader Mine(CBlockHeader header, Consensus::Params params)
     {
@@ -142,9 +157,10 @@ static void WriteVectors(const std::vector<TestVector>& test_vectors)
     fclose(file);
 }
 
-static void RecordTestVector(std::vector<TestVector>& test_vectors, std::vector<CBlockHeader>& header_chain, bool valid, std::string comment)
+static void RecordTestVector(std::vector<TestVector>& test_vectors, std::vector<CBlockHeader> header_chain, bool valid, std::string comment)
 {
-    test_vectors.emplace_back(header_chain, valid, std::move(comment));
+    std::cout << "Recording test vector \"" << comment << "\"" <<std::endl;
+    test_vectors.emplace_back(std::move(header_chain), valid, std::move(comment));
     WriteVectors(test_vectors); // Write the updated test vectors to disk.
 }
 
@@ -164,13 +180,14 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
     std::vector<CBlockHeader> header_chain;
     header_chain.emplace_back();
     Assert(DecodeHexBlockHeader(header_chain.back(), std::string{GENESIS_HEADER}));
+    Assert(header_chain.back().GetHash().ToString() == "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
 
     // Record each generated test vector throughout.
     std::vector<TestVector> test_vectors;
 
     // Optionally skip re-mining the headers for the first difficulty adjustment period.
-#ifdef PREFILL_FIRST_HEADERS
-    PrefillHeaders(header_chain);
+#ifdef PREFILL_HEADERS
+    PrefillFirstHeaders(header_chain);
     for (auto it{header_chain.begin()}; it + 1 < header_chain.end(); ++it) {
         Assert(it->GetHash() == (it + 1)->hashPrevBlock);
     }
@@ -205,7 +222,7 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 41 is more than 2 hours before block 40.");
+        // Test case recorded below.
     }
     Assert(header_chain.size() == 42);
 
@@ -236,7 +253,7 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 2001 is more than 2 hours before block 2000.");
+        // Test case recorded below.
     }
     Assert(header_chain.size() == 2001);
 
@@ -255,8 +272,21 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
     }
-#endif // PREFILL_FIRST_HEADERS
+#endif // PREFILL_HEADERS
     Assert(header_chain.size() == 2016);
+
+    // Record a couple test cases from this chain. We do it now to make sure it gets recorded
+    // even if we start from the prefilled chain.
+    {
+        std::vector<CBlockHeader> sub_chain{header_chain.begin(), header_chain.begin() + 42};
+        Assert(sub_chain.size() == 42);
+        RecordTestVector(test_vectors, header_chain, true, "Block at height 41 is more than 2 hours before block 40.");
+    }
+    {
+        std::vector<CBlockHeader> sub_chain{header_chain.begin(), header_chain.begin() + 2001};
+        Assert(sub_chain.size() == 2001);
+        RecordTestVector(test_vectors, header_chain, true, "Block at height 2001 is more than 2 hours before block 2000.");
+    }
 
     // No need to adapt nBits because it took >2 weeks between block 0 and block 2015
     // and we are already at difficulty 1.
@@ -365,11 +395,24 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
     // Now mine 2015 blocks on top of that, where all blocks' are only 1s after the previous
     // block (to avoid hiking up the MTP requirement), except the first block that is 24 hours
     // in the future.
+
+    // Optionally allow to skip mining the second difficulty adjustment period.
+#ifdef PREFILL_HEADERS
+    header_chain.resize(1);
+    PrefillFirstHeaders(header_chain);
+    PrefillSecondHeaders(header_chain);
+    for (auto it{header_chain.begin()}; it + 1 < header_chain.end(); ++it) {
+        Assert(it->GetHash() == (it + 1)->hashPrevBlock);
+    }
+    std::cout << "Prefilled and sanity checked headers up to block height " << header_chain.size() - 1 << std::endl;
+#else
     while (header_chain.size() < 2016 + 2015) {
         CBlockHeader header{header_chain.back()};
         header.hashPrevBlock = header.GetHash();
         if (header_chain.size() == 2016) {
             header.nTime += std::chrono::seconds{24h}.count();
+        } else if (header_chain.size() == 2017) {
+            header.nTime -= std::chrono::seconds{24h}.count();
         } else {
             header.nTime += std::chrono::seconds{1s}.count();
         }
@@ -378,6 +421,7 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
     }
+#endif
     Assert(header_chain.size() == 4031); // last block is at height 4030.
 
     // Now mine a block at height 4031 with a timestamp one second before the timestamp of
@@ -418,6 +462,14 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         CBlockHeader header{header_chain.back()};
         header.hashPrevBlock = header.GetHash();
         header.nTime = header2016.nTime - 1;
+
+        // This time we need to adjust the target. In the past period, the first and last
+        // blocks have the same timestamp, therefore the difficulty will be increased by the
+        // maximum of 4x.
+        arith_uint256 target;
+        target.SetCompact(header.nBits);
+        target /= 4;
+        header.nBits = target.GetCompact();
 
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
