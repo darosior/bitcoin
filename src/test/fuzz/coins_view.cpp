@@ -255,7 +255,8 @@ FUZZ_TARGET(coins_view, .init = initialize_coins_view)
                     // It is not allowed to call CheckTxInputs if CheckTransaction failed
                     return;
                 }
-                if (Consensus::CheckTxInputs(transaction, state, coins_view_cache, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, std::numeric_limits<int>::max()), tx_fee_out)) {
+                const bool enforce_bip54{!transaction.IsCoinBase() && fuzzed_data_provider.ConsumeBool()};
+                if (Consensus::CheckTxInputs(transaction, state, coins_view_cache, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, std::numeric_limits<int>::max()), tx_fee_out, enforce_bip54)) {
                     assert(MoneyRange(tx_fee_out));
                 }
             },
