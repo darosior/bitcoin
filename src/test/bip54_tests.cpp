@@ -34,6 +34,7 @@
 #include <util/strencodings.h>
 #include <validation.h>
 
+#include <fstream>
 #include <ranges>
 #include <string>
 
@@ -57,6 +58,57 @@ static void WriteJSONTestVectors(const std::vector<T>& test_vectors, std::string
     fclose(file);
 }
 #endif
+
+static bool IsPush(opcodetype op)
+{
+    return op > OP_0 && op < OP_1NEGATE;
+}
+
+static void RecordTxForFuzz(const CTransaction& tx, const std::vector<CTxOut>& spent_outputs)
+{
+    // Write the seeds in a specific folder in cwd. Always overwrite them.
+    const fs::path folder_path{"bip54_sigops_fuzz_seed"};
+    const auto path{folder_path / tx.GetHash().ToString().c_str()};
+    fs::create_directories(folder_path);
+    auto file{AutoFile{fsbridge::fopen(path, "wb")}};
+    Assert(!file.IsNull());
+
+    // First the number of inputs as two bytes.
+    Serialize(file, static_cast<uint16_t>(tx.vin.size()));
+
+    // Then as many pairs of previous output / input.
+    for (size_t i{0}; i < tx.vin.size(); ++i) {
+        const bool is_p2sh{spent_outputs[i].scriptPubKey.IsPayToScriptHash()};
+
+        // If it's P2SH extract the redeemScript and serialize it separately.
+        // Otherwise simply serialize the scriptSig and previous scriptPubKey.
+        if (is_p2sh) {
+            CScript script_sig, redeem_script;
+            auto it{tx.vin[i].scriptSig.begin()};
+            opcodetype op;
+            std::vector<uint8_t> data;
+            while (it < tx.vin[i].scriptSig.end() && tx.vin[i].scriptSig.GetOp(it, op, data)) {
+                if (IsPush(op)) {
+                    if (it == tx.vin[i].scriptSig.end()) {
+                        redeem_script = {data.begin(), data.end()};
+                    } else {
+                     script_sig << data;
+                    }
+                } else {
+                    script_sig << op;
+                }
+            }
+            Serialize(file, script_sig);
+            Serialize(file, redeem_script);
+        } else {
+            Serialize(file, tx.vin[i].scriptSig);
+            Serialize(file, spent_outputs[i].scriptPubKey);
+        }
+
+        // Finally serialize whether the spent Script is a P2SH as a single byte.
+        Serialize(file, static_cast<uint8_t>(is_p2sh));
+    }
+}
 
 /** A test vector for the per-transaction sigop limit in BIP54. */
 struct TestVectorSigops {
@@ -147,6 +199,7 @@ static void CheckWithinBIP54Limits(CTransaction tx, const CCoinsViewCache& coins
     BOOST_CHECK_MESSAGE(Consensus::CheckSigopsBIP54(tx, coins), comment);
 
     auto spent_outputs{RecordSpent(coins, tx)};
+    RecordTxForFuzz(tx, spent_outputs);
     test_vectors.emplace_back(tx, std::move(spent_outputs), /*valid=*/true, std::move(comment));
 }
 
@@ -156,6 +209,7 @@ static void CheckExceedsBIP54Limits(CTransaction tx, const CCoinsViewCache& coin
     BOOST_CHECK_MESSAGE(!Consensus::CheckSigopsBIP54(tx, coins), comment);
 
     auto spent_outputs{RecordSpent(coins, tx)};
+    RecordTxForFuzz(tx, spent_outputs);
     test_vectors.emplace_back(tx, std::move(spent_outputs), /*valid=*/false, std::move(comment));
 }
 
