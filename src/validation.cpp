@@ -2625,6 +2625,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     CCheckQueueControl<CScriptCheck> control(fScriptChecks && parallel_script_checks ? &m_chainman.GetCheckQueue() : nullptr);
     std::vector<PrecomputedTransactionData> txsdata(block.vtx.size());
 
+    const bool check_bip54{DeploymentActiveAt(*pindex, m_chainman, Consensus::DEPLOYMENT_CONSENSUSCLEANUP)};
     std::vector<int> prevheights;
     CAmount nFees = 0;
     int nInputs = 0;
@@ -2652,6 +2653,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if (!MoneyRange(nFees)) {
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-accumulated-fee-outofrange",
                               "accumulated fee in the block out of range");
+                break;
+            }
+
+            if (check_bip54 && !Consensus::CheckSigopsBIP54(tx, view)) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-legacy-sigops",
+                              "contains a transaction with too many legacy sigops (BIP54)");
                 break;
             }
 

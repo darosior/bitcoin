@@ -215,8 +215,8 @@ class BytesPerSigOpTest(BitcoinTestFramework):
         std_tx.vin.pop()
         self.nodes[0].sendrawtransaction(std_tx.serialize().hex())
 
-        # Make sure the original, non-standard, transaction can be mined.
-        self.generateblock(self.nodes[0], output="raw(42)", transactions=[nonstd_tx.serialize().hex()])
+        # The non-std transaction can also not be mined now it's been made a consensus rule.
+        assert_raises_rpc_error(-25, "bad-txns-legacy-sigops", self.generateblock, self.nodes[0], "raw(42)", [nonstd_tx.serialize().hex()])
 
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
