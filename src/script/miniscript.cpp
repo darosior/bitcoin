@@ -70,7 +70,7 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
         assert(n_subs == 0);
     }
     // Sanity check on keys
-    if (fragment == Fragment::PK_K || fragment == Fragment::PK_H) {
+    if (fragment == Fragment::PK_K || fragment == Fragment::PK_H || fragment == Fragment::PK_I) {
         assert(n_keys == 1);
     } else if (fragment == Fragment::MULTI) {
         assert(n_keys >= 1 && n_keys <= MAX_PUBKEYS_PER_MULTISIG);
@@ -86,7 +86,8 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
     // It heavily relies on Type's << operator (where "X << a_mst" means
     // "X has all properties listed in a").
     switch (fragment) {
-        case Fragment::PK_K: return "Konudemsxk"_mst;
+        case Fragment::PK_K:
+        case Fragment::PK_I: return "Konudemsxk"_mst;
         case Fragment::PK_H: return "Knudemsxk"_mst;
         case Fragment::OLDER: return
             "g"_mst.If(k & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) |
@@ -272,6 +273,7 @@ size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_
         case Fragment::JUST_0: return 1;
         case Fragment::PK_K: return IsTapscript(ms_ctx) ? 33 : 34;
         case Fragment::PK_H: return 3 + 21;
+        case Fragment::PK_I: return 1;
         case Fragment::OLDER:
         case Fragment::AFTER: return 1 + BuildScript(k).size();
         case Fragment::HASH256:

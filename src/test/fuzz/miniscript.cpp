@@ -117,8 +117,10 @@ struct ParserContext {
     typedef CPubKey Key;
 
     const MsCtx script_ctx;
+    const std::optional<CPubKey>& m_tr_internal_pubkey;
 
-    constexpr ParserContext(MsCtx ctx) noexcept : script_ctx(ctx) {}
+    constexpr ParserContext(MsCtx ctx, const std::optional<CPubKey>& tr_internal_pubkey LIFETIMEBOUND) noexcept
+        : script_ctx(ctx), m_tr_internal_pubkey{tr_internal_pubkey} {}
 
     bool KeyCompare(const Key& a, const Key& b) const {
         return a < b;
@@ -183,6 +185,14 @@ struct ParserContext {
     MsCtx MsContext() const {
         return script_ctx;
     }
+
+    Key GetInternalPK() const {
+        Assert(script_ctx == MsCtx::TAPSCRIPT);
+        // For TestNode() it is always set when a pk_i() fragment is present. When there is
+        // no such fragment GetInternalPK() will never be called.
+        Assert(m_tr_internal_pubkey.has_value());
+        return m_tr_internal_pubkey.value();
+    }
 };
 
 //! Context that implements naive conversion from/to script only, for roundtrip testing.
@@ -235,12 +245,21 @@ struct ScriptParserContext {
     MsCtx MsContext() const {
         return script_ctx;
     }
+
+    Key GetInternalPK() const {
+        const auto pubkey{XOnlyPubKey::NUMS_H.GetEvenCorrespondingCPubKey()};
+        return Key {
+            .is_hash = false,
+            .data = {pubkey.begin(), pubkey.end()},
+        };
+    }
 };
 
 //! Context to produce a satisfaction for a Miniscript node using the pre-computed data.
 struct SatisfierContext : ParserContext {
 
-    constexpr SatisfierContext(MsCtx ctx) noexcept : ParserContext(ctx) {}
+    constexpr SatisfierContext(MsCtx ctx, const std::optional<CPubKey>& tr_internal_pubkey) noexcept
+        : ParserContext(ctx, tr_internal_pubkey) {}
 
     // Timelock challenges satisfaction. Make the value (deterministically) vary to explore different
     // paths.
@@ -385,7 +404,7 @@ std::optional<uint32_t> ConsumeTimeLock(FuzzedDataProvider& provider) {
  *    - For multi_a(), same as for multi() but the threshold and the keys count are encoded on two bytes.
  *    - For thresh(), the next byte defines the threshold value and the following one the number of subs.
  */
-std::optional<NodeInfo> ConsumeNodeStable(MsCtx script_ctx, FuzzedDataProvider& provider, Type type_needed) {
+std::optional<NodeInfo> ConsumeNodeStable(MsCtx script_ctx, FuzzedDataProvider& provider, Type type_needed, std::optional<CPubKey>& tr_internal_key) {
     bool allow_B = (type_needed == ""_mst) || (type_needed << "B"_mst);
     bool allow_K = (type_needed == ""_mst) || (type_needed << "K"_mst);
     bool allow_V = (type_needed == ""_mst) || (type_needed << "V"_mst);
@@ -500,6 +519,13 @@ std::optional<NodeInfo> ConsumeNodeStable(MsCtx script_ctx, FuzzedDataProvider& 
             for (auto& key: keys) key = ConsumePubKey(provider);
             return {{Fragment::MULTI_A, k, std::move(keys)}};
         }
+        case 28: {
+            if (!allow_K || !IsTapscript(script_ctx)) return {};
+            if (!tr_internal_key.has_value()) {
+                tr_internal_key = ConsumePubKey(provider);
+            }
+            return {{Fragment::PK_I, tr_internal_key.value()}};
+        }
         default:
             break;
     }
@@ -575,6 +601,15 @@ struct SmartInfo
          * super-recipe got added. */
         std::sort(types.begin(), types.end());
 
+        /** Whether a fragment must only be used in Tapscript. */
+        auto requires_tapscript{[](const Fragment& frag) {
+            switch (frag) {
+                case Fragment::MULTI_A:
+                case Fragment::PK_I: return true;
+                default: return false;
+            }
+        }};
+
         // Iterate over all possible fragments.
         for (int fragidx = 0; fragidx <= int(Fragment::MULTI_A); ++fragidx) {
             int sub_count = 0; //!< The minimum number of child nodes this recipe has.
@@ -585,7 +620,7 @@ struct SmartInfo
             Fragment frag{fragidx};
 
             // Only produce recipes valid in the given context.
-            if ((!miniscript::IsTapscript(script_ctx) && frag == Fragment::MULTI_A)
+            if ((!miniscript::IsTapscript(script_ctx) && requires_tapscript(frag))
                 || (miniscript::IsTapscript(script_ctx) && frag == Fragment::MULTI)) {
                 continue;
             }
@@ -594,6 +629,7 @@ struct SmartInfo
             switch (frag) {
                 case Fragment::PK_K:
                 case Fragment::PK_H:
+                case Fragment::PK_I:
                     n_keys = 1;
                     break;
                 case Fragment::MULTI:
@@ -773,7 +809,7 @@ struct SmartInfo
  * (as improvements to the tables or changes to the typing rules could invalidate
  * everything).
  */
-std::optional<NodeInfo> ConsumeNodeSmart(MsCtx script_ctx, FuzzedDataProvider& provider, Type type_needed) {
+std::optional<NodeInfo> ConsumeNodeSmart(MsCtx script_ctx, FuzzedDataProvider& provider, Type type_needed, std::optional<CPubKey>& tr_internal_key) {
     /** Table entry for the requested type. */
     const auto& table{IsTapscript(script_ctx) ? SMARTINFO.tap_table : SMARTINFO.wsh_table};
     auto recipes_it = table.find(type_needed);
@@ -786,6 +822,12 @@ std::optional<NodeInfo> ConsumeNodeSmart(MsCtx script_ctx, FuzzedDataProvider& p
         case Fragment::PK_K:
         case Fragment::PK_H:
             return {{frag, ConsumePubKey(provider)}};
+        case Fragment::PK_I:
+            Assert(IsTapscript(script_ctx));
+            if (!tr_internal_key.has_value()) {
+                tr_internal_key = ConsumePubKey(provider);
+            }
+            return {{frag, tr_internal_key.value()}};
         case Fragment::MULTI: {
             const auto n_keys = provider.ConsumeIntegralInRange<uint8_t>(1, 20);
             const auto k = provider.ConsumeIntegralInRange<uint8_t>(1, n_keys);
@@ -856,7 +898,7 @@ std::optional<NodeInfo> ConsumeNodeSmart(MsCtx script_ctx, FuzzedDataProvider& p
  *   a NodeRef whose Type() matches the type fed to ConsumeNode.
  */
 template<typename F>
-NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, bool strict_valid = false) {
+NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, std::optional<CPubKey>& tr_internal_key, bool strict_valid = false) {
     /** A stack of miniscript Nodes being built up. */
     std::vector<NodeRef> stack;
     /** The queue of instructions. */
@@ -872,7 +914,7 @@ NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, bool strict_val
         auto type_needed = todo.back().first;
         if (!todo.back().second) {
             // Fragment/children have not been decided yet. Decide them.
-            auto node_info = ConsumeNode(type_needed);
+            auto node_info = ConsumeNode(type_needed, tr_internal_key);
             if (!node_info) return {};
             // Update predicted resource limits. Since every leaf Miniscript node is at least one
             // byte long, we move one byte from each child to their parent. A similar technique is
@@ -888,6 +930,9 @@ NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, bool strict_val
                 break;
             case Fragment::PK_H:
                 ops += 3;
+                break;
+            case Fragment::PK_I:
+                ops += 1;
                 break;
             case Fragment::OLDER:
             case Fragment::AFTER:
@@ -1011,13 +1056,13 @@ NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, bool strict_val
 }
 
 //! The spk for this script under the given context. If it's a Taproot output also record the spend data.
-CScript ScriptPubKey(MsCtx ctx, const CScript& script, TaprootBuilder& builder)
+CScript ScriptPubKey(MsCtx ctx, const CScript& script, TaprootBuilder& builder, const std::optional<CPubKey>& tr_internal_key)
 {
     if (!miniscript::IsTapscript(ctx)) return CScript() << OP_0 << WitnessV0ScriptHash(script);
 
     // For Taproot outputs we always use a tree with a single script and a dummy internal key.
     builder.Add(0, script, TAPROOT_LEAF_TAPSCRIPT);
-    builder.Finalize(XOnlyPubKey::NUMS_H);
+    builder.Finalize(tr_internal_key ? XOnlyPubKey{*tr_internal_key} : XOnlyPubKey::NUMS_H);
     return GetScriptForDestination(builder.GetOutput());
 }
 
@@ -1031,12 +1076,12 @@ void SatisfactionToWitness(MsCtx ctx, CScriptWitness& witness, const CScript& sc
 }
 
 /** Perform various applicable tests on a miniscript Node. */
-void TestNode(const MsCtx script_ctx, const NodeRef& node, FuzzedDataProvider& provider)
+void TestNode(const MsCtx script_ctx, const NodeRef& node, std::optional<CPubKey>& tr_internal_key, FuzzedDataProvider& provider)
 {
     if (!node) return;
 
     // Check that it roundtrips to text representation
-    const ParserContext parser_ctx{script_ctx};
+    const ParserContext parser_ctx{script_ctx, tr_internal_key};
     std::optional<std::string> str{node->ToString(parser_ctx)};
     assert(str);
     auto parsed = miniscript::FromString(*str, parser_ctx);
@@ -1100,11 +1145,11 @@ void TestNode(const MsCtx script_ctx, const NodeRef& node, FuzzedDataProvider& p
         }
     }
 
-    const SatisfierContext satisfier_ctx{script_ctx};
+    const SatisfierContext satisfier_ctx{script_ctx, tr_internal_key};
 
     // Get the ScriptPubKey for this script, filling spend data if it's Taproot.
     TaprootBuilder builder;
-    const CScript script_pubkey{ScriptPubKey(script_ctx, script, builder)};
+    const CScript script_pubkey{ScriptPubKey(script_ctx, script, builder, tr_internal_key)};
 
     // Run malleable satisfaction algorithm.
     std::vector<std::vector<unsigned char>> stack_mal;
@@ -1133,7 +1178,9 @@ void TestNode(const MsCtx script_ctx, const NodeRef& node, FuzzedDataProvider& p
         ScriptError serror;
         bool res = VerifyScript(DUMMY_SCRIPTSIG, script_pubkey, &witness_nonmal, STANDARD_SCRIPT_VERIFY_FLAGS, CHECKER_CTX, &serror);
         // Non-malleable satisfactions are guaranteed to be valid if ValidSatisfactions().
-        if (node->ValidSatisfactions()) assert(res);
+        if (node->ValidSatisfactions()) {
+            assert(res);
+        }
         // More detailed: non-malleable satisfactions must be valid, or could fail with ops count error (if CheckOpsLimit failed),
         // or with a stack size error (if CheckStackSize check failed).
         assert(res ||
@@ -1169,6 +1216,7 @@ void TestNode(const MsCtx script_ctx, const NodeRef& node, FuzzedDataProvider& p
         switch (node.fragment) {
         case Fragment::PK_K:
         case Fragment::PK_H:
+        case Fragment::PK_I:
             return is_key_satisfiable(node.keys[0]);
         case Fragment::MULTI:
         case Fragment::MULTI_A: {
@@ -1216,9 +1264,10 @@ FUZZ_TARGET(miniscript_stable, .init = FuzzInit)
     // Run it under both P2WSH and Tapscript contexts.
     for (const auto script_ctx: {MsCtx::P2WSH, MsCtx::TAPSCRIPT}) {
         FuzzedDataProvider provider(buffer.data(), buffer.size());
-        TestNode(script_ctx, GenNode(script_ctx, [&](Type needed_type) {
-            return ConsumeNodeStable(script_ctx, provider, needed_type);
-        }, ""_mst), provider);
+        std::optional<CPubKey> tr_internal_key;
+        TestNode(script_ctx, GenNode(script_ctx, [&](Type needed_type, std::optional<CPubKey>& tr_internal_key) {
+            return ConsumeNodeStable(script_ctx, provider, needed_type, tr_internal_key);
+        }, ""_mst, tr_internal_key), tr_internal_key, provider);
     }
 }
 
@@ -1230,9 +1279,12 @@ FUZZ_TARGET(miniscript_smart, .init = FuzzInitSmart)
 
     FuzzedDataProvider provider(buffer.data(), buffer.size());
     const auto script_ctx{(MsCtx)provider.ConsumeBool()};
-    TestNode(script_ctx, GenNode(script_ctx, [&](Type needed_type) {
-        return ConsumeNodeSmart(script_ctx, provider, needed_type);
-    }, PickValue(provider, BASE_TYPES), true), provider);
+    std::optional<CPubKey> tr_internal_key;
+    auto consume_node{[&](Type needed_type, std::optional<CPubKey>& tr_internal_key) {
+        return ConsumeNodeSmart(script_ctx, provider, needed_type, tr_internal_key);
+    }};
+    auto fragment{GenNode(script_ctx, consume_node, PickValue(provider, BASE_TYPES), tr_internal_key, /* strict_valid = */ true)};
+    TestNode(script_ctx, std::move(fragment), tr_internal_key, provider);
 }
 
 /* Fuzz tests that test parsing from a string, and roundtripping via string. */
@@ -1241,7 +1293,8 @@ FUZZ_TARGET(miniscript_string, .init = FuzzInit)
     if (buffer.empty()) return;
     FuzzedDataProvider provider(buffer.data(), buffer.size());
     auto str = provider.ConsumeBytesAsString(provider.remaining_bytes() - 1);
-    const ParserContext parser_ctx{(MsCtx)provider.ConsumeBool()};
+    const std::optional<CPubKey> tr_internal_key{XOnlyPubKey::NUMS_H.GetEvenCorrespondingCPubKey()};
+    const ParserContext parser_ctx{(MsCtx)provider.ConsumeBool(), tr_internal_key};
     auto parsed = miniscript::FromString(str, parser_ctx);
     if (!parsed) return;
 
