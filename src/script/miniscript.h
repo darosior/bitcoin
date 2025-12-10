@@ -871,6 +871,10 @@ public:
                         if (!key_str) return {};
                         return std::move(ret) + "pkh(" + std::move(*key_str) + ")";
                     }
+                    if (node.subs[0]->fragment == Fragment::PK_I) {
+                        // pki() is syntactic sugar for c:pk_i()
+                        return std::move(ret) + "pki()";
+                    }
                     return "c" + std::move(subs[0]);
                 case Fragment::WRAP_D: return "d" + std::move(subs[0]);
                 case Fragment::WRAP_V: return "v" + std::move(subs[0]);
@@ -1952,6 +1956,12 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_C, Vector(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::PK_H, Vector(std::move(key))))));
                 in = in.subspan(key_size + 1);
                 script_size += 24;
+            } else if (Const("pki(", in)) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                const auto pubkey{ctx.GetInternalPK()};
+                constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_C, Vector(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::PK_I, Vector(std::move(pubkey))))));
+                in = in.subspan(1);
+                script_size += 1;
             } else if (Const("pk_k(", in)) {
                 auto res = ParseKeyEnd<Key>(in, ctx);
                 if (!res) return {};
