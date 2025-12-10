@@ -206,6 +206,7 @@ enum class Fragment {
     JUST_1,    //!< OP_1
     PK_K,      //!< [key]
     PK_H,      //!< OP_DUP OP_HASH160 [keyhash] OP_EQUALVERIFY
+    PK_I,      //!< OP_INTERNALKEY
     OLDER,     //!< [n] OP_CHECKSEQUENCEVERIFY
     AFTER,     //!< [n] OP_CHECKLOCKTIMEVERIFY
     SHA256,    //!< OP_SIZE 32 OP_EQUALVERIFY OP_SHA256 [hash] OP_EQUAL
@@ -777,6 +778,10 @@ public:
             switch (node.fragment) {
                 case Fragment::PK_K: return BuildScript(ctx.ToPKBytes(node.keys[0]));
                 case Fragment::PK_H: return BuildScript(OP_DUP, OP_HASH160, ctx.ToPKHBytes(node.keys[0]), OP_EQUALVERIFY);
+                case Fragment::PK_I: {
+                    CHECK_NONFATAL(is_tapscript);
+                    return BuildScript(OP_INTERNALKEY);
+                }
                 case Fragment::OLDER: return BuildScript(node.k, OP_CHECKSEQUENCEVERIFY);
                 case Fragment::AFTER: return BuildScript(node.k, OP_CHECKLOCKTIMEVERIFY);
                 case Fragment::SHA256: return BuildScript(OP_SIZE, 32, OP_EQUALVERIFY, OP_SHA256, node.data, verify ? OP_EQUALVERIFY : OP_EQUAL);
@@ -896,6 +901,10 @@ public:
                     if (!key_str) return {};
                     return std::move(ret) + "pk_h(" + std::move(*key_str) + ")";
                 }
+                case Fragment::PK_I: {
+                    CHECK_NONFATAL(is_tapscript);
+                    return std::move(ret) + "pk_i()";
+                }
                 case Fragment::AFTER: return std::move(ret) + "after(" + util::ToString(node.k) + ")";
                 case Fragment::OLDER: return std::move(ret) + "older(" + util::ToString(node.k) + ")";
                 case Fragment::HASH256: return std::move(ret) + "hash256(" + HexStr(node.data) + ")";
@@ -956,6 +965,7 @@ private:
             case Fragment::JUST_0: return {0, {}, 0};
             case Fragment::PK_K: return {0, 0, 0};
             case Fragment::PK_H: return {3, 0, 0};
+            case Fragment::PK_I: return {1, 0, 0};
             case Fragment::OLDER:
             case Fragment::AFTER: return {1, 0, {}};
             case Fragment::SHA256:
@@ -1033,6 +1043,7 @@ private:
             case Fragment::AFTER: return {SatInfo::Push() + SatInfo::Nop(), {}};
             case Fragment::PK_K: return {SatInfo::Push()};
             case Fragment::PK_H: return {SatInfo::OP_DUP() + SatInfo::Hash() + SatInfo::Push() + SatInfo::OP_EQUALVERIFY()};
+            case Fragment::PK_I: return {SatInfo::Push()};
             case Fragment::SHA256:
             case Fragment::RIPEMD160:
             case Fragment::HASH256:
@@ -1149,6 +1160,7 @@ private:
             case Fragment::AFTER: return {0, {}};
             case Fragment::PK_K: return {sig_size, 1};
             case Fragment::PK_H: return {sig_size + pubkey_size, 1 + pubkey_size};
+            case Fragment::PK_I: return {sig_size, 1};
             case Fragment::SHA256:
             case Fragment::RIPEMD160:
             case Fragment::HASH256:
@@ -1200,7 +1212,8 @@ private:
         // given those of its subnodes.
         auto helper = [&ctx](const Node& node, Span<InputResult> subres) -> InputResult {
             switch (node.fragment) {
-                case Fragment::PK_K: {
+                case Fragment::PK_K:
+                case Fragment::PK_I: {
                     std::vector<unsigned char> sig;
                     Availability avail = ctx.Sign(node.keys[0], sig);
                     return {ZERO, InputStack(std::move(sig)).SetCommitsTx().SetWithSig().SetAvailable(avail)};
@@ -1478,7 +1491,8 @@ public:
             }
 
             // Start building the set of keys involved in this node and children.
-            // Start by keys in this node directly.
+            // Start by keys in this node directly. Note this also takes pk_i() fragments
+            // into account since we store the internal key in node.keys for those.
             size_t keys_count = node.keys.size();
             keyset key_set{node.keys.begin(), node.keys.end(), Comp(ctx)};
             if (key_set.size() != keys_count) {
@@ -1594,6 +1608,7 @@ public:
                     return true;
                 case Fragment::PK_K:
                 case Fragment::PK_H:
+                case Fragment::PK_I:
                 case Fragment::MULTI:
                 case Fragment::MULTI_A:
                 case Fragment::AFTER:
@@ -1958,6 +1973,11 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::PK_H, Vector(std::move(key))));
                 in = in.subspan(key_size + 1);
                 script_size += 23;
+            } else if (Const("pk_i(", in)) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                const auto pubkey{ctx.GetInternalPK()};
+                constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::PK_I, Vector(std::move(pubkey))));
+                in = in.subspan(1);
             } else if (Const("sha256(", in)) {
                 auto res = ParseHexStrEnd(in, 32, ctx);
                 if (!res) return {};
@@ -2306,6 +2326,13 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 if (!key) return {};
                 in += 5;
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::PK_H, Vector(std::move(*key))));
+                break;
+            }
+            if (in[0].first == OP_INTERNALKEY) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                const auto pubkey{ctx.GetInternalPK()};
+                constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::PK_I, Vector(std::move(pubkey))));
+                ++in;
                 break;
             }
             // Time locks

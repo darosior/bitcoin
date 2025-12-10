@@ -259,6 +259,10 @@ struct WshSatisfier: Satisfier<CPubKey> {
                           const BaseSignatureCreator& creator LIFETIMEBOUND, const CScript& witscript LIFETIMEBOUND)
                           : Satisfier(provider, sig_data, creator, witscript, miniscript::MiniscriptContext::P2WSH) {}
 
+    CPubKey GetInternalPK() const {
+        return CPubKey{};
+    }
+
     //! Conversion from a raw compressed public key.
     template <typename I>
     std::optional<CPubKey> FromPKBytes(I first, I last) const {
@@ -291,6 +295,10 @@ struct TapSatisfier: Satisfier<XOnlyPubKey> {
                           const uint256& leaf_hash LIFETIMEBOUND)
                           : Satisfier(provider, sig_data, creator, script, miniscript::MiniscriptContext::TAPSCRIPT),
                             m_leaf_hash(leaf_hash) {}
+
+    XOnlyPubKey GetInternalPK() const {
+        return m_sig_data.tr_spenddata.internal_key;
+    }
 
     //! Conversion from a raw xonly public key.
     template <typename I>

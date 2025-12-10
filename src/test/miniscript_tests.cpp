@@ -131,8 +131,10 @@ struct KeyConverter {
     typedef CPubKey Key;
 
     const miniscript::MiniscriptContext m_script_ctx;
+    const CPubKey m_tr_internal_key;
 
-    constexpr KeyConverter(miniscript::MiniscriptContext ctx) noexcept : m_script_ctx{ctx} {}
+    KeyConverter(miniscript::MiniscriptContext ctx, CPubKey tr_internal_key) noexcept
+        : m_script_ctx{ctx}, m_tr_internal_key{tr_internal_key} {}
 
     bool KeyCompare(const Key& a, const Key& b) const {
         return a < b;
@@ -195,12 +197,16 @@ struct KeyConverter {
     miniscript::MiniscriptContext MsContext() const {
         return m_script_ctx;
     }
+
+    Key GetInternalPK() const {
+        return m_tr_internal_key;
+    }
 };
 
 /** A class that encapsulates all signing/hash revealing operations. */
 struct Satisfier : public KeyConverter {
 
-    Satisfier(miniscript::MiniscriptContext ctx) noexcept : KeyConverter{ctx} {}
+    Satisfier(miniscript::MiniscriptContext ctx, CPubKey tr_internal_key) noexcept : KeyConverter{ctx, tr_internal_key} {}
 
     //! Which keys/timelocks/hash preimages are available.
     std::set<Challenge> supported;
@@ -351,7 +357,7 @@ void TestSatisfy(const KeyConverter& converter, const std::string& testcase, con
     std::vector<Challenge> challist(challenges.begin(), challenges.end());
     for (int iter = 0; iter < 3; ++iter) {
         std::shuffle(challist.begin(), challist.end(), m_rng);
-        Satisfier satisfier(converter.MsContext());
+        Satisfier satisfier(converter.MsContext(), converter.GetInternalPK());
         TestSignatureChecker checker(satisfier);
         bool prev_mal_success = false, prev_nonmal_success = false;
         // Go over all challenges involved in this miniscript in random order.
@@ -480,9 +486,9 @@ void Test(const std::string& ms, const std::string& hexscript, const std::string
           std::optional<uint32_t> max_tap_wit_size,
           std::optional<uint32_t> stack_exec)
 {
-    KeyConverter wsh_converter(miniscript::MiniscriptContext::P2WSH);
+    KeyConverter wsh_converter(miniscript::MiniscriptContext::P2WSH, /*tr_internal_key=*/CPubKey{});
     Test(ms, hexscript, mode, wsh_converter, opslimit, stacklimit, max_wit_size, stack_exec);
-    KeyConverter tap_converter(miniscript::MiniscriptContext::TAPSCRIPT);
+    KeyConverter tap_converter(miniscript::MiniscriptContext::TAPSCRIPT, /*tr_internal_key=*/XOnlyPubKey::NUMS_H.GetEvenCorrespondingCPubKey());
     Test(ms, hextapscript == "=" ? hexscript : hextapscript, mode, tap_converter, opslimit, stacklimit, max_tap_wit_size, stack_exec);
 }
 
@@ -596,8 +602,8 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     //  - no pubkey at all
     //  - no pubkey before a CHECKSIGADD
     //  - no pubkey before the CHECKSIG
-    constexpr KeyConverter tap_converter{miniscript::MiniscriptContext::TAPSCRIPT};
-    constexpr KeyConverter wsh_converter{miniscript::MiniscriptContext::P2WSH};
+    const KeyConverter tap_converter{miniscript::MiniscriptContext::TAPSCRIPT, /*tr_internal_key=*/XOnlyPubKey::NUMS_H.GetEvenCorrespondingCPubKey()};
+    const KeyConverter wsh_converter{miniscript::MiniscriptContext::P2WSH, /*tr_internal_key=*/CPubKey{}};
     const auto no_pubkey{"ac519c"_hex_u8};
     BOOST_CHECK(miniscript::FromScript({no_pubkey.begin(), no_pubkey.end()}, tap_converter) == nullptr);
     const auto incomplete_multi_a{"ba20c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ba519c"_hex_u8};
