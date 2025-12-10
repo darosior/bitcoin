@@ -330,13 +330,13 @@ std::set<Challenge> FindChallenges(const NodeRef& ref) {
 }
 
 //! The spk for this script under the given context. If it's a Taproot output also record the spend data.
-CScript ScriptPubKey(miniscript::MiniscriptContext ctx, const CScript& script, TaprootBuilder& builder)
+CScript ScriptPubKey(const KeyConverter& converter, const CScript& script, TaprootBuilder& builder)
 {
-    if (!miniscript::IsTapscript(ctx)) return CScript() << OP_0 << WitnessV0ScriptHash(script);
+    if (!miniscript::IsTapscript(converter.MsContext())) return CScript() << OP_0 << WitnessV0ScriptHash(script);
 
     // For Taproot outputs we always use a tree with a single script and a dummy internal key.
     builder.Add(0, script, TAPROOT_LEAF_TAPSCRIPT);
-    builder.Finalize(XOnlyPubKey::NUMS_H);
+    builder.Finalize(XOnlyPubKey{converter.GetInternalPK()});
     return GetScriptForDestination(builder.GetOutput());
 }
 
@@ -366,7 +366,7 @@ void TestSatisfy(const KeyConverter& converter, const std::string& testcase, con
 
             // Get the ScriptPubKey for this script, filling spend data if it's Taproot.
             TaprootBuilder builder;
-            const CScript script_pubkey{ScriptPubKey(converter.MsContext(), script, builder)};
+            const CScript script_pubkey{ScriptPubKey(converter, script, builder)};
 
             // Run malleable satisfaction algorithm.
             CScriptWitness witness_mal;
@@ -488,7 +488,8 @@ void Test(const std::string& ms, const std::string& hexscript, const std::string
 {
     KeyConverter wsh_converter(miniscript::MiniscriptContext::P2WSH, /*tr_internal_key=*/CPubKey{});
     Test(ms, hexscript, mode, wsh_converter, opslimit, stacklimit, max_wit_size, stack_exec);
-    KeyConverter tap_converter(miniscript::MiniscriptContext::TAPSCRIPT, /*tr_internal_key=*/XOnlyPubKey::NUMS_H.GetEvenCorrespondingCPubKey());
+    const auto internal_pubkey{g_testdata->pubkeys[g_testdata->pubkeys.size() - 1]};
+    KeyConverter tap_converter(miniscript::MiniscriptContext::TAPSCRIPT, /*tr_internal_key=*/internal_pubkey);
     Test(ms, hextapscript == "=" ? hexscript : hextapscript, mode, tap_converter, opslimit, stacklimit, max_tap_wit_size, stack_exec);
 }
 
@@ -728,6 +729,13 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     Test("thresh(2,ltv:after(1000000000),altv:after(100),a:pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65))", "?", "?", TESTMODE_VALID | TESTMODE_TIMELOCKMIX | TESTMODE_NONMAL); // thresh with k = 2
     // This is actually non-malleable in practice, but we cannot detect it in type system. See above rationale
     Test("thresh(1,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),altv:after(1000000000),altv:after(100))", "?", "?", TESTMODE_VALID); // thresh with k = 1
+
+    // OP_INTERNALKEY tests
+    Test("and_b(older(42),sc:pk_i())", "012ab27ccbac9a", "012ab27ccbac9a", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
+    Test("and_b(older(42),s:pki())", "012ab27ccbac9a", "012ab27ccbac9a", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
+    std::string ms_ik{"and_b(older(42),ac:or_i(pk_i(),pk_h("};
+    ms_ik += HexStr(g_testdata->pubkeys[21]) + ")))";
+    Test(ms_ik, "?", "?", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
 
     g_testdata.reset();
 }

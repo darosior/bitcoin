@@ -55,6 +55,8 @@ DESCS = [
     f"tr(4d54bb9928a0683b7e383de72943b214b0716f58aa54c7ba6bcea2328bc9c768,{{{{{P2WSH_MINISCRIPTS[0]},{P2WSH_MINISCRIPTS[1]}}},{P2WSH_MINISCRIPTS[2].replace('multi', 'multi_a')}}})",
     # A Taproot with all above scripts in its tree.
     f"tr(4d54bb9928a0683b7e383de72943b214b0716f58aa54c7ba6bcea2328bc9c768,{{{{{P2WSH_MINISCRIPTS[0]},{P2WSH_MINISCRIPTS[1]}}},{{{P2WSH_MINISCRIPTS[2].replace('multi', 'multi_a')},{P2WSH_MINISCRIPTS[3]}}}}})",
+    # A Taproot with an OP_INTERNALKEY in one of the leaves.
+    f"tr({TPUBS[0]}/*,{{thresh(2,pki(),a:multi_a(1,{TPUBS[1]}/*)),pk({TPUBS[2]})}})",
 ]
 
 DESCS_PRIV = [
