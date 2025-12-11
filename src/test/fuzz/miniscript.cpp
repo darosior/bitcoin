@@ -28,6 +28,9 @@ using miniscript::operator""_mst;
 struct TestData {
     typedef CPubKey Key;
 
+    // All our signatures sign (and are required to sign) this constant message. Also used as the template hash.
+    static constexpr uint256 MESSAGE_HASH{"0000000000000000f5cd94e18b6fe77dd7aca9e35c2b0c9cbd86356c80a71065"};
+
     // Precomputed public keys, and a dummy signature for each of them.
     std::vector<Key> dummy_keys;
     std::map<Key, int> dummy_key_idx_map;
@@ -48,8 +51,6 @@ struct TestData {
     //! Set the precomputed data.
     void Init() {
         unsigned char keydata[32] = {1};
-        // All our signatures sign (and are required to sign) this constant message.
-        constexpr uint256 MESSAGE_HASH{"0000000000000000f5cd94e18b6fe77dd7aca9e35c2b0c9cbd86356c80a71065"};
         // We don't pass additional randomness when creating a schnorr signature.
         const auto EMPTY_AUX{uint256::ZERO};
 
@@ -296,6 +297,10 @@ struct SatisfierContext : ParserContext {
     miniscript::Availability SatHASH160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const {
         return LookupHash(hash, preimage, TEST_DATA.hash160_preimages);
     }
+
+    bool CheckTemplateHash(const std::vector<unsigned char>& data) const {
+        return uint256{data} == TestData::MESSAGE_HASH;
+    }
 };
 
 //! Context to check a satisfaction against the pre-computed data.
@@ -318,6 +323,8 @@ const struct CheckerContext: BaseSignatureChecker {
     }
     bool CheckLockTime(const CScriptNum& nLockTime) const override { return nLockTime.GetInt64() & 1; }
     bool CheckSequence(const CScriptNum& nSequence) const override { return nSequence.GetInt64() & 1; }
+
+    uint256 GetTemplateHash(ScriptExecutionData&) const override { return TestData::MESSAGE_HASH; }
 } CHECKER_CTX;
 
 //! Context to check for duplicates when instancing a Node.
@@ -526,6 +533,12 @@ std::optional<NodeInfo> ConsumeNodeStable(MsCtx script_ctx, FuzzedDataProvider& 
             }
             return {{Fragment::PK_I, tr_internal_key.value()}};
         }
+        case 29: {
+            if (!allow_B || !IsTapscript(script_ctx)) return {};
+            // Sometimes make it unsatisfiable.
+            const auto data{provider.ConsumeBool() ? TestData::MESSAGE_HASH : uint256::ZERO};
+            return {{Fragment::TH, std::vector<uint8_t>{data.begin(), data.end()}}};
+        }
         default:
             break;
     }
@@ -605,7 +618,8 @@ struct SmartInfo
         auto requires_tapscript{[](const Fragment& frag) {
             switch (frag) {
                 case Fragment::MULTI_A:
-                case Fragment::PK_I: return true;
+                case Fragment::PK_I:
+                case Fragment::TH: return true;
                 default: return false;
             }
         }};
@@ -643,6 +657,7 @@ struct SmartInfo
                     break;
                 case Fragment::SHA256:
                 case Fragment::HASH256:
+                case Fragment::TH:
                     data_size = 32;
                     break;
                 case Fragment::RIPEMD160:
@@ -853,6 +868,11 @@ std::optional<NodeInfo> ConsumeNodeSmart(MsCtx script_ctx, FuzzedDataProvider& p
             return {{frag, PickValue(provider, TEST_DATA.ripemd160)}};
         case Fragment::HASH160:
             return {{frag, PickValue(provider, TEST_DATA.hash160)}};
+        case Fragment::TH: {
+            // Sometimes make it non-satisfiable.
+            const auto data{provider.ConsumeBool() ? TestData::MESSAGE_HASH : uint256::ZERO};
+            return {{frag, std::vector<uint8_t>{data.begin(), data.end()}}};
+        }
         case Fragment::JUST_0:
         case Fragment::JUST_1:
         case Fragment::WRAP_A:
@@ -943,6 +963,9 @@ NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, std::optional<C
             case Fragment::HASH160:
             case Fragment::HASH256:
                 ops += 4;
+                break;
+            case Fragment::TH:
+                ops += 2;
                 break;
             case Fragment::ANDOR:
                 ops += 3;
@@ -1236,6 +1259,8 @@ void TestNode(const MsCtx script_ctx, const NodeRef& node, std::optional<CPubKey
             return TEST_DATA.ripemd160_preimages.count(node.data);
         case Fragment::HASH160:
             return TEST_DATA.hash160_preimages.count(node.data);
+        case Fragment::TH:
+            return uint256{node.data} == TestData::MESSAGE_HASH;
         default:
             assert(false);
         }

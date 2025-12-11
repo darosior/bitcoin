@@ -112,6 +112,7 @@ enum class ChallengeType {
     RIPEMD160,
     HASH256,
     HASH160,
+    TEMPLATEHASH,
     OLDER,
     AFTER,
     PK
@@ -257,6 +258,10 @@ struct Satisfier : public KeyConverter {
     miniscript::Availability SatRIPEMD160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return SatHash(hash, preimage, ChallengeType::RIPEMD160); }
     miniscript::Availability SatHASH256(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return SatHash(hash, preimage, ChallengeType::HASH256); }
     miniscript::Availability SatHASH160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return SatHash(hash, preimage, ChallengeType::HASH160); }
+
+    bool CheckTemplateHash(const std::vector<unsigned char>& data) const {
+        return supported.count(Challenge(ChallengeType::TEMPLATEHASH, ChallengeNumber(data)));
+    }
 };
 
 /** Mocking signature/timelock checker.
@@ -321,6 +326,8 @@ std::set<Challenge> FindChallenges(const NodeRef& ref) {
         chal.emplace(ChallengeType::HASH256, ChallengeNumber(ref->data));
     } else if (ref->fragment == miniscript::Fragment::HASH160) {
         chal.emplace(ChallengeType::HASH160, ChallengeNumber(ref->data));
+    } else if (ref->fragment == miniscript::Fragment::TH) {
+        chal.emplace(ChallengeType::TEMPLATEHASH, ChallengeNumber(ref->data));
     }
     for (const auto& sub : ref->subs) {
         auto sub_chal = FindChallenges(sub);

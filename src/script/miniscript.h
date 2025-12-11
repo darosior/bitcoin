@@ -213,6 +213,7 @@ enum class Fragment {
     HASH256,   //!< OP_SIZE 32 OP_EQUALVERIFY OP_HASH256 [hash] OP_EQUAL
     RIPEMD160, //!< OP_SIZE 32 OP_EQUALVERIFY OP_RIPEMD160 [hash] OP_EQUAL
     HASH160,   //!< OP_SIZE 32 OP_EQUALVERIFY OP_HASH160 [hash] OP_EQUAL
+    TH,        //!< [hash] OP_TEMPLATEHASH OP_EQUAL
     WRAP_A,    //!< OP_TOALTSTACK [X] OP_FROMALTSTACK
     WRAP_S,    //!< OP_SWAP [X]
     WRAP_C,    //!< [X] OP_CHECKSIG
@@ -784,6 +785,7 @@ public:
                 case Fragment::RIPEMD160: return BuildScript(OP_SIZE, 32, OP_EQUALVERIFY, OP_RIPEMD160, node.data, verify ? OP_EQUALVERIFY : OP_EQUAL);
                 case Fragment::HASH256: return BuildScript(OP_SIZE, 32, OP_EQUALVERIFY, OP_HASH256, node.data, verify ? OP_EQUALVERIFY : OP_EQUAL);
                 case Fragment::HASH160: return BuildScript(OP_SIZE, 32, OP_EQUALVERIFY, OP_HASH160, node.data, verify ? OP_EQUALVERIFY : OP_EQUAL);
+                case Fragment::TH: return BuildScript(node.data, OP_TEMPLATEHASH, verify ? OP_EQUALVERIFY : OP_EQUAL);
                 case Fragment::WRAP_A: return BuildScript(OP_TOALTSTACK, subs[0], OP_FROMALTSTACK);
                 case Fragment::WRAP_S: return BuildScript(OP_SWAP, subs[0]);
                 case Fragment::WRAP_C: return BuildScript(std::move(subs[0]), verify ? OP_CHECKSIGVERIFY : OP_CHECKSIG);
@@ -910,6 +912,7 @@ public:
                 case Fragment::HASH256: return std::move(ret) + "hash256(" + HexStr(node.data) + ")";
                 case Fragment::HASH160: return std::move(ret) + "hash160(" + HexStr(node.data) + ")";
                 case Fragment::SHA256: return std::move(ret) + "sha256(" + HexStr(node.data) + ")";
+                case Fragment::TH: return std::move(ret) + "th(" + HexStr(node.data) + ")";
                 case Fragment::RIPEMD160: return std::move(ret) + "ripemd160(" + HexStr(node.data) + ")";
                 case Fragment::JUST_1: return std::move(ret) + "1";
                 case Fragment::JUST_0: return std::move(ret) + "0";
@@ -972,6 +975,7 @@ private:
             case Fragment::RIPEMD160:
             case Fragment::HASH256:
             case Fragment::HASH160: return {4, 0, {}};
+            case Fragment::TH: return {2, 0, {}};
             case Fragment::AND_V: return {subs[0]->ops.count + subs[1]->ops.count, subs[0]->ops.sat + subs[1]->ops.sat, {}};
             case Fragment::AND_B: {
                 const auto count{1 + subs[0]->ops.count + subs[1]->ops.count};
@@ -1051,6 +1055,8 @@ private:
                 SatInfo::OP_SIZE() + SatInfo::Push() + SatInfo::OP_EQUALVERIFY() + SatInfo::Hash() + SatInfo::Push() + SatInfo::OP_EQUAL(),
                 {}
             };
+            // Push the provided hash, push the actual template hash, then op_equal
+            case Fragment::TH: return SatInfo::Push() + SatInfo::Push() + SatInfo::OP_EQUAL();
             case Fragment::ANDOR: {
                 const auto& x{subs[0]->ss};
                 const auto& y{subs[1]->ss};
@@ -1165,6 +1171,7 @@ private:
             case Fragment::RIPEMD160:
             case Fragment::HASH256:
             case Fragment::HASH160: return {1 + 32, {}};
+            case Fragment::TH: return {0, 0};
             case Fragment::ANDOR: {
                 const auto sat{(subs[0]->ws.sat + subs[1]->ws.sat) | (subs[0]->ws.dsat + subs[2]->ws.sat)};
                 const auto dsat{subs[0]->ws.dsat + subs[2]->ws.dsat};
@@ -1337,6 +1344,13 @@ private:
                     std::vector<unsigned char> preimage;
                     Availability avail = ctx.SatHASH160(node.data, preimage);
                     return {ZERO32, InputStack(std::move(preimage)).SetAvailable(avail)};
+                }
+                case Fragment::TH: {
+                    if (ctx.CheckTemplateHash(node.data)) {
+                        return {INVALID, InputStack{}.SetWithSig()};
+                    } else {
+                        return {EMPTY, INVALID};
+                    }
                 }
                 case Fragment::AND_V: {
                     auto& x = subres[0], &y = subres[1];
@@ -1614,6 +1628,7 @@ public:
                 case Fragment::HASH160:
                 case Fragment::SHA256:
                 case Fragment::RIPEMD160:
+                case Fragment::TH:
                     return bool{fn(node)};
                 case Fragment::ANDOR:
                     return (subs[0] && subs[1]) || subs[2];
@@ -2009,6 +2024,14 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::HASH160, std::move(hash)));
                 in = in.subspan(hash_size + 1);
                 script_size += 26;
+            } else if (Const("th(", in)) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                auto res = ParseHexStrEnd(in, 32, ctx);
+                if (!res) return {};
+                auto& [thash, thash_size] = *res;
+                constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::TH, std::move(thash)));
+                in = in.subspan(thash_size + 1);
+                script_size += 32 + 2;
             } else if (Const("after(", in)) {
                 int arg_size = FindNextChar(in, ')');
                 if (arg_size < 1) return {};
@@ -2371,6 +2394,12 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                     in += 7;
                     break;
                 }
+            }
+            if (last - in >= 2 && in[0].first == OP_EQUAL && in[1].first == OP_TEMPLATEHASH) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::TH, in[2].second));
+                in += 3;
+                break;
             }
             // Multi
             if (last - in >= 3 && in[0].first == OP_CHECKMULTISIG) {

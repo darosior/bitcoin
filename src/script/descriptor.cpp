@@ -2132,16 +2132,16 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 }
                 return {};
             }
-            // A signature check is required for a miniscript to be sane. Therefore no sane miniscript
-            // may have an empty list of public keys.
-            CHECK_NONFATAL(!parser.m_keys.empty());
+            // A signature check is required for a miniscript to be sane. But a templatehash check
+            // is considered one, so the descriptor may have an empty list of keys.
             key_exp_index += parser.m_keys.size();
             // Make sure all vecs are of the same length, or exactly length 1
             // For length 1 vectors, clone subdescs until vector is the same length
-            size_t num_multipath = std::max_element(parser.m_keys.begin(), parser.m_keys.end(),
+            auto max_elem{std::max_element(parser.m_keys.begin(), parser.m_keys.end(),
                     [](const std::vector<std::unique_ptr<PubkeyProvider>>& a, const std::vector<std::unique_ptr<PubkeyProvider>>& b) {
                         return a.size() < b.size();
-                    })->size();
+                    })};
+            const size_t num_multipath{!parser.m_keys.empty() ? max_elem->size() : 1};
 
             for (auto& vec : parser.m_keys) {
                 if (vec.size() == 1) {
