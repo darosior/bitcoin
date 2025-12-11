@@ -39,7 +39,7 @@ Type SanitizeType(Type e) {
 Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Type>& sub_types, uint32_t k,
                  size_t data_size, size_t n_subs, size_t n_keys, MiniscriptContext ms_ctx) {
     // Sanity check on data
-    if (fragment == Fragment::SHA256 || fragment == Fragment::HASH256) {
+    if (fragment == Fragment::SHA256 || fragment == Fragment::HASH256 || fragment == Fragment::TH) {
         assert(data_size == 32);
     } else if (fragment == Fragment::RIPEMD160 || fragment == Fragment::HASH160) {
         assert(data_size == 20);
@@ -101,6 +101,7 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
         case Fragment::RIPEMD160: return "Bonudmk"_mst;
         case Fragment::HASH256: return "Bonudmk"_mst;
         case Fragment::HASH160: return "Bonudmk"_mst;
+        case Fragment::TH: return "Bzutkm"_mst;
         case Fragment::JUST_1: return "Bzufmxk"_mst;
         case Fragment::JUST_0: return "Bzudemstxk"_mst;
         case Fragment::WRAP_A: return
@@ -280,6 +281,7 @@ size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_
         case Fragment::SHA256: return 4 + 2 + 33;
         case Fragment::HASH160:
         case Fragment::RIPEMD160: return 4 + 2 + 21;
+        case Fragment::TH: return 33 + 2;
         case Fragment::MULTI: return 1 + BuildScript(n_keys).size() + BuildScript(k).size() + 34 * n_keys;
         case Fragment::MULTI_A: return (1 + 32 + 1) * n_keys + BuildScript(k).size() + 1;
         case Fragment::AND_V: return subsize;

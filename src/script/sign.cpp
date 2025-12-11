@@ -248,6 +248,19 @@ struct Satisfier {
         return MsLookupHelper(m_sig_data.hash160_preimages, hash, preimage);
     }
 
+    //! Get the template hash of the spending transaction. Like in regular signing, we only support annex-less for now.
+    uint256 GetTemplateHash() const {
+        ScriptExecutionData exec_data;
+        exec_data.m_annex_init = true;
+        exec_data.m_annex_present = false;
+        return m_creator.Checker().GetTemplateHash(exec_data);
+    }
+
+    //! Template hash satisfaction.
+    bool CheckTemplateHash(const std::vector<unsigned char>& hash) const {
+        return std::ranges::equal(hash, GetTemplateHash());
+    }
+
     miniscript::MiniscriptContext MsContext() const {
         return m_script_ctx;
     }
