@@ -190,10 +190,6 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
         return true; // Coinbases don't use vin normally
     }
 
-    if (!Consensus::CheckSigopsBIP54(tx, mapInputs)) {
-        return false;
-    }
-
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CTxOut& prev = mapInputs.AccessCoin(tx.vin[i].prevout).out;
 

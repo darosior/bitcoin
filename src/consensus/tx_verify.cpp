@@ -161,6 +161,9 @@ int64_t GetTransactionSigOpCost(const CTransaction& tx, const CCoinsViewCache& i
     return nSigOps;
 }
 
+/**
+ * Check the total number of non-witness sigops across the whole transaction, as per BIP54.
+ */
 bool Consensus::CheckSigopsBIP54(const CTransaction& tx, const CCoinsViewCache& inputs)
 {
     Assert(!tx.IsCoinBase());
@@ -187,12 +190,16 @@ bool Consensus::CheckSigopsBIP54(const CTransaction& tx, const CCoinsViewCache& 
     return true;
 }
 
-bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee)
+bool Consensus::CheckTxInputs(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, int nSpendHeight, CAmount& txfee, bool bip54_active)
 {
     // are the actual inputs available?
     if (!inputs.HaveInputs(tx)) {
         return state.Invalid(TxValidationResult::TX_MISSING_INPUTS, "bad-txns-inputs-missingorspent",
                          strprintf("%s: inputs missing/spent", __func__));
+    }
+
+    if (bip54_active && !Consensus::CheckSigopsBIP54(tx, inputs)) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-legacy-sigops", "too many legacy sigops (BIP54)");
     }
 
     CAmount nValueIn = 0;
