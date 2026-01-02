@@ -2402,7 +2402,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                     break;
                 }
             }
-            if (last - in >= 2 && in[0].first == OP_EQUAL && in[1].first == OP_TEMPLATEHASH) {
+            if (last - in >= 3 && in[0].first == OP_EQUAL && in[1].first == OP_TEMPLATEHASH && in[2].second.size() == 32) {
                 if (!IsTapscript(ctx.MsContext())) return {};
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::TH, in[2].second));
                 in += 3;

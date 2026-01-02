@@ -57,6 +57,8 @@ DESCS = [
     f"tr(4d54bb9928a0683b7e383de72943b214b0716f58aa54c7ba6bcea2328bc9c768,{{{{{P2WSH_MINISCRIPTS[0]},{P2WSH_MINISCRIPTS[1]}}},{{{P2WSH_MINISCRIPTS[2].replace('multi', 'multi_a')},{P2WSH_MINISCRIPTS[3]}}}}})",
     # A Taproot with an OP_INTERNALKEY in one of the leaves.
     f"tr({TPUBS[0]}/*,{{thresh(2,pki(),a:multi_a(1,{TPUBS[1]}/*)),pk({TPUBS[2]})}})",
+    # A Taproot with a leaf that may only be spent by a specific transaction.
+    f"tr({TPUBS[0]}/*,th(54ab1fa5f9ea585d0f9674163276bbbde113a9f3328034977a3b3170cc3a9234))",
 ]
 
 DESCS_PRIV = [
