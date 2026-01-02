@@ -1072,7 +1072,7 @@ BOOST_AUTO_TEST_CASE(descriptor_test)
     // Infer pk() from p2pk with uncompressed key
     CheckInferDescriptor("4104032540df1d3c7070a8ab3a9cdd304dfc7fd1e6541369c53c4c3310b2537d91059afc8b8e7673eb812a32978dabb78c40f2e423f7757dca61d11838c7aeeb5220ac", "pk(04032540df1d3c7070a8ab3a9cdd304dfc7fd1e6541369c53c4c3310b2537d91059afc8b8e7673eb812a32978dabb78c40f2e423f7757dca61d11838c7aeeb5220)", {}, {{"04032540df1d3c7070a8ab3a9cdd304dfc7fd1e6541369c53c4c3310b2537d91059afc8b8e7673eb812a32978dabb78c40f2e423f7757dca61d11838c7aeeb5220", ""}});
 
-    // OP_INTERNALKEY tests
+    // OP_INTERNALKEY, OP_TEMPLATEHASH tests
     CheckMultipath("tr(xprv9yYge4PS54XkYT9KiLfCRwc8Jeuz8DucxQGtuEecJZYhKNiqbPxYHTPzXtskmzWBqdqkRAGsghNmZzNsfU2wstaB3XjDQFPv567aQSSuPyo/<2;3>/*,l:pki())",
             "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/<2;3>/*,l:pki())",
             {
@@ -1098,6 +1098,7 @@ BOOST_AUTO_TEST_CASE(descriptor_test)
                 {{3, 0}, {3, 1}},
             }
     );
+    Check("tr(xprv9yYge4PS54XkYT9KiLfCRwc8Jeuz8DucxQGtuEecJZYhKNiqbPxYHTPzXtskmzWBqdqkRAGsghNmZzNsfU2wstaB3XjDQFPv567aQSSuPyo/0/*,th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937))", "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/0/*,th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937))", "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/0/*,th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937))", XONLY_KEYS | RANGE, {{"5120956b3dd16b658f45078c68f8b79713d76a8872deaf75dd482d52a5a13818552a"}}, OutputType::BECH32M, /*op_desc_id=*/{}, {{0, 0}});
 }
 
 BOOST_AUTO_TEST_SUITE_END()

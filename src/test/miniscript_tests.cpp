@@ -29,6 +29,9 @@ namespace {
 
 /** TestData groups various kinds of precomputed data necessary in this test. */
 struct TestData {
+    // All our signatures sign (and are required to sign) this constant message. Also used as the template hash.
+    static constexpr uint256 MESSAGE_HASH{"0000000000000000f5cd94e18b6fe77dd7aca9e35c2b0c9cbd86356c80a71065"};
+
     //! The only public keys used in this test.
     std::vector<CPubKey> pubkeys;
     //! A map from the public keys to their CKeyIDs (faster than hashing every time).
@@ -50,8 +53,6 @@ struct TestData {
 
     TestData()
     {
-        // All our signatures sign (and are required to sign) this constant message.
-        constexpr uint256 MESSAGE_HASH{"0000000000000000f5cd94e18b6fe77dd7aca9e35c2b0c9cbd86356c80a71065"};
         // We don't pass additional randomness when creating a schnorr signature.
         const auto EMPTY_AUX{uint256::ZERO};
 
@@ -202,6 +203,10 @@ struct KeyConverter {
     Key GetInternalPK() const {
         return m_tr_internal_key;
     }
+
+    uint256 GetTemplateHash(ScriptExecutionData&) const {
+        return TestData::MESSAGE_HASH;
+    }
 };
 
 /** A class that encapsulates all signing/hash revealing operations. */
@@ -260,7 +265,7 @@ struct Satisfier : public KeyConverter {
     miniscript::Availability SatHASH160(const std::vector<unsigned char>& hash, std::vector<unsigned char>& preimage) const { return SatHash(hash, preimage, ChallengeType::HASH160); }
 
     bool CheckTemplateHash(const std::vector<unsigned char>& data) const {
-        return supported.count(Challenge(ChallengeType::TEMPLATEHASH, ChallengeNumber(data)));
+        return supported.count(Challenge(ChallengeType::TEMPLATEHASH, ChallengeNumber(data))) && uint256{data} == TestData::MESSAGE_HASH;
     }
 };
 
@@ -299,6 +304,10 @@ public:
     bool CheckSequence(const CScriptNum& sequence) const override {
         // Delegate to Satisfier.
         return ctx.CheckOlder(sequence.GetInt64());
+    }
+
+    uint256 GetTemplateHash(ScriptExecutionData&) const override {
+        return TestData::MESSAGE_HASH;
     }
 };
 
@@ -437,7 +446,12 @@ void TestSatisfy(const KeyConverter& converter, const std::string& testcase, con
             prev_nonmal_success = nonmal_success;
         }
 
-        bool satisfiable = node->IsSatisfiable([](const Node&) { return true; });
+        bool satisfiable = node->IsSatisfiable([](const Node& node) {
+            if (node.fragment == Fragment::TH && uint256{node.data} != TestData::MESSAGE_HASH) {
+                return false;
+            }
+            return true;
+        });
         // If the miniscript was satisfiable at all, a satisfaction must be found after all conditions are added.
         BOOST_CHECK_EQUAL(prev_mal_success, satisfiable);
         // If the miniscript is sane and satisfiable, a nonmalleable satisfaction must eventually be found.
@@ -737,12 +751,17 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     // This is actually non-malleable in practice, but we cannot detect it in type system. See above rationale
     Test("thresh(1,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),altv:after(1000000000),altv:after(100))", "?", "?", TESTMODE_VALID); // thresh with k = 1
 
-    // OP_INTERNALKEY tests
+    // OP_INTERNALKEY, OP_TEMPLATEHASH tests
     Test("and_b(older(42),sc:pk_i())", "012ab27ccbac9a", "012ab27ccbac9a", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
     Test("and_b(older(42),s:pki())", "012ab27ccbac9a", "012ab27ccbac9a", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
     std::string ms_ik{"and_b(older(42),ac:or_i(pk_i(),pk_h("};
     ms_ik += HexStr(g_testdata->pubkeys[21]) + ")))";
     Test(ms_ik, "?", "?", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
+    Test("th(8bbd5b2f0852f2b4d3844bbec1628821c3ea6eeb117ded96558b48e36b27e45d)", "208bbd5b2f0852f2b4d3844bbec1628821c3ea6eeb117ded96558b48e36b27e45dbb87", "208bbd5b2f0852f2b4d3844bbec1628821c3ea6eeb117ded96558b48e36b27e45dbb87", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
+    Test("or_i(pk(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),and_v(v:th(d180e2ecc3e5a2360a5569c1ace901550b9bc6939b96ffa0f1403db8581e56f1),pk(037c04d6fdc6920f2f278f6d479f64f765c0e0421e9d4233325c0ce7e7253088ee)))", "?", "?", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
+    std::string ms_th{"and_b(older(42),a:th("};
+    ms_th += HexStr(TestData::MESSAGE_HASH) + "))";
+    Test(ms_th, "?", "?", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
 
     g_testdata.reset();
 }
