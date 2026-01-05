@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include <iostream> // FIXME
+
 #include <consensus/consensus.h>
 #include <policy/policy.h>
 #include <script/interpreter.h>
@@ -1889,6 +1891,7 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
     };
 
     while (!to_parse.empty()) {
+        //std::cout << "Remaining " << std::string{in.begin(), in.end()} << std::endl;
         if (script_size > max_size) return {};
 
         // Get the current context we are decoding within

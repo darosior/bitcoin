@@ -14,6 +14,8 @@
 #include <tinyformat.h>
 #include <uint256.h>
 
+#include <core_io.h> // FIXME
+
 typedef std::vector<unsigned char> valtype;
 
 namespace {
@@ -499,6 +501,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
     execdata.m_codeseparator_pos = 0xFFFFFFFFUL;
     execdata.m_codeseparator_pos_init = true;
 
+    //std::cout << "Executing " << ScriptToAsmStr(script) << std::endl;
     try
     {
         for (; pc < pend; ++opcode_pos) {
@@ -511,6 +514,11 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             if (vchPushValue.size() > MAX_SCRIPT_ELEMENT_SIZE)
                 return set_error(serror, SCRIPT_ERR_PUSH_SIZE);
+
+            /*std::cout << "Executing " << GetOpName(opcode) << ". Stack before:" << std::endl;
+            for (const auto& elem: stack) {
+                std::cout << "  " << HexStr(elem) << std::endl;
+            }*/
 
             if (sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0) {
                 // Note how OP_RESERVED does not count towards the opcode limit.
@@ -1394,6 +1402,11 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
+
+            /*std::cout << "Stack:" << std::endl;
+            for (const auto& elem: stack) {
+                std::cout << "  " << HexStr(elem) << std::endl;
+            }*/
 
             // Size limits
             if (stack.size() + altstack.size() > MAX_STACK_SIZE)
