@@ -224,6 +224,7 @@ enum class Fragment {
     WRAP_V,    //!< [X] OP_VERIFY (or -VERIFY version of last opcode in X)
     WRAP_J,    //!< OP_SIZE OP_0NOTEQUAL OP_IF [X] OP_ENDIF
     WRAP_N,    //!< [X] OP_0NOTEQUAL
+    CMS,       //!< [X] <m> OP_SWAP OP_CHECKSIGVERIFY
     AND_V,     //!< [X] [Y]
     AND_B,     //!< [X] [Y] OP_BOOLAND
     OR_B,      //!< [X] [Y] OP_BOOLOR
@@ -306,7 +307,7 @@ constexpr uint32_t MaxScriptSize(MiniscriptContext ms_ctx)
 Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Type>& sub_types, uint32_t k, size_t data_size, size_t n_subs, size_t n_keys, MiniscriptContext ms_ctx);
 
 //! Helper function for Node::CalcScriptLen.
-size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_t k, size_t n_subs, size_t n_keys, MiniscriptContext ms_ctx);
+size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_t k, size_t n_subs, size_t n_keys, MiniscriptContext ms_ctx, const std::vector<unsigned char>& data);
 
 //! A helper sanitizer/checker for the output of CalcType.
 Type SanitizeType(Type x);
@@ -496,6 +497,7 @@ struct SatInfo {
     static constexpr SatInfo OP_EQUAL() noexcept { return {1, 1}; }
     static constexpr SatInfo OP_SIZE() noexcept { return {-1, 0}; }
     static constexpr SatInfo OP_CHECKSIG() noexcept { return {1, 1}; }
+    static constexpr SatInfo OP_CSFS() noexcept { return {2, 2}; }
     static constexpr SatInfo OP_0NOTEQUAL() noexcept { return {0, 0}; }
     static constexpr SatInfo OP_VERIFY() noexcept { return {1, 1}; }
 };
@@ -595,7 +597,7 @@ private:
         }
         static constexpr auto NONE_MST{""_mst};
         Type sub0type = subs.size() > 0 ? subs[0]->GetType() : NONE_MST;
-        return internal::ComputeScriptLen(fragment, sub0type, subsize, k, subs.size(), keys.size(), m_script_ctx);
+        return internal::ComputeScriptLen(fragment, sub0type, subsize, k, subs.size(), keys.size(), m_script_ctx, data);
     }
 
     /* Apply a recursive algorithm to a Miniscript tree, without actual recursive calls.
@@ -813,6 +815,10 @@ public:
                 }
                 case Fragment::WRAP_J: return BuildScript(OP_SIZE, OP_0NOTEQUAL, OP_IF, subs[0], OP_ENDIF);
                 case Fragment::WRAP_N: return BuildScript(std::move(subs[0]), OP_0NOTEQUAL);
+                case Fragment::CMS: {
+                    CHECK_NONFATAL(is_tapscript);
+                    return BuildScript(std::move(subs[0]), node.data, OP_SWAP, OP_CHECKSIGFROMSTACK);
+                }
                 case Fragment::JUST_1: return BuildScript(OP_1);
                 case Fragment::JUST_0: return BuildScript(OP_0);
                 case Fragment::AND_V: return BuildScript(std::move(subs[0]), subs[1]);
@@ -930,6 +936,10 @@ public:
                 case Fragment::RIPEMD160: return std::move(ret) + "ripemd160(" + HexStr(node.data) + ")";
                 case Fragment::JUST_1: return std::move(ret) + "1";
                 case Fragment::JUST_0: return std::move(ret) + "0";
+                case Fragment::CMS: {
+                    CHECK_NONFATAL(is_tapscript);
+                    return std::move(ret) + "cms(" + std::move(subs[0]) + "," + HexStr(node.data) + ")";
+                }
                 case Fragment::AND_V: return std::move(ret) + "and_v(" + std::move(subs[0]) + "," + std::move(subs[1]) + ")";
                 case Fragment::AND_B: return std::move(ret) + "and_b(" + std::move(subs[0]) + "," + std::move(subs[1]) + ")";
                 case Fragment::OR_B: return std::move(ret) + "or_b(" + std::move(subs[0]) + "," + std::move(subs[1]) + ")";
@@ -1035,6 +1045,7 @@ private:
             case Fragment::WRAP_D: return {3 + subs[0]->ops.count, subs[0]->ops.sat, 0};
             case Fragment::WRAP_J: return {4 + subs[0]->ops.count, subs[0]->ops.sat, 0};
             case Fragment::WRAP_V: return {subs[0]->ops.count + (subs[0]->GetType() << "x"_mst), subs[0]->ops.sat, {}};
+            case Fragment::CMS: return {2 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
             case Fragment::THRESH: {
                 uint32_t count = 0;
                 auto sats = Vector(internal::MaxInt<uint32_t>(0));
@@ -1141,6 +1152,11 @@ private:
                 SatInfo::OP_SIZE() + SatInfo::OP_0NOTEQUAL() + SatInfo::If() + subs[0]->ss.sat,
                 SatInfo::OP_SIZE() + SatInfo::OP_0NOTEQUAL() + SatInfo::If()
             };
+            case Fragment::CMS: return {
+                // message + CSFS
+                subs[0]->ss.sat + SatInfo::Push() + SatInfo::OP_CSFS(),
+                subs[0]->ss.dsat + SatInfo::Push() + SatInfo::OP_CSFS(),
+            };
             case Fragment::THRESH: {
                 // sats[j] is the SatInfo corresponding to all traces reaching j satisfactions.
                 auto sats = Vector(SatInfo::Empty());
@@ -1210,6 +1226,10 @@ private:
             case Fragment::WRAP_D: return {1 + 1 + subs[0]->ws.sat, 1};
             case Fragment::WRAP_V: return {subs[0]->ws.sat, {}};
             case Fragment::WRAP_J: return {subs[0]->ws.sat, 1};
+            case Fragment::CMS: return {
+                subs[0]->ws.sat + sig_size,
+                subs[0]->ws.dsat + 1,
+            };
             case Fragment::THRESH: {
                 auto sats = Vector(internal::MaxInt<uint32_t>(0));
                 for (const auto& sub : subs) {
@@ -1234,6 +1254,8 @@ private:
         auto downfn = [](SigMsgType sig_type, const Node& node, size_t child_index) -> SigMsgType {
             if (node.fragment == Fragment::WRAP_C) {
                 return TxSig{};
+            } else if (node.fragment == Fragment::CMS) {
+                return CustomSig{.msg = std::span<const uint8_t>{node.data}};
             }
             return sig_type;
         };
@@ -1417,6 +1439,7 @@ private:
                     auto& x = subres[0], &y = subres[1], &z = subres[2];
                     return {(y.nsat + x.sat).SetNonCanon() | (z.nsat + x.nsat), (y.sat + x.sat) | (z.sat + x.nsat)};
                 }
+                case Fragment::CMS:
                 case Fragment::WRAP_A:
                 case Fragment::WRAP_S:
                 case Fragment::WRAP_C:
@@ -1796,6 +1819,9 @@ enum class ParseContext {
     /** OR_I will construct an or_i node from the last two constructed nodes. */
     OR_I,
 
+    /** CMS will construct a cms(X, m) from the last constructed node and a given message. */
+    CMS,
+
     /** THRESH will read a wrapped expression, and then look for a COMMA. If
      * no comma follows, it will construct a thresh node from the appropriate
      * number of constructed children. Otherwise, it will recurse with another
@@ -1834,6 +1860,9 @@ std::optional<std::pair<std::vector<unsigned char>, int>> ParseHexStrEnd(Span<co
     if (hash.size() != expected_size) return {};
     return {{std::move(hash), hash_size}};
 }
+
+/** Parse an arbitrarily-sized hex string ending at the end of the fragment's text representation. */
+std::optional<std::pair<std::vector<unsigned char>, int>> ParseArbHexStrEnd(Span<const char> in);
 
 /** BuildBack pops the last two elements off `constructed` and wraps them in the specified Fragment */
 template<typename Key>
@@ -2074,6 +2103,12 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::OLDER, *num));
                 in = in.subspan(arg_size + 1);
                 script_size += 1 + (*num > 16) + (*num > 0x7f) + (*num > 0x7fff) + (*num > 0x7fffff);
+            } else if (Const("cms(", in)) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                to_parse.emplace_back(ParseContext::CMS, -1, -1);
+                to_parse.emplace_back(ParseContext::COMMA, -1, -1);
+                to_parse.emplace_back(ParseContext::WRAPPED_EXPR, -1, -1);
+                // Script size is accounted for after parsing the message in ParseContext::CMS.
             } else if (Const("multi(", in)) {
                 if (!parse_multi_exp(in, /* is_multi_a = */false)) return {};
             } else if (Const("multi_a(", in)) {
@@ -2127,6 +2162,15 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                 to_parse.emplace_back(ParseContext::COMMA, -1, -1);
                 to_parse.emplace_back(ParseContext::WRAPPED_EXPR, -1, -1);
             }
+            break;
+        }
+        case ParseContext::CMS: {
+            auto res = ParseArbHexStrEnd(in);
+            if (!res) return {};
+            auto& [msg, msg_size] = *res;
+            in = in.subspan(msg_size + 1);
+            script_size += BuildScript(msg).size() + 2;
+            constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::CMS, Vector(std::move(constructed.back())), std::move(msg));
             break;
         }
         case ParseContext::ALT: {
@@ -2290,6 +2334,10 @@ enum class DecodeContext {
     /** ZERO_NOTEQUAL wraps the top constructed node with n: */
     ZERO_NOTEQUAL,
 
+    /** Wraps the top of the constructed stack with a CHECKSIGFROMSTACK against
+     * a previously-read message. */
+    CHECK_MSG,
+
     /** MAYBE_AND_V will check if the next part of the script could be a valid
      * miniscript sub-expression, and if so it will push AND_V and SINGLE_BKV_EXPR
      * to decode it and construct the and_v node. This is recursive, to deal with
@@ -2330,12 +2378,26 @@ enum class DecodeContext {
     ENDIF_ELSE,
 };
 
+struct DecodeCtx {
+    DecodeContext ctx;
+    int64_t thresh_n;
+    int64_t thresh_k;
+    std::optional<std::vector<unsigned char>> cms_msg;
+
+    DecodeCtx(DecodeContext ctx_, int64_t n, int64_t k):
+        ctx{ctx_}, thresh_n{n}, thresh_k{k}, cms_msg{std::nullopt} {}
+    DecodeCtx(DecodeContext ctx_, std::vector<unsigned char> msg):
+        ctx{ctx_}, thresh_n{-1}, thresh_k{-1}, cms_msg{std::move(msg)} {}
+    DecodeCtx(DecodeContext ctx_):
+        ctx{ctx_}, thresh_n{-1}, thresh_k{-1}, cms_msg{std::nullopt} {}
+};
+
 //! Parse a miniscript from a bitcoin script
 template<typename Key, typename Ctx, typename I>
 inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
 {
     // The two integers are used to hold state for thresh()
-    std::vector<std::tuple<DecodeContext, int64_t, int64_t>> to_parse;
+    std::vector<DecodeCtx> to_parse;
     std::vector<NodeRef<Key>> constructed;
 
     // This is the top level, so we assume the type is B
@@ -2347,7 +2409,11 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
         if (!constructed.empty() && !constructed.back()->IsValid()) return {};
 
         // Get the current context we are decoding within
-        auto [cur_context, n, k] = to_parse.back();
+        const auto &context = to_parse.back();
+        DecodeContext cur_context = context.ctx;
+        int64_t n = context.thresh_n;
+        int64_t k = context.thresh_k;
+        std::optional<std::vector<unsigned char>> cms_msg = std::move(context.cms_msg);
         to_parse.pop_back();
 
         switch(cur_context) {
@@ -2421,7 +2487,7 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                     break;
                 }
             }
-            if (last - in >= 2 && in[0].first == OP_EQUAL && in[1].first == OP_TEMPLATEHASH) {
+            if (last - in >= 3 && in[0].first == OP_EQUAL && in[1].first == OP_TEMPLATEHASH) {
                 if (!IsTapscript(ctx.MsContext())) return {};
                 constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::TH, in[2].second));
                 in += 3;
@@ -2499,6 +2565,19 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 ++in;
                 to_parse.emplace_back(DecodeContext::ZERO_NOTEQUAL, -1, -1);
                 to_parse.emplace_back(DecodeContext::SINGLE_BKV_EXPR, -1, -1);
+                break;
+            }
+            /** The cms(X,message) commutes with and_v() in the same way the c:X wrapper
+             * above does. Parsing and_v() as the "outer" fragment is preferable as the
+             * opposite can lead to parsing some scripts as invalid Miniscripts. For instance
+             * "1 VERIFY <pk> <message> SWAP CSFS NOTIF 1 ELSE 1 ENDIF" would otherwise be
+             * parsed as the invalid `andor(cms(and_v(v:1,pk(X)),message),1,1)` instead of
+             * the valid `and_v(v:1,andor(cms(pk(X),message),1,1))`. */
+            if (last - in >= 3 && in[0].first == OP_CHECKSIGFROMSTACK && in[1].first == OP_SWAP) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                to_parse.emplace_back(DecodeContext::CHECK_MSG, in[2].second);
+                to_parse.emplace_back(DecodeContext::SINGLE_BKV_EXPR);
+                in += 3;
                 break;
             }
             // Thresh
@@ -2581,6 +2660,12 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
         case DecodeContext::CHECK: {
             if (constructed.empty()) return {};
             constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_C, Vector(std::move(constructed.back())));
+            break;
+        }
+        case DecodeContext::CHECK_MSG: {
+            if (constructed.empty()) return {};
+            CHECK_NONFATAL(cms_msg.has_value());
+            constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::CMS, Vector(std::move(constructed.back())), std::move(cms_msg.value()));
             break;
         }
         case DecodeContext::DUP_IF: {
