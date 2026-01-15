@@ -224,7 +224,8 @@ struct Satisfier : public KeyConverter {
     }
 
     //! Produce a signature for the given key.
-    miniscript::Availability Sign(const CPubKey& key, std::vector<unsigned char>& sig) const {
+    miniscript::Availability Sign(const CPubKey& key, const miniscript::SigMsgType& sig_type, std::vector<unsigned char>& sig) const {
+        Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
         if (supported.count(Challenge(ChallengeType::PK, ChallengeNumber(key)))) {
             if (!miniscript::IsTapscript(m_script_ctx)) {
                 auto it = g_testdata->signatures.find(key);

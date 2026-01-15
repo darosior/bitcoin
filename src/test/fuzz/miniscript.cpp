@@ -268,7 +268,8 @@ struct SatisfierContext : ParserContext {
     bool CheckOlder(uint32_t value) const { return value % 2; }
 
     // Signature challenges fulfilled with a dummy signature, if it was one of our dummy keys.
-    miniscript::Availability Sign(const CPubKey& key, std::vector<unsigned char>& sig) const {
+    miniscript::Availability Sign(const CPubKey& key, const miniscript::SigMsgType& sig_type, std::vector<unsigned char>& sig) const {
+        Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
         bool sig_available{false};
         if (auto res = TEST_DATA.GetSig(script_ctx, key)) {
             std::tie(sig, sig_available) = *res;
