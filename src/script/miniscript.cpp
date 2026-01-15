@@ -43,7 +43,7 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
         assert(data_size == 32);
     } else if (fragment == Fragment::RIPEMD160 || fragment == Fragment::HASH160) {
         assert(data_size == 20);
-    } else {
+    } else if (fragment != Fragment::CMS) {
         assert(data_size == 0);
     }
     // Sanity check on k
@@ -64,7 +64,7 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
         assert(n_subs == 3);
     } else if (fragment == Fragment::WRAP_A || fragment == Fragment::WRAP_S || fragment == Fragment::WRAP_C ||
                fragment == Fragment::WRAP_D || fragment == Fragment::WRAP_V || fragment == Fragment::WRAP_J ||
-               fragment == Fragment::WRAP_N) {
+               fragment == Fragment::WRAP_N || fragment == Fragment::CMS) {
         assert(n_subs == 1);
     } else if (fragment != Fragment::THRESH) {
         assert(n_subs == 0);
@@ -142,6 +142,11 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
             (x & "ghijk"_mst) | // g=g_x, h=h_x, i=i_x, j=j_x, k=k_x
             (x & "Bzondfemst"_mst) | // B=B_x, z=z_x, o=o_x, n=n_x, d=d_x, f=f_x, e=e_x, m=m_x, s=s_x, t=t_x
             "ux"_mst; // u, x
+        case Fragment::CMS: return
+            "B"_mst.If(x << "K"_mst) | // B=K_x
+            (x & "ghijk"_mst) | // g=g_x, h=h_x, i=i_x, j=j_x, k=k_x
+            (x & "tsondfem"_mst) | // t=t_x, s=s_x, o=o_x, n=n_x, d=d_x, f=f_x, e=e_x, m=m_x
+            "usx"_mst; // u, s, x
         case Fragment::AND_V: return
             (y & "KVB"_mst).If(x << "V"_mst) | // B=V_x*B_y, V=V_x*V_y, K=V_x*K_y
             (x & "n"_mst) | (y & "n"_mst).If(x << "z"_mst) | // n=n_x+z_x*n_y
@@ -268,7 +273,7 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
 }
 
 size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_t k, size_t n_subs,
-                        size_t n_keys, MiniscriptContext ms_ctx) {
+                        size_t n_keys, MiniscriptContext ms_ctx, const std::vector<unsigned char>& data) {
     switch (fragment) {
         case Fragment::JUST_1:
         case Fragment::JUST_0: return 1;
@@ -291,6 +296,7 @@ size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_
         case Fragment::WRAP_N:
         case Fragment::AND_B:
         case Fragment::OR_B: return subsize + 1;
+        case Fragment::CMS: return subsize + BuildScript(data).size() + 2;
         case Fragment::WRAP_A:
         case Fragment::OR_C: return subsize + 2;
         case Fragment::WRAP_D:
@@ -441,6 +447,16 @@ int FindNextChar(Span<const char> sp, const char m)
         if (sp[i] == ')') break;
     }
     return -1;
+}
+
+std::optional<std::pair<std::vector<unsigned char>, int>> ParseArbHexStrEnd(Span<const char> in)
+{
+    int size = FindNextChar(in, ')');
+    if (size < 1) return {};
+    std::string hex{in.begin(), in.begin() + size};
+    if (!IsHex(hex)) return {};
+    auto data = ParseHex(hex);
+    return {{std::move(data), size}};
 }
 
 } // namespace internal

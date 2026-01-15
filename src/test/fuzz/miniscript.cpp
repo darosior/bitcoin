@@ -48,6 +48,10 @@ struct TestData {
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> hash256_preimages;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> hash160_preimages;
 
+    // Precomputed 32-byte messages and a valid signatures for each.
+    std::vector<std::vector<uint8_t>> custom_messages;
+    std::map<XOnlyPubKey, std::map<std::vector<uint8_t>, std::vector<uint8_t>>> custom_sigs;
+
     //! Set the precomputed data.
     void Init() {
         unsigned char keydata[32] = {1};
@@ -92,6 +96,29 @@ struct TestData {
             CHash160().Write(keydata).Finalize(hash);
             hash160.push_back(hash);
             if (i & 1) hash160_preimages[hash] = std::vector<unsigned char>(keydata, keydata + 32);
+
+            // Only 3 different custom messages, since we need a valid signature for each.
+            if (i < 3) {
+                custom_messages.emplace_back(sha256[i]);
+            }
+        }
+
+        for (size_t i{0}; i < 256; ++i) {
+            // Like for regular signatures, only odd indexes are available.
+            if ((i & 1) == 0) {
+                continue;
+            }
+
+            CKey privkey;
+            keydata[31] = i;
+            privkey.Set(keydata, keydata + 32, true);
+            XOnlyPubKey pubkey{privkey.GetPubKey()};
+
+            for (const auto& msg: custom_messages) {
+                std::vector<uint8_t> sig(64);
+                Assert(privkey.SignSchnorr(uint256{msg}, sig, nullptr, EMPTY_AUX));
+                custom_sigs[pubkey][msg] = std::move(sig);
+            }
         }
     }
 
@@ -106,6 +133,15 @@ struct TestData {
             if (it == schnorr_sigs.end()) return nullptr;
             return &it->second;
         }
+    }
+
+    const std::vector<uint8_t>* GetCustomSig(const CPubKey& pubkey, std::span<const uint8_t> msg) const {
+        const auto it{custom_sigs.find(XOnlyPubKey{pubkey})};
+        if (it == custom_sigs.end()) return nullptr;
+        std::vector<uint8_t> msg_owned{msg.begin(), msg.end()};
+        const auto sec_it{it->second.find(msg_owned)};
+        if (sec_it == it->second.end()) return nullptr;
+        return &sec_it->second;
     }
 } TEST_DATA;
 
@@ -269,6 +305,13 @@ struct SatisfierContext : ParserContext {
 
     // Signature challenges fulfilled with a dummy signature, if it was one of our dummy keys.
     miniscript::Availability Sign(const CPubKey& key, const miniscript::SigMsgType& sig_type, std::vector<unsigned char>& sig) const {
+        if (const auto* custom = std::get_if<miniscript::CustomSig>(&sig_type)) {
+            if (const auto* sig_res = TEST_DATA.GetCustomSig(key, custom->msg)) {
+                sig = *sig_res;
+                return miniscript::Availability::YES;
+            }
+            return miniscript::Availability::NO;
+        }
         Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
         bool sig_available{false};
         if (auto res = TEST_DATA.GetSig(script_ctx, key)) {
@@ -362,6 +405,7 @@ struct NodeInfo {
     NodeInfo(Fragment frag, std::vector<unsigned char> h): fragment(frag), k(0), hash(std::move(h)) {}
     NodeInfo(std::vector<Type> subt, Fragment frag): fragment(frag), k(0), subtypes(std::move(subt)) {}
     NodeInfo(std::vector<Type> subt, Fragment frag, uint32_t _k): fragment(frag), k(_k), subtypes(std::move(subt))  {}
+    NodeInfo(std::vector<Type> subt, Fragment frag, std::vector<unsigned char> data): fragment{frag}, k{0}, hash{data}, subtypes{std::move(subt)}  {}
     NodeInfo(Fragment frag, uint32_t _k, std::vector<CPubKey> _keys): fragment(frag), k(_k), keys(std::move(_keys)) {}
 };
 
@@ -620,7 +664,8 @@ struct SmartInfo
             switch (frag) {
                 case Fragment::MULTI_A:
                 case Fragment::PK_I:
-                case Fragment::TH: return true;
+                case Fragment::TH:
+                case Fragment::CMS: return true;
                 default: return false;
             }
         }};
@@ -655,6 +700,10 @@ struct SmartInfo
                 case Fragment::OLDER:
                 case Fragment::AFTER:
                     k = 1;
+                    break;
+                case Fragment::CMS:
+                    sub_count = 1;
+                    data_size = 32;
                     break;
                 case Fragment::SHA256:
                 case Fragment::HASH256:
@@ -858,6 +907,10 @@ std::optional<NodeInfo> ConsumeNodeSmart(MsCtx script_ctx, FuzzedDataProvider& p
             for (auto& key: keys) key = ConsumePubKey(provider);
             return {{frag, k, std::move(keys)}};
         }
+        case Fragment::CMS: {
+            Assert(IsTapscript(script_ctx));
+            return {{subt, frag, PickValue(provider, TEST_DATA.custom_messages)}};
+        }
         case Fragment::OLDER:
         case Fragment::AFTER:
             return {{frag, provider.ConsumeIntegralInRange<uint32_t>(1, 0x7FFFFFF)}};
@@ -941,7 +994,7 @@ NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, std::optional<C
             // byte long, we move one byte from each child to their parent. A similar technique is
             // used in the miniscript::internal::Parse function to prevent runaway string parsing.
             scriptsize += miniscript::internal::ComputeScriptLen(node_info->fragment, ""_mst, node_info->subtypes.size(), node_info->k, node_info->subtypes.size(),
-                                                                 node_info->keys.size(), script_ctx) - 1;
+                                                                 node_info->keys.size(), script_ctx, node_info->hash) - 1;
             if (scriptsize > MAX_STANDARD_P2WSH_SCRIPT_SIZE) return {};
             switch (node_info->fragment) {
             case Fragment::JUST_0:
@@ -985,6 +1038,9 @@ NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, std::optional<C
                 break;
             case Fragment::OR_I:
                 ops += 3;
+                break;
+            case Fragment::CMS:
+                ops += 2;
                 break;
             case Fragment::THRESH:
                 ops += node_info->subtypes.size();
