@@ -291,7 +291,8 @@ struct WshSatisfier: Satisfier<CPubKey> {
     }
 
     //! Satisfy an ECDSA signature check.
-    miniscript::Availability Sign(const CPubKey& key, std::vector<unsigned char>& sig) const {
+    miniscript::Availability Sign(const CPubKey& key, const miniscript::SigMsgType& sig_type, std::vector<unsigned char>& sig) const {
+        CHECK_NONFATAL(std::holds_alternative<miniscript::TxSig>(sig_type));
         if (CreateSig(m_creator, m_sig_data, m_provider, sig, key, m_witness_script, SigVersion::WITNESS_V0)) {
             return miniscript::Availability::YES;
         }
@@ -330,7 +331,8 @@ struct TapSatisfier: Satisfier<XOnlyPubKey> {
     }
 
     //! Satisfy a BIP340 signature check.
-    miniscript::Availability Sign(const XOnlyPubKey& key, std::vector<unsigned char>& sig) const {
+    miniscript::Availability Sign(const XOnlyPubKey& key, const miniscript::SigMsgType& sig_type, std::vector<unsigned char>& sig) const {
+        CHECK_NONFATAL(std::holds_alternative<miniscript::TxSig>(sig_type));
         if (CreateTaprootScriptSig(m_creator, m_sig_data, m_provider, sig, key, m_leaf_hash, SigVersion::TAPSCRIPT)) {
             return miniscript::Availability::YES;
         }

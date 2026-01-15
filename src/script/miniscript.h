@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <iostream> // FIXME
@@ -244,6 +245,17 @@ enum class Availability {
     YES,
     MAYBE,
 };
+
+struct NoSig {};
+struct TxSig {};
+struct CustomSig {
+    std::span<const uint8_t> msg;
+};
+/** The type of message for a signature check. May be NoSig if no parent of a fragment comports a
+ * signature check, TxSig if the parent (or an ancestor) of a fragment is a regular transaction
+ * signature check (CHECKSIG and friends), and CustomSig if it is a signature check for an arbitrary
+ * message. */
+using SigMsgType = std::variant<NoSig, TxSig, CustomSig>;
 
 enum class MiniscriptContext {
     P2WSH,
@@ -1217,22 +1229,32 @@ private:
     internal::InputResult ProduceInput(const Ctx& ctx) const {
         using namespace internal;
 
+        // Forward down the type of message an upper signature (if any) is for. This is because signature satisfaction
+        // happens at the key fragment level, which may be unaware of the message to provide a signature for.
+        auto downfn = [](SigMsgType sig_type, const Node& node, size_t child_index) -> SigMsgType {
+            if (node.fragment == Fragment::WRAP_C) {
+                return TxSig{};
+            }
+            return sig_type;
+        };
+
         // Internal function which is invoked for every tree node, constructing satisfaction/dissatisfactions
         // given those of its subnodes.
-        auto helper = [&ctx](const Node& node, Span<InputResult> subres) -> InputResult {
+        auto helper = [&ctx](SigMsgType sig_type, const Node& node, Span<InputResult> subres) -> InputResult {
             switch (node.fragment) {
                 case Fragment::PK_K:
                 case Fragment::PK_I: {
                     std::vector<unsigned char> sig;
-                    Availability avail = ctx.Sign(node.keys[0], sig);
+                    Availability avail = ctx.Sign(node.keys[0], sig_type, sig);
                     return {ZERO, InputStack(std::move(sig)).SetWithSig().SetAvailable(avail)};
                 }
                 case Fragment::PK_H: {
                     std::vector<unsigned char> key = ctx.ToPKBytes(node.keys[0]), sig;
-                    Availability avail = ctx.Sign(node.keys[0], sig);
+                    Availability avail = ctx.Sign(node.keys[0], sig_type, sig);
                     return {ZERO + InputStack(key), (InputStack(std::move(sig)).SetWithSig() + InputStack(key)).SetAvailable(avail)};
                 }
                 case Fragment::MULTI_A: {
+                    const SigMsgType sig_type{TxSig{}};
                     // sats[j] represents the best stack containing j valid signatures (out of the first i keys).
                     // In the loop below, these stacks are built up using a dynamic programming approach.
                     std::vector<InputStack> sats = Vector(EMPTY);
@@ -1240,7 +1262,7 @@ private:
                         // Get the signature for the i'th key in reverse order (the signature for the first key needs to
                         // be at the top of the stack, contrary to CHECKMULTISIG's satisfaction).
                         std::vector<unsigned char> sig;
-                        Availability avail = ctx.Sign(node.keys[node.keys.size() - 1 - i], sig);
+                        Availability avail = ctx.Sign(node.keys[node.keys.size() - 1 - i], sig_type, sig);
                         // Compute signature stack for just this key.
                         auto sat = InputStack(std::move(sig)).SetWithSig().SetAvailable(avail);
                         // Compute the next sats vector: next_sats[0] is a copy of sats[0] (no signatures). All further
@@ -1261,13 +1283,14 @@ private:
                     return {std::move(nsat), std::move(sats[node.k])};
                 }
                 case Fragment::MULTI: {
+                    const SigMsgType sig_type{TxSig{}};
                     // sats[j] represents the best stack containing j valid signatures (out of the first i keys).
                     // In the loop below, these stacks are built up using a dynamic programming approach.
                     // sats[0] starts off being {0}, due to the CHECKMULTISIG bug that pops off one element too many.
                     std::vector<InputStack> sats = Vector(ZERO);
                     for (size_t i = 0; i < node.keys.size(); ++i) {
                         std::vector<unsigned char> sig;
-                        Availability avail = ctx.Sign(node.keys[i], sig);
+                        Availability avail = ctx.Sign(node.keys[i], sig_type, sig);
                         // Compute signature stack for just the i'th key.
                         auto sat = InputStack(std::move(sig)).SetWithSig().SetAvailable(avail);
                         // Compute the next sats vector: next_sats[0] is a copy of sats[0] (no signatures). All further
@@ -1423,8 +1446,8 @@ private:
             return {INVALID, INVALID};
         };
 
-        auto tester = [&helper](const Node& node, Span<InputResult> subres) -> InputResult {
-            auto ret = helper(node, subres);
+        auto tester = [&helper](SigMsgType sig_type, const Node& node, Span<InputResult> subres) -> InputResult {
+            auto ret = helper(sig_type, node, subres);
 
             // Do a consistency check between the satisfaction code and the type checker
             // (the actual satisfaction code in ProduceInputHelper does not use GetType)
@@ -1466,7 +1489,7 @@ private:
             return ret;
         };
 
-        return TreeEval<InputResult>(tester);
+        return TreeEval<InputResult>(SigMsgType{}, downfn, tester);
     }
 
 public:
