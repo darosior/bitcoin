@@ -61,6 +61,9 @@ DESCS = [
     f"tr({TPUBS[0]}/*,th(54ab1fa5f9ea585d0f9674163276bbbde113a9f3328034977a3b3170cc3a9234))",
 ]
 
+# As a separate variable, because as a literal inside an f-string it triggers linter false-positives.
+DUMMY_32B_MSG_HEX = "ab" * 32
+
 DESCS_PRIV = [
     # One of two keys, of which one private key is known
     {
@@ -203,6 +206,22 @@ DESCS_PRIV = [
         "sigs_count": 2,
         "stack_size": 8,
     },
+    # A signature for an arbitrary message in a timelocked leaf, the immediately-available alternatives being unavailable.
+    {
+        "desc": f"tr({TPUBS[0]}/*,{{and_v(v:pk({TPRVS[1]}/*),and_b(dv:after(42),a:cms(pk_h({TPRVS[2]}/*),{DUMMY_32B_MSG_HEX}))),pk({TPUBS[3]}/*)}})",
+        "sequence": None,
+        "locktime": 42,
+        "sigs_count": 2,
+        "stack_size": 6,
+    },
+    # Very same descriptor as above, but with a 31-byte arbitrary message. Fails as signing is only implemented for 32-byte messages.
+    {
+        "desc": f"tr({TPUBS[0]}/*,{{and_v(v:pk({TPRVS[1]}/*),and_b(dv:after(42),a:cms(pk_h({TPRVS[2]}/*),{DUMMY_32B_MSG_HEX[:62]}))),pk({TPUBS[3]}/*)}})",
+        "sequence": None,
+        "locktime": 42,
+        "sigs_count": 1,
+        "stack_size": None,
+    }
 ]
 
 
