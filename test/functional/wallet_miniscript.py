@@ -203,6 +203,22 @@ DESCS_PRIV = [
         "sigs_count": 2,
         "stack_size": 8,
     },
+    # A signature for an arbitrary message in a timelocked leaf, the immediately-available alternatives being unavailable.
+    {
+        "desc": f"tr({TPUBS[0]}/*,{{and_v(v:pk({TPRVS[1]}/*),and_b(dv:after(42),a:cms(pk_h({TPRVS[2]}/*),{"ab"*32}))),pk({TPUBS[3]}/*)}})",
+        "sequence": None,
+        "locktime": 42,
+        "sigs_count": 2,
+        "stack_size": 6,
+    },
+    # Very same descriptor as above, but with a 31-byte arbitrary message. Fails as signing is only implemented for 32-byte messages.
+    {
+        "desc": f"tr({TPUBS[0]}/*,{{and_v(v:pk({TPRVS[1]}/*),and_b(dv:after(42),a:cms(pk_h({TPRVS[2]}/*),{"ab"*31}))),pk({TPUBS[3]}/*)}})",
+        "sequence": None,
+        "locktime": 42,
+        "sigs_count": 1,
+        "stack_size": None,
+    }
 ]
 
 

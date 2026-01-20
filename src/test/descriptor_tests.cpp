@@ -1072,7 +1072,7 @@ BOOST_AUTO_TEST_CASE(descriptor_test)
     // Infer pk() from p2pk with uncompressed key
     CheckInferDescriptor("4104032540df1d3c7070a8ab3a9cdd304dfc7fd1e6541369c53c4c3310b2537d91059afc8b8e7673eb812a32978dabb78c40f2e423f7757dca61d11838c7aeeb5220ac", "pk(04032540df1d3c7070a8ab3a9cdd304dfc7fd1e6541369c53c4c3310b2537d91059afc8b8e7673eb812a32978dabb78c40f2e423f7757dca61d11838c7aeeb5220)", {}, {{"04032540df1d3c7070a8ab3a9cdd304dfc7fd1e6541369c53c4c3310b2537d91059afc8b8e7673eb812a32978dabb78c40f2e423f7757dca61d11838c7aeeb5220", ""}});
 
-    // OP_INTERNALKEY, OP_TEMPLATEHASH tests
+    // OP_INTERNALKEY, OP_TEMPLATEHASH and OP_CHECKSIGFROMSTACK tests
     CheckMultipath("tr(xprv9yYge4PS54XkYT9KiLfCRwc8Jeuz8DucxQGtuEecJZYhKNiqbPxYHTPzXtskmzWBqdqkRAGsghNmZzNsfU2wstaB3XjDQFPv567aQSSuPyo/<2;3>/*,l:pki())",
             "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/<2;3>/*,l:pki())",
             {
@@ -1099,6 +1099,31 @@ BOOST_AUTO_TEST_CASE(descriptor_test)
             }
     );
     Check("tr(xprv9yYge4PS54XkYT9KiLfCRwc8Jeuz8DucxQGtuEecJZYhKNiqbPxYHTPzXtskmzWBqdqkRAGsghNmZzNsfU2wstaB3XjDQFPv567aQSSuPyo/0/*,th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937))", "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/0/*,th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937))", "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/0/*,th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937))", XONLY_KEYS | RANGE, {{"5120956b3dd16b658f45078c68f8b79713d76a8872deaf75dd482d52a5a13818552a"}}, OutputType::BECH32M, /*op_desc_id=*/{}, {{0, 0}});
+    CheckMultipath("tr(xprv9yYge4PS54XkYT9KiLfCRwc8Jeuz8DucxQGtuEecJZYhKNiqbPxYHTPzXtskmzWBqdqkRAGsghNmZzNsfU2wstaB3XjDQFPv567aQSSuPyo/<2;3>/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+            "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/<2;3>/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+            {
+                "tr(xprv9yYge4PS54XkYT9KiLfCRwc8Jeuz8DucxQGtuEecJZYhKNiqbPxYHTPzXtskmzWBqdqkRAGsghNmZzNsfU2wstaB3XjDQFPv567aQSSuPyo/2/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+                "tr(xprv9yYge4PS54XkYT9KiLfCRwc8Jeuz8DucxQGtuEecJZYhKNiqbPxYHTPzXtskmzWBqdqkRAGsghNmZzNsfU2wstaB3XjDQFPv567aQSSuPyo/3/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+            },
+            {
+                "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/2/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+                "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/3/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+            },
+            {
+                "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/2/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+                "tr(xpub6CY33ZvKuS63kwDnpNCCo5YrrgkUXgdUKdCVhd4Dru5gCB3z8wGnqFiUP98Za5pYSYF5KmvBHTY3Ra8FAJGggzBjuHS69WzN8gscPupuZwK/3/*,and_v(v:th(e8a8c07ee3bfdc31a2b2c79c796346da139ae1810cd456a4d4dda86a9f522937),cms(pk_i(),ab21)))",
+            },
+            XONLY_KEYS | RANGE,
+            {
+                {{"51209c90e8ea54d60a27411cce0542d21100790be9152b4977b7fcc948c3f3c785e9"}, {"51203114609ac2654528d819f72e1604932a2b91643e1a714f7093d5a060be1eceda"}},
+                {{"51208067948dbe474a7a112b182e3b73882ac6f38535f0bc9701b9d12eadf4d1139f"}, {"51201b88f68ee3e6f63fd1b3bf39a823e1d1083b9fb42dde43dad9fbdfbca349ebab"}},
+            },
+            OutputType::BECH32M,
+            {
+                {{2, 0}, {2, 1}},
+                {{3, 0}, {3, 1}},
+            }
+    );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -51,15 +51,19 @@ struct TestData {
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> hash256_preimages;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> hash160_preimages;
 
+    // Precomputed 32-byte messages and a valid signatures for each.
+    std::vector<std::vector<uint8_t>> custom_messages;
+    std::map<XOnlyPubKey, std::map<std::vector<uint8_t>, std::vector<uint8_t>>> custom_sigs;
+
     TestData()
     {
         // We don't pass additional randomness when creating a schnorr signature.
         const auto EMPTY_AUX{uint256::ZERO};
+        // This 32-byte array functions as both private key data and hash preimage (31 zero bytes plus any nonzero byte).
+        unsigned char keydata[32] = {0};
 
         // We generate 255 public keys and 255 hashes of each type.
         for (int i = 1; i <= 255; ++i) {
-            // This 32-byte array functions as both private key data and hash preimage (31 zero bytes plus any nonzero byte).
-            unsigned char keydata[32] = {0};
             keydata[31] = i;
 
             // Compute CPubkey and CKeyID
@@ -100,7 +104,34 @@ struct TestData {
             CHash160().Write(keydata).Finalize(hash);
             hash160.push_back(hash);
             hash160_preimages[hash] = std::vector<unsigned char>(keydata, keydata + 32);
+
+            // Only 3 different custom messages, since we need a valid signature for each.
+            if (i < 4) {
+                custom_messages.emplace_back(sha256.back());
+            }
         }
+
+        for (size_t i{1}; i <= 255; ++i) {
+            CKey privkey;
+            keydata[31] = i;
+            privkey.Set(keydata, keydata + 32, true);
+            XOnlyPubKey pubkey{privkey.GetPubKey()};
+
+            for (const auto& msg: custom_messages) {
+                std::vector<uint8_t> sig(64);
+                Assert(privkey.SignSchnorr(uint256{msg}, sig, nullptr, EMPTY_AUX));
+                custom_sigs[pubkey][msg] = std::move(sig);
+            }
+        }
+    }
+
+    const std::vector<uint8_t>* GetCustomSig(const CPubKey& pubkey, std::span<const uint8_t> msg) const {
+        const auto it{custom_sigs.find(XOnlyPubKey{pubkey})};
+        if (it == custom_sigs.end()) return nullptr;
+        std::vector<uint8_t> msg_owned{msg.begin(), msg.end()};
+        const auto sec_it{it->second.find(msg_owned)};
+        if (sec_it == it->second.end()) return nullptr;
+        return &sec_it->second;
     }
 };
 
@@ -229,8 +260,18 @@ struct Satisfier : public KeyConverter {
 
     //! Produce a signature for the given key.
     miniscript::Availability Sign(const CPubKey& key, const miniscript::SigMsgType& sig_type, std::vector<unsigned char>& sig) const {
-        Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
         if (supported.count(Challenge(ChallengeType::PK, ChallengeNumber(key)))) {
+            if (const auto* custom = std::get_if<miniscript::CustomSig>(&sig_type)) {
+                const auto it{g_testdata->custom_sigs.find(XOnlyPubKey{key})};
+                if (it == g_testdata->custom_sigs.end()) return miniscript::Availability::NO;
+                std::vector<uint8_t> msg_owned{custom->msg.begin(), custom->msg.end()};
+                const auto sec_it{it->second.find(msg_owned)};
+                if (sec_it == it->second.end()) return miniscript::Availability::NO;
+                sig = sec_it->second;
+                return miniscript::Availability::YES;
+            }
+
+            Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
             if (!miniscript::IsTapscript(m_script_ctx)) {
                 auto it = g_testdata->signatures.find(key);
                 if (it == g_testdata->signatures.end()) return miniscript::Availability::NO;
@@ -752,7 +793,7 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     // This is actually non-malleable in practice, but we cannot detect it in type system. See above rationale
     Test("thresh(1,c:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),altv:after(1000000000),altv:after(100))", "?", "?", TESTMODE_VALID); // thresh with k = 1
 
-    // OP_INTERNALKEY, OP_TEMPLATEHASH tests
+    // OP_INTERNALKEY, OP_TEMPLATEHASH and OP_CHECKSIGFROMSTACK tests
     Test("and_b(older(42),sc:pk_i())", "012ab27ccbac9a", "012ab27ccbac9a", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
     Test("and_b(older(42),s:pki())", "012ab27ccbac9a", "012ab27ccbac9a", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
     std::string ms_ik{"and_b(older(42),ac:or_i(pk_i(),pk_h("};
@@ -763,6 +804,38 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     std::string ms_th{"and_b(older(42),a:th("};
     ms_th += HexStr(TestData::MESSAGE_HASH) + "))";
     Test(ms_th, "?", "?", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID);
+    Test("cms(pk_k(02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5)", "20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1320ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc", "20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1320ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
+    Test("or_i(and_b(hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),a:cms(pk_k(02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5)),and_v(v:older(42),pkh(025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)))", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1320ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1320ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
+    Test("or_i(and_b(hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),a:cms(pk_k(02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),424242babaffec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5)),and_v(v:older(42),pkh(025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)))", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1326424242babaffec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1326424242babaffec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
+    Test("or_i(and_b(hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),a:cms(pk_k(02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),abab42)),and_v(v:older(42),pkh(025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)))", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1303abab427ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1303abab427ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
+    Test("or_i(and_b(hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),a:cms(pk_i(),00)),and_v(v:older(42),pkh(025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)))", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876bcb01007ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876bcb01007ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
+
+    // Parsing from Script a cms() inside an and_v() will roundtrip to Script
+    constexpr std::array<std::string_view, 2> cms_andv_roundtrip{{
+        "and_v(v:1,andor(cms(pk_k(02f817639b4f4d093dfac1d140c66900b334dac12b5ee3c55f55848e99707e9982),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5),1,1))",
+        "cms(or_i(and_v(andor(cms(or_i(and_v(and_v(v:older(32),andor(cms(pk_k(02f817639b4f4d093dfac1d140c66900b334dac12b5ee3c55f55848e99707e9982),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5),andor(cms(or_i(and_v(andor(cms(or_i(and_v(andor(cms(or_i(and_v(andor(cms(pk_k(02bf32caadf45c2cdc2bb13dab3feae2dcba15a2f48706317049bfda995aa68053),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5),v:0,v:0),pk_k(02f1167c91ea41c69c07a40cdc0044ec2b0bd1b62407fda4b0ab9b293b447688a4)),pk_k(021fe2829d5372a8dcac7aedbc730cd39bc908ce79347b607eb201b6991f327b31)),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5),v:0,v:0),pk_k(0202fa3aca94d4483d83038cdfbbb74f562776a06850f6171a59fa4d678c6850bf)),pk_k(02d18f9cee54aeff1a0096efa173caed11aa458c28564f125c0c5b623c43594727)),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5),v:0,v:0),pk_k(02c733f2397bf6912a68706b8fb700e8446004f5af59c81493b819857a9560ec42)),pk_k(02c28099397961072fb8e41004922a4a9cdd49c1d40ce403b4095b866c2519a232)),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5),v:0,v:0),v:0)),pk_k(020c91cd4bee354b7bf1332b05a6958c513bdc267b3e79f3f47e1735d132b76de5)),pk_k(020b78192fd2aa32166f9bfd48e46db37c0da8d58b4c0946230028b369e7745076)),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5),v:0,v:0),pk_k(029d8f8bf5a4036afbcec9fd79b1f5be61a9e3519973ad529ccac5d896e3076ce3)),pk_k(02fbe7a86aefec0dc6d70251c8ae5c85be58684b8eded6225e1027ea6069fb24a7)),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5)",
+    }};
+    for (const auto ms_str: cms_andv_roundtrip) {
+        const auto ms{miniscript::FromString(std::string{ms_str}, tap_converter)};
+        Assert(ms);
+        const auto script{ms->ToScript(tap_converter)};
+        const auto decoded{miniscript::FromScript(script, tap_converter)};
+        Assert(decoded);
+        BOOST_CHECK(*ms == *decoded);
+    }
+
+    // Parsing from Script an and_v() inside a key expression in a cms() does
+    // not round trip but does yield a top fragment with the same type.
+    {
+        std::string_view andv_in_cms{"cms(and_v(v:0,pk_k(03f817639b4f4d093dfac1d140c66900b334dac12b5ee3c55f55848e99707e9982)),01d0fabd251fcbbe2b93b4b927b26ad2a1a99077152e45ded1e678afa45dbec5)"};
+        const auto ms{miniscript::FromString(std::string{andv_in_cms}, tap_converter)};
+        Assert(ms);
+        const auto script{ms->ToScript(tap_converter)};
+        const auto decoded{miniscript::FromScript(script, tap_converter)};
+        Assert(decoded);
+        BOOST_CHECK(*ms != *decoded);
+        BOOST_CHECK(decoded->GetType() == ms->GetType());
+    }
 
     g_testdata.reset();
 }
