@@ -16,6 +16,8 @@
 #include <test/util/setup_common.h>
 
 #include <chrono>
+#include <map>
+#include <variant>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -119,50 +121,112 @@ static void PrintLastHeader(const std::vector<CBlockHeader>& chain)
     std::cout << "Mined block header at height " << chain.size() - 1 << ": " << HexHeader(chain.back()) << std::endl;
 }
 
-/** A BIP54 timestamp-related test vector. */
-struct TestVector {
-    //! The chain of headers to be tested against the new rules.
-    const std::vector<CBlockHeader> chain;
-    //! Whether the chain of headers is valid according to the new rules.
+struct TestVectorDetails {
     const bool valid;
-    //! Description of this specific test case.
     const std::string comment;
+};
 
-    explicit TestVector(std::vector<CBlockHeader> headers, bool val, std::string com):
-        chain{std::move(headers)}, valid{val}, comment{std::move(com)} {}
+struct TestVectorNode;
+
+//! Inner nodes contain branches, leaf nodes contain metadata about the test vector.
+using TestBranches = std::vector<TestVectorNode>;
+using TestNodeType = std::variant<TestBranches, TestVectorDetails>;
+
+/** Test vectors are arranged in a tree where nodes contain a chain of headers
+ * that is a common ancestor of all their descendant branches. Leaves of the
+ * tree are the test vectors, containing a comment describing the test case and
+ * a boolean indicating whether the full chain of headers from the root of the
+ * tree is valid.
+ */
+struct TestVectorNode {
+    std::vector<CBlockHeader> chain;
+    TestNodeType node_type;
+
+    static TestVectorNode Leaf(std::vector<CBlockHeader> headers, TestVectorDetails details)
+    {
+        return TestVectorNode {
+            .chain = headers,
+            .node_type = details,
+        };
+    }
+
+    static TestVectorNode EmptyInner()
+    {
+        return TestVectorNode {
+            .chain = {},
+            .node_type = TestBranches{},
+        };
+    }
+
+    /**
+     * Build the tree of test vectors from the chain that all vectors fork from and an ordered
+     * list of test vectors and their fork height.
+     */
+    static TestVectorNode BuildTree(std::vector<CBlockHeader>&& header_chain, std::map<int, std::vector<TestVectorNode>>&& leaves)
+    {
+        auto root{TestVectorNode::EmptyInner()};
+        TestVectorNode* parent{&root};
+        int last_height{0};
+        Assert(!leaves.empty());
+        for (auto it{leaves.begin()}; ; ) {
+            Assert(parent->chain.empty());
+            const int height{it->first};
+            Assert(height > last_height);
+            auto first_header{std::make_move_iterator(header_chain.begin() + last_height)};
+            auto last_header{std::make_move_iterator(header_chain.begin() + height)};
+            parent->chain.insert(parent->chain.end(), first_header, last_header);
+            last_height = height;
+
+            auto& parent_branches{*Assert(std::get_if<TestBranches>(&parent->node_type))};
+            auto test_vectors{std::move(it->second)};
+            for (auto& test: test_vectors) {
+                Assert(parent->chain.back().GetHash() == test.chain.front().hashPrevBlock);
+                parent_branches.emplace_back(std::move(test));
+            }
+
+            if (++it == leaves.end()) {
+                break;
+            } else {
+                auto& parent_branches{*Assert(std::get_if<TestBranches>(&parent->node_type))};
+                parent_branches.emplace_back(TestVectorNode::EmptyInner());
+                parent = &parent_branches.back();
+            }
+        }
+        return root;
+    }
 
     UniValue GetJson() const
     {
-        UniValue chain_json{UniValue::VARR};
+        UniValue node{UniValue::VOBJ};
+
+        UniValue headers_array{UniValue::VARR};
         for (const auto& h: chain) {
-            chain_json.push_back(HexHeader(h));
+            headers_array.push_back(HexHeader(h));
+        }
+        node.pushKV("block_headers", std::move(headers_array));
+
+        if (const auto* branches = std::get_if<TestBranches>(&node_type)) {
+            UniValue branches_array{UniValue::VARR};
+            for (const auto& branch: *branches) {
+                branches_array.push_back(branch.GetJson());
+            }
+            node.pushKV("extensions", std::move(branches_array));
+        } else {
+            const auto& details{*Assert(std::get_if<TestVectorDetails>(&node_type))};
+            node.pushKV("valid", details.valid);
+            node.pushKV("comment", details.comment);
         }
 
-        UniValue json{UniValue::VOBJ};
-        json.pushKV("header_chain", chain_json);
-        json.pushKV("valid", valid);
-        json.pushKV("comment", comment);
-        return json;
+        return node;
     }
 };
 
-static void WriteVectors(const std::vector<TestVector>& test_vectors)
+static void WriteVectors(const TestVectorNode& test_vectors)
 {
-    UniValue json_vectors{UniValue::VARR};
-    for (const auto& test_vector: test_vectors) {
-        json_vectors.push_back(test_vector.GetJson());
-    }
-    const auto json_str{json_vectors.write(4)};
+    const auto json_str{test_vectors.GetJson().write(4)};
     FILE* file = fsbridge::fopen("bip54_timestamps.json.gen", "w");
     fputs(json_str.c_str(), file);
     fclose(file);
-}
-
-static void RecordTestVector(std::vector<TestVector>& test_vectors, std::vector<CBlockHeader> header_chain, bool valid, std::string comment)
-{
-    std::cout << "Recording test vector \"" << comment << "\"" <<std::endl;
-    test_vectors.emplace_back(std::move(header_chain), valid, std::move(comment));
-    WriteVectors(test_vectors); // Write the updated test vectors to disk.
 }
 
 /**
@@ -184,7 +248,7 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
     Assert(header_chain.back().GetHash().ToString() == "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
 
     // Record each generated test vector throughout.
-    std::vector<TestVector> test_vectors;
+    std::map<int, std::vector<TestVectorNode>> test_vectors;
 
     // Optionally skip re-mining the headers for the first difficulty adjustment period.
 #ifdef PREFILL_HEADERS
@@ -278,16 +342,8 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
 
     // Record a couple test cases from this chain. We do it now to make sure it gets recorded
     // even if we start from the prefilled chain.
-    {
-        std::vector<CBlockHeader> sub_chain{header_chain.begin(), header_chain.begin() + 42};
-        Assert(sub_chain.size() == 42);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 41 is more than 2 hours before block 40.");
-    }
-    {
-        std::vector<CBlockHeader> sub_chain{header_chain.begin(), header_chain.begin() + 2001};
-        Assert(sub_chain.size() == 2001);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 2001 is more than 2 hours before block 2000.");
-    }
+    test_vectors[41].emplace_back(TestVectorNode::Leaf({header_chain.at(41)}, {true, "Block at height 41 is more than 2 hours before block 40."}));
+    test_vectors[2000].emplace_back(TestVectorNode::Leaf({header_chain.at(2000)}, {true, "Block at height 2001 is more than 2 hours before block 2000."}));
 
     // No need to adapt nBits because it took >2 weeks between block 0 and block 2015
     // and we are already at difficulty 1.
@@ -306,9 +362,11 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 2016 is exactly 2 hours before block 2015.");
     }
     Assert(header_chain.size() == 2017);
+
+    // NOTE: blocks down to height 2014 get wiped below, so make sure this test case got them.
+    test_vectors[2014].emplace_back(TestVectorNode::Leaf({header_chain.begin() + 2014, header_chain.end()}, {true, "Block at height 2016 is exactly 2 hours before block 2015."}));
 
     // Second alternative: an invalid header for height 2016.
     header_chain.pop_back();
@@ -321,9 +379,11 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, false, "Block at height 2016 is more than 2 hours before block 2015.");
     }
     Assert(header_chain.size() == 2017);
+
+    // Same as above, fork at height 2014 since those get wiped below.
+    test_vectors[2014].emplace_back(TestVectorNode::Leaf({header_chain.begin() + 2014, header_chain.end()}, {false, "Block at height 2016 is more than 2 hours before block 2015."}));
 
     // Now mine different 2015th and 2016th blocks (heights 2014 and 2015) to make clear
     // the rule only applies to the first block of a retarget period, not the last block
@@ -350,9 +410,12 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 2015 is more than 2 hours before block 2014.");
     }
     Assert(header_chain.size() == 2016);
+
+    // NOTE: block at height 2015 may be erased if using prefilled headers below, make sure
+    // to include it with the test case here.
+    test_vectors[2014].emplace_back(TestVectorNode::Leaf({header_chain.begin() + 2014, header_chain.end()}, {true, "Block at height 2015 is more than 2 hours before block 2014."}));
 
     // No need to adapt nBits because it took >2 weeks between block 0 and block 2015
     // and we are already at difficulty 1.
@@ -381,9 +444,12 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 2017 is more than 2 hours before block 2016.");
     }
     Assert(header_chain.size() == 2018);
+
+    // Same as above, fork at height 2014 because block at height 2015 may be erased by prefilled
+    // headers below.
+    test_vectors[2014].emplace_back(TestVectorNode::Leaf({header_chain.begin() + 2014, header_chain.end()}, {true, "Block at height 2017 is more than 2 hours before block 2016."}));
 
     // Now we get onto testing the fix for the Murch-Zawy attack. To do so we'll make the first
     // block of the second retarget period be well in the future, so we can make the last block
@@ -397,7 +463,8 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
     // block (to avoid hiking up the MTP requirement), except the first block that is 24 hours
     // in the future.
 
-    // Optionally allow to skip mining the second difficulty adjustment period.
+    // Optionally allow to skip mining the second difficulty adjustment period. NOTE: block at
+    // height 2015 will be different between the two paths.
 #ifdef PREFILL_HEADERS
     header_chain.resize(1);
     PrefillFirstHeaders(header_chain);
@@ -436,9 +503,9 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, false, "Block at height 4031 has a lower timestamp than block at height 2016.");
     }
     Assert(header_chain.size() == 4032);
+    test_vectors[4031].emplace_back(TestVectorNode::Leaf({header_chain.at(4031)}, {false, "Block at height 4031 has a lower timestamp than block at height 2016."}));
 
     // Now mine an alternative block at height 4031 (last block of second retarget period)
     // with the same timestamp as block at height 2016 (first block of second retarget period).
@@ -453,9 +520,9 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 4031 has exactly the same timestamp as block at height 2016.");
     }
     Assert(header_chain.size() == 4032);
+    test_vectors[4031].emplace_back(TestVectorNode::Leaf({header_chain.at(4031)}, {true, "Block at height 4031 has exactly the same timestamp as block at height 2016."}));
 
     // Now mine a block at height 4032 with a timestamp below that of block at height 2016.
     // This is valid because the rule only applies to the last block of a retarget period.
@@ -475,12 +542,13 @@ BOOST_AUTO_TEST_CASE(mine_header_chain)
         HeaderMiner miner;
         header_chain.emplace_back(miner.Mine(std::move(header), params));
         PrintLastHeader(header_chain);
-        RecordTestVector(test_vectors, header_chain, true, "Block at height 4032 has a lower timestamp than block at height 2016.");
     }
     Assert(header_chain.size() == 4033);
+    test_vectors[4032].emplace_back(TestVectorNode::Leaf({header_chain.at(4032)}, {true, "Block at height 4032 has a lower timestamp than block at height 2016."}));
 
-    // Dump the test vectors as JSON. TODO: drop now that we always write after each recording?
-    WriteVectors(test_vectors);
+    // Dump the test vectors as JSON.
+    const auto root_node{TestVectorNode::BuildTree(std::move(header_chain), std::move(test_vectors))};
+    WriteVectors(root_node);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
