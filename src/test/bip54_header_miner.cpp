@@ -11,6 +11,7 @@
 #include <streams.h>
 #include <uint256.h>
 #include <univalue.h>
+#include <util/check.h>
 
 #include <test/util/setup_common.h>
 
@@ -22,7 +23,7 @@
 using namespace std::chrono_literals;
 
 //! Uncomment to prefill the headers up to height 2015 instead of mining them.
-//#define PREFILL_HEADERS
+#define PREFILL_HEADERS
 
 #ifdef PREFILL_HEADERS
 #include <test/bip54_premined_headers.h>
@@ -47,7 +48,7 @@ static void PrefillFirstHeaders(std::vector<CBlockHeader>& header_chain)
 /** Fill the chain with the 2015 first mined headers of the second difficulty adjustment period. */
 static void PrefillSecondHeaders(std::vector<CBlockHeader>& header_chain)
 {
-    //static_assert(std::size(SECOND_PREMINED_HEADERS) == 2015); // Blocks from height 2016 to height 4030
+    static_assert(std::size(SECOND_PREMINED_HEADERS) == 2015); // Blocks from height 2016 to height 4030
     Assert(header_chain.size() == 2016); // Has blocks 0 through 2015 (first retarget period)
     FillHeaders(header_chain, SECOND_PREMINED_HEADERS);
 }
