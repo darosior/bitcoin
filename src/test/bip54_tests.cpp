@@ -1331,28 +1331,52 @@ BOOST_AUTO_TEST_CASE(bip54_legacy_sigops)
 #endif
 }
 
+struct TimestampTestCase {
+    std::vector<CBlockHeader> header_chain;
+    bool valid;
+    std::string comment;
+};
+
+static std::vector<TimestampTestCase> VisitNode(std::vector<CBlockHeader> header_chain, const UniValue& test_node)
+{
+    std::vector<TimestampTestCase> test_cases;
+
+    for (const auto& header_str: test_node["block_headers"].getValues()) {
+        header_chain.emplace_back();
+        BOOST_REQUIRE(DecodeHexBlockHeader(header_chain.back(), header_str.get_str()));
+    }
+
+    const auto& branches{test_node["extensions"]};
+    if (!branches.isNull()) {
+        for (const auto& branch: branches.getValues()) {
+            auto cases{VisitNode(header_chain, branch)};
+            test_cases.insert(test_cases.end(), std::make_move_iterator(cases.begin()), std::make_move_iterator(cases.end()));
+        }
+    } else {
+        test_cases.emplace_back(TimestampTestCase {
+            .header_chain = std::move(header_chain),
+            .valid = test_node["valid"].get_bool(),
+            .comment = test_node["comment"].get_str(),
+        });
+    }
+
+    return test_cases;
+}
+
 /** Process chains of headers from the BIP54 test vectors for timewarp and Murch-Zawy fixes. */
 BOOST_AUTO_TEST_CASE(bip54_timestamps)
 {
-    const auto tests{read_json(json_tests::bip54_timestamps)};
+    UniValue tests;
+    Assert(tests.read(json_tests::bip54_timestamps));
+    const auto test_cases{VisitNode({}, tests)};
 
-    for (const auto& test: tests.getValues()) {
-        // Get the data for this test case.
-        const auto is_valid{test["valid"].get_bool()};
-        const auto& comment{test["comment"].get_str()};
-        const auto headers_hex{test["header_chain"].getValues()};
-        std::vector<CBlockHeader> headers;
-        for (const auto& header: headers_hex) {
-            headers.emplace_back();
-            BOOST_REQUIRE(DecodeHexBlockHeader(headers.back(), header.get_str()));
-        }
-
+    for (const auto& test: test_cases) {
         // All invalid test vectors fail on rules newly introduced by BIP54, which is a soft fork. Therefore
         // all cases will pass without the rules active.
         {
             auto test_setup{TestingSetup{ChainType::MAIN}};
             BlockValidationState state;
-            BOOST_CHECK(test_setup.m_node.chainman->ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, /*ppindex=*/nullptr));
+            BOOST_CHECK(test_setup.m_node.chainman->ProcessNewBlockHeaders(test.header_chain, /*min_pow_checked=*/true, state, /*ppindex=*/nullptr));
             BOOST_CHECK(state.IsValid());
         }
 
@@ -1360,11 +1384,11 @@ BOOST_AUTO_TEST_CASE(bip54_timestamps)
         {
             auto test_setup{TestingSetup{ChainType::MAIN, {.extra_args = {"-vbparams=consensuscleanup:-1:-1"}}}};
             BlockValidationState state;
-            const bool res{test_setup.m_node.chainman->ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, /*ppindex=*/nullptr)};
-            BOOST_CHECK_MESSAGE(res == is_valid, comment);
-            if (!is_valid) {
+            const bool res{test_setup.m_node.chainman->ProcessNewBlockHeaders(test.header_chain, /*min_pow_checked=*/true, state, /*ppindex=*/nullptr)};
+            BOOST_CHECK_MESSAGE(res == test.valid, test.comment);
+            if (!test.valid) {
                 const auto reason{state.GetRejectReason()};
-                BOOST_CHECK_MESSAGE(reason == "time-timewarp-attack" || reason == "time-negative-interval", comment);
+                BOOST_CHECK_MESSAGE(reason == "time-timewarp-attack" || reason == "time-negative-interval", test.comment);
             }
         }
     }
