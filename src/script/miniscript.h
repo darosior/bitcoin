@@ -101,6 +101,10 @@ namespace miniscript {
  *   - This generally requires 'm' for all subexpressions, and 'e' for all subexpressions
  *     which are dissatisfied when satisfying the parent.
  *
+ * An additional type property helps reasoning about "sanity":
+ * - "t" Transaction commitment:
+ *   - Satisfactions (if any) for this expression always commits to the spending transaction.
+ *
  * One type property is an implementation detail:
  * - "x" Expensive verify:
  *   - Expressions with this property have a script whose last opcode is not EQUAL, CHECKSIG, or CHECKMULTISIG.
@@ -179,6 +183,7 @@ inline consteval Type operator""_mst(const char* c, size_t l)
             *p == 'i' ? 1 << 16 : // after: contains time timelock   (cltv_time)
             *p == 'j' ? 1 << 17 : // after: contains height timelock   (cltv_height)
             *p == 'k' ? 1 << 18 : // does not contain a combination of height and time locks
+            *p == 't' ? 1 << 19 : // Transaction signed property
             (throw std::logic_error("Unknown character in _mst literal"), 0)
         );
     }
@@ -298,6 +303,8 @@ struct InputStack {
      *  filled with dummy signatures/preimages usable for witness size estimation.
      */
     Availability available = Availability::YES;
+    //! Whether the spending transaction is fixed.
+    bool commits_tx = false;
     //! Whether this stack contains a digital signature.
     bool has_sig = false;
     //! Whether this stack is malleable (can be turned into an equally valid other stack by a third party).
@@ -315,6 +322,8 @@ struct InputStack {
     InputStack(std::vector<unsigned char> in) : size(in.size() + 1), stack(Vector(std::move(in))) {}
     //! Change availability
     InputStack& SetAvailable(Availability avail);
+    //! Mark this input stack as fixing the spending transaction.
+    InputStack& SetCommitsTx();
     //! Mark this input stack as having a signature.
     InputStack& SetWithSig();
     //! Mark this input stack as non-canonical (known to not be necessary in non-malleable satisfactions).
@@ -1194,12 +1203,12 @@ private:
                 case Fragment::PK_K: {
                     std::vector<unsigned char> sig;
                     Availability avail = ctx.Sign(node.keys[0], sig);
-                    return {ZERO, InputStack(std::move(sig)).SetWithSig().SetAvailable(avail)};
+                    return {ZERO, InputStack(std::move(sig)).SetCommitsTx().SetWithSig().SetAvailable(avail)};
                 }
                 case Fragment::PK_H: {
                     std::vector<unsigned char> key = ctx.ToPKBytes(node.keys[0]), sig;
                     Availability avail = ctx.Sign(node.keys[0], sig);
-                    return {ZERO + InputStack(key), (InputStack(std::move(sig)).SetWithSig() + InputStack(key)).SetAvailable(avail)};
+                    return {ZERO + InputStack(key), (InputStack(std::move(sig)).SetCommitsTx().SetWithSig() + InputStack(key)).SetAvailable(avail)};
                 }
                 case Fragment::MULTI_A: {
                     // sats[j] represents the best stack containing j valid signatures (out of the first i keys).
@@ -1211,7 +1220,7 @@ private:
                         std::vector<unsigned char> sig;
                         Availability avail = ctx.Sign(node.keys[node.keys.size() - 1 - i], sig);
                         // Compute signature stack for just this key.
-                        auto sat = InputStack(std::move(sig)).SetWithSig().SetAvailable(avail);
+                        auto sat = InputStack(std::move(sig)).SetCommitsTx().SetWithSig().SetAvailable(avail);
                         // Compute the next sats vector: next_sats[0] is a copy of sats[0] (no signatures). All further
                         // next_sats[j] are equal to either the existing sats[j] + ZERO, or sats[j-1] plus a signature
                         // for the current (i'th) key. The very last element needs all signatures filled.
@@ -1238,7 +1247,7 @@ private:
                         std::vector<unsigned char> sig;
                         Availability avail = ctx.Sign(node.keys[i], sig);
                         // Compute signature stack for just the i'th key.
-                        auto sat = InputStack(std::move(sig)).SetWithSig().SetAvailable(avail);
+                        auto sat = InputStack(std::move(sig)).SetCommitsTx().SetWithSig().SetAvailable(avail);
                         // Compute the next sats vector: next_sats[0] is a copy of sats[0] (no signatures). All further
                         // next_sats[j] are equal to either the existing sats[j], or sats[j-1] plus a signature for the
                         // current (i'th) key. The very last element needs all signatures filled.
@@ -1414,6 +1423,9 @@ private:
             // For 'f'/'s' nodes, dissatisfactions/satisfactions must have a signature.
             if (node.GetType() << "f"_mst && ret.nsat.available != Availability::NO) assert(ret.nsat.has_sig);
             if (node.GetType() << "s"_mst && ret.sat.available != Availability::NO) assert(ret.sat.has_sig);
+
+            // For 't' nodes, satisfactions must commit to the spending transaction.
+            if (node.GetType() << "t"_mst && ret.sat.available != Availability::NO) assert(ret.sat.commits_tx);
 
             // For non-malleable 'e' nodes, a non-malleable dissatisfaction must exist.
             if (node.GetType() << "me"_mst) assert(ret.nsat.available != Availability::NO);
@@ -1622,8 +1634,8 @@ public:
     //! Check whether this script can always be satisfied in a non-malleable way.
     bool IsNonMalleable() const { return GetType() << "m"_mst; }
 
-    //! Check whether this script always needs a signature.
-    bool NeedsSignature() const { return GetType() << "s"_mst; }
+    //! Check whether spending this script requires committing to the spending transaction.
+    bool CommitsToTx() const { return GetType() << "t"_mst; }
 
     //! Check whether there is no satisfaction path that contains both timelocks and heightlocks
     bool CheckTimeLocksMix() const { return GetType() << "k"_mst; }
@@ -1638,7 +1650,7 @@ public:
     bool IsSaneSubexpression() const { return ValidSatisfactions() && IsNonMalleable() && CheckTimeLocksMix() && CheckDuplicateKey(); }
 
     //! Check whether this node is safe as a script on its own.
-    bool IsSane() const { return IsValidTopLevel() && IsSaneSubexpression() && NeedsSignature(); }
+    bool IsSane() const { return IsValidTopLevel() && IsSaneSubexpression() && CommitsToTx(); }
 
     //! Produce a witness for this script, if possible and given the information available in the context.
     //! The non-malleable satisfaction is guaranteed to be valid if it exists, and ValidSatisfaction()
@@ -1647,7 +1659,7 @@ public:
     template<typename Ctx>
     Availability Satisfy(const Ctx& ctx, std::vector<std::vector<unsigned char>>& stack, bool nonmalleable = true) const {
         auto ret = ProduceInput(ctx);
-        if (nonmalleable && (ret.sat.malleable || !ret.sat.has_sig)) return Availability::NO;
+        if (nonmalleable && (ret.sat.malleable || !ret.sat.commits_tx)) return Availability::NO;
         stack = std::move(ret.sat.stack);
         return ret.sat.available;
     }

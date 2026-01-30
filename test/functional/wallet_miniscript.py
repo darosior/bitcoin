@@ -345,7 +345,7 @@ class WalletMiniscriptTest(BitcoinTestFramework):
             ]
         )[0]
         assert not res["success"]
-        assert "is not sane: witnesses without signature exist" in res["error"]["message"]
+        assert "is not sane: witnesses that don't commit to spending transaction exist" in res["error"]["message"]
 
         # Sanity check we wouldn't let an unspendable Miniscript descriptor in
         res = self.ms_wo_wallet.importdescriptors(

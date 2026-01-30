@@ -2099,8 +2099,8 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                     error += " is not sane";
                     if (!insane_node->IsNonMalleable()) {
                         error += ": malleable witnesses exist";
-                    } else if (insane_node == node.get() && !insane_node->NeedsSignature()) {
-                        error += ": witnesses without signature exist";
+                    } else if (insane_node == node.get() && !insane_node->CommitsToTx()) {
+                        error += ": witnesses that don't commit to spending transaction exist";
                     } else if (!insane_node->CheckTimeLocksMix()) {
                         error += ": contains mixes of timelocks expressed in blocks and seconds";
                     } else if (!insane_node->CheckDuplicateKey()) {
