@@ -101,6 +101,10 @@ namespace miniscript {
  *   - This generally requires 'm' for all subexpressions, and 'e' for all subexpressions
  *     which are dissatisfied when satisfying the parent.
  *
+ * An additional type property helps reasoning about "sanity":
+ * - "t" Transaction signed:
+ *   - Satisfactions (if any) for this expression always involve at least one signature.
+ *
  * One type property is an implementation detail:
  * - "x" Expensive verify:
  *   - Expressions with this property have a script whose last opcode is not EQUAL, CHECKSIG, or CHECKMULTISIG.
@@ -179,6 +183,7 @@ inline consteval Type operator""_mst(const char* c, size_t l)
             *p == 'i' ? 1 << 16 : // after: contains time timelock   (cltv_time)
             *p == 'j' ? 1 << 17 : // after: contains height timelock   (cltv_height)
             *p == 'k' ? 1 << 18 : // does not contain a combination of height and time locks
+            *p == 't' ? 1 << 19 : // Transaction signed property
             (throw std::logic_error("Unknown character in _mst literal"), 0)
         );
     }
@@ -1622,8 +1627,8 @@ public:
     //! Check whether this script can always be satisfied in a non-malleable way.
     bool IsNonMalleable() const { return GetType() << "m"_mst; }
 
-    //! Check whether this script always needs a signature.
-    bool NeedsSignature() const { return GetType() << "s"_mst; }
+    //! Check whether this script always needs a transaction signature.
+    bool NeedsSignature() const { return GetType() << "t"_mst; }
 
     //! Check whether there is no satisfaction path that contains both timelocks and heightlocks
     bool CheckTimeLocksMix() const { return GetType() << "k"_mst; }
