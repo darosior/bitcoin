@@ -271,8 +271,8 @@ struct Satisfier : public KeyConverter {
                 return miniscript::Availability::YES;
             }
 
-            Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
             if (!miniscript::IsTapscript(m_script_ctx)) {
+                Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
                 auto it = g_testdata->signatures.find(key);
                 if (it == g_testdata->signatures.end()) return miniscript::Availability::NO;
                 sig = it->second;
@@ -280,6 +280,13 @@ struct Satisfier : public KeyConverter {
                 auto it = g_testdata->schnorr_signatures.find(XOnlyPubKey{key});
                 if (it == g_testdata->schnorr_signatures.end()) return miniscript::Availability::NO;
                 sig = it->second;
+                // Since all dummy sigs sign TestData::MESSAGE_HASH, and it is also used as the template hash,
+                // then dummy signatures are valid for both regular sig checks and rebindable sig checks with
+                // the exception that rebindable sigs should not have a sighash type byte.
+                if (std::holds_alternative<miniscript::TxRebSig>(sig_type)) {
+                    sig.pop_back();
+                    Assert(sig.size() == 64);
+                }
             }
             return miniscript::Availability::YES;
         }
@@ -809,6 +816,11 @@ BOOST_AUTO_TEST_CASE(fixed_tests)
     Test("or_i(and_b(hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),a:cms(pk_k(02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),424242babaffec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5)),and_v(v:older(42),pkh(025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)))", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1326424242babaffec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1326424242babaffec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc57ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
     Test("or_i(and_b(hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),a:cms(pk_k(02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),abab42)),and_v(v:older(42),pkh(025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)))", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1303abab427ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876b20e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1303abab427ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
     Test("or_i(and_b(hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),a:cms(pk_i(),00)),and_v(v:older(42),pkh(025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)))", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876bcb01007ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", "6382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d07876bcb01007ccc6c9a67012ab26976a9141a7ac36cfa8431ab2395d701b0050045ae4a37d188ac68", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID);
+    Test("or_i(r:and_v(v:after(500000),pk_k(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5)),sha256(d9147961436944f43cd99d28b2bbddbf452ef872b30c8279e255e7daafc7f946))", "", "630320a107b16920c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5bb7ccc6782012088a820d9147961436944f43cd99d28b2bbddbf452ef872b30c8279e255e7daafc7f9468768", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID, 12, 2, -1, 2 + 66, 3);
+    Test("and_n(sha256(9267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed2),ur:and_v(v:older(144),pk_k(03fe72c435413d33d48ac09c9161ba8b09683215439d62b7940502bda8b202e6ce)))", "", "82012088a8209267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed28764006763029000b26920fe72c435413d33d48ac09c9161ba8b09683215439d62b7940502bda8b202e6cebb7ccc67006868", TESTMODE_VALID | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID, 15, 3, -1, 33 + 2 + 66, 5);
+    Test("r:or_i(and_v(v:older(16),pk_h(02d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e)),pk_h(026a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b4))", "", "6360b26976a9144d4421361c3289bdad06441ffaee8be8e786f1ad886776a91460d4a7bcbd08f58e58bd208d1069837d7adb16ae8868bb7ccc", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_NEEDSIG | TESTMODE_P2WSH_INVALID, 14, 3, -1, 2 + 33 + 66, 4);
+    Test("or_d(r:pk_h(02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),andor(r:pk_k(024ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c97),older(2016),after(1567547623)))", "", "76a91421ab1a140d0d305b8ff62bdb887d9fef82c9899e88bb7ccc7364204ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c97bb7ccc6404e7e06e5db16702e007b26868", TESTMODE_VALID | TESTMODE_NONMAL | TESTMODE_P2WSH_INVALID, 17, 3, -1, 1 + 33 + 66, 5);
+    Test("thresh(1,r:pk_k(03d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65),altv:after(1000000000),altv:after(100))", "", "20d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65bb7ccc6b6300670400ca9a3bb16951686c936b6300670164b16951686c935187", TESTMODE_VALID | TESTMODE_P2WSH_INVALID, 20, 3, -1, 66 + 2 + 2, 5);
 
     // Parsing from Script a cms() inside an and_v() will roundtrip to Script
     constexpr std::array<std::string_view, 2> cms_andv_roundtrip{{
