@@ -221,6 +221,15 @@ DESCS_PRIV = [
         "locktime": 42,
         "sigs_count": 1,
         "stack_size": None,
+    },
+    # LN-Symmetry update transaction output script with a regular pk_k() as the rebindable signature key instead of OP_IK because
+    # using the latter would lead to always finalizing through the key spend path, and with settlement tx template hash 424242..
+    {
+        "desc": f"tr({TPUBS[0]}/*,{{and_v(vr:pk_k({TPRVS[1]}),after(21)),th(4242424242424242424242424242424242424242424242424242424242424242)}})",
+        "sequence": None,
+        "locktime": 21,
+        "sigs_count": 1,
+        "stack_size": 3,
     }
 ]
 
