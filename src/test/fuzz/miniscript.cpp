@@ -312,10 +312,20 @@ struct SatisfierContext : ParserContext {
             }
             return miniscript::Availability::NO;
         }
-        Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
         bool sig_available{false};
         if (auto res = TEST_DATA.GetSig(script_ctx, key)) {
             std::tie(sig, sig_available) = *res;
+        }
+        if (script_ctx == MsCtx::TAPSCRIPT) {
+            // Since all dummy sigs sign TestData::MESSAGE_HASH, and it is also used as the template hash,
+            // then dummy signatures are valid for both regular sig checks and rebindable sig checks with
+            // the exception that rebindable sigs should not have a sighash type byte.
+            if (std::holds_alternative<miniscript::TxRebSig>(sig_type)) {
+                sig.pop_back();
+                Assert(sig.size() == 64);
+            }
+        } else {
+            Assert(std::holds_alternative<miniscript::TxSig>(sig_type));
         }
         return sig_available ? miniscript::Availability::YES : miniscript::Availability::NO;
     }
@@ -665,7 +675,8 @@ struct SmartInfo
                 case Fragment::MULTI_A:
                 case Fragment::PK_I:
                 case Fragment::TH:
-                case Fragment::CMS: return true;
+                case Fragment::CMS:
+                case Fragment::WRAP_R: return true;
                 default: return false;
             }
         }};
@@ -724,6 +735,7 @@ struct SmartInfo
                 case Fragment::WRAP_V:
                 case Fragment::WRAP_J:
                 case Fragment::WRAP_N:
+                case Fragment::WRAP_R:
                     sub_count = 1;
                     break;
                 case Fragment::AND_V:
@@ -936,6 +948,7 @@ std::optional<NodeInfo> ConsumeNodeSmart(MsCtx script_ctx, FuzzedDataProvider& p
         case Fragment::WRAP_V:
         case Fragment::WRAP_J:
         case Fragment::WRAP_N:
+        case Fragment::WRAP_R:
         case Fragment::AND_V:
         case Fragment::AND_B:
         case Fragment::OR_B:
@@ -1072,6 +1085,9 @@ NodeRef GenNode(MsCtx script_ctx, F ConsumeNode, Type root_type, std::optional<C
                 break;
             case Fragment::WRAP_N:
                 ops += 1;
+                break;
+            case Fragment::WRAP_R:
+                ops += 3;
                 break;
             }
             if (ops > MAX_OPS_PER_SCRIPT) return {};

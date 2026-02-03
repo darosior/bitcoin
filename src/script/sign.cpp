@@ -345,6 +345,9 @@ struct TapSatisfier: Satisfier<XOnlyPubKey> {
             }
             custom_msg = uint256{custom_sig->msg};
         }
+        if (std::holds_alternative<miniscript::TxRebSig>(sig_type)) {
+            custom_msg = GetTemplateHash();
+        }
         if (CreateTaprootScriptSig(m_creator, m_sig_data, m_provider, sig, key, m_leaf_hash, SigVersion::TAPSCRIPT, custom_msg)) {
             return miniscript::Availability::YES;
         }

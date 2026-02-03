@@ -64,7 +64,7 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
         assert(n_subs == 3);
     } else if (fragment == Fragment::WRAP_A || fragment == Fragment::WRAP_S || fragment == Fragment::WRAP_C ||
                fragment == Fragment::WRAP_D || fragment == Fragment::WRAP_V || fragment == Fragment::WRAP_J ||
-               fragment == Fragment::WRAP_N || fragment == Fragment::CMS) {
+               fragment == Fragment::WRAP_N || fragment == Fragment::CMS || fragment == Fragment::WRAP_R) {
         assert(n_subs == 1);
     } else if (fragment != Fragment::THRESH) {
         assert(n_subs == 0);
@@ -118,6 +118,11 @@ Type ComputeType(Fragment fragment, Type x, Type y, Type z, const std::vector<Ty
             (x & "ghijk"_mst) | // g=g_x, h=h_x, i=i_x, j=j_x, k=k_x
             (x & "ondfem"_mst) | // o=o_x, n=n_x, d=d_x, f=f_x, e=e_x, m=m_x
             "ust"_mst; // u, s, t
+        case Fragment::WRAP_R: return
+            "B"_mst.If(x << "K"_mst) | // B=K_x
+            (x & "ghijk"_mst) | // g=g_x, h=h_x, i=i_x, j=j_x, k=k_x
+            (x & "ondfem"_mst) | // o=o_x, n=n_x, d=d_x, f=f_x, e=e_x, m=m_x
+            "ustx"_mst; // u, s, t, x
         case Fragment::WRAP_D: return
             "B"_mst.If(x << "Vz"_mst) | // B=V_x*z_x
             "o"_mst.If(x << "z"_mst) | // o=z_x
@@ -304,6 +309,7 @@ size_t ComputeScriptLen(Fragment fragment, Type sub0typ, size_t subsize, uint32_
         case Fragment::OR_I:
         case Fragment::ANDOR: return subsize + 3;
         case Fragment::WRAP_J: return subsize + 4;
+        case Fragment::WRAP_R: return subsize + 1 + 1 + 1;
         case Fragment::THRESH: return subsize + n_subs + BuildScript(k).size();
     }
     assert(false);
