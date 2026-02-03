@@ -222,6 +222,7 @@ enum class Fragment {
     WRAP_C,    //!< [X] OP_CHECKSIG
     WRAP_D,    //!< OP_DUP OP_IF [X] OP_ENDIF
     WRAP_V,    //!< [X] OP_VERIFY (or -VERIFY version of last opcode in X)
+    WRAP_R,    //!< [X] OP_TEMPLATEHASH OP_SWAP OP_CHECKSIGVERIFY
     WRAP_J,    //!< OP_SIZE OP_0NOTEQUAL OP_IF [X] OP_ENDIF
     WRAP_N,    //!< [X] OP_0NOTEQUAL
     CMS,       //!< [X] <m> OP_SWAP OP_CHECKSIGVERIFY
@@ -249,14 +250,15 @@ enum class Availability {
 
 struct NoSig {};
 struct TxSig {};
+struct TxRebSig {};
 struct CustomSig {
     std::span<const uint8_t> msg;
 };
 /** The type of message for a signature check. May be NoSig if no parent of a fragment comports a
  * signature check, TxSig if the parent (or an ancestor) of a fragment is a regular transaction
- * signature check (CHECKSIG and friends), and CustomSig if it is a signature check for an arbitrary
- * message. */
-using SigMsgType = std::variant<NoSig, TxSig, CustomSig>;
+ * signature check (CHECKSIG and friends), TxRebSig if it is a rebindable signature check, and CustomSig
+ * if it is a signature check for an arbitrary message. */
+using SigMsgType = std::variant<NoSig, TxSig, TxRebSig, CustomSig>;
 
 enum class MiniscriptContext {
     P2WSH,
@@ -813,6 +815,10 @@ public:
                         return std::move(subs[0]);
                     }
                 }
+                case Fragment::WRAP_R: {
+                    CHECK_NONFATAL(is_tapscript);
+                    return BuildScript(std::move(subs[0]), OP_TEMPLATEHASH, OP_SWAP, OP_CHECKSIGFROMSTACK);
+                }
                 case Fragment::WRAP_J: return BuildScript(OP_SIZE, OP_0NOTEQUAL, OP_IF, subs[0], OP_ENDIF);
                 case Fragment::WRAP_N: return BuildScript(std::move(subs[0]), OP_0NOTEQUAL);
                 case Fragment::CMS: {
@@ -866,7 +872,7 @@ public:
             return (node.fragment == Fragment::WRAP_A || node.fragment == Fragment::WRAP_S ||
                     node.fragment == Fragment::WRAP_D || node.fragment == Fragment::WRAP_V ||
                     node.fragment == Fragment::WRAP_J || node.fragment == Fragment::WRAP_N ||
-                    node.fragment == Fragment::WRAP_C ||
+                    node.fragment == Fragment::WRAP_C || node.fragment == Fragment::WRAP_R ||
                     (node.fragment == Fragment::AND_V && node.subs[1]->fragment == Fragment::JUST_1) ||
                     (node.fragment == Fragment::OR_I && node.subs[0]->fragment == Fragment::JUST_0) ||
                     (node.fragment == Fragment::OR_I && node.subs[1]->fragment == Fragment::JUST_0));
@@ -902,6 +908,10 @@ public:
                 case Fragment::WRAP_V: return "v" + std::move(subs[0]);
                 case Fragment::WRAP_J: return "j" + std::move(subs[0]);
                 case Fragment::WRAP_N: return "n" + std::move(subs[0]);
+                case Fragment::WRAP_R: {
+                    CHECK_NONFATAL(is_tapscript);
+                    return "r" + std::move(subs[0]);
+                }
                 case Fragment::AND_V:
                     // t:X is syntactic sugar for and_v(X,1).
                     if (node.subs[1]->fragment == Fragment::JUST_1) return "t" + std::move(subs[0]);
@@ -1043,6 +1053,7 @@ private:
             case Fragment::WRAP_N: return {1 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
             case Fragment::WRAP_A: return {2 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
             case Fragment::WRAP_D: return {3 + subs[0]->ops.count, subs[0]->ops.sat, 0};
+            case Fragment::WRAP_R: return {3 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
             case Fragment::WRAP_J: return {4 + subs[0]->ops.count, subs[0]->ops.sat, 0};
             case Fragment::WRAP_V: return {subs[0]->ops.count + (subs[0]->GetType() << "x"_mst), subs[0]->ops.sat, {}};
             case Fragment::CMS: return {2 + subs[0]->ops.count, subs[0]->ops.sat, subs[0]->ops.dsat};
@@ -1147,6 +1158,11 @@ private:
                 SatInfo::OP_DUP() + SatInfo::If() + subs[0]->ss.sat,
                 SatInfo::OP_DUP() + SatInfo::If()
             };
+            case Fragment::WRAP_R: return {
+                // Get the key on the stack, then push the template hash, then CSFS
+                subs[0]->ss.sat + SatInfo::Push() + SatInfo::OP_CSFS(),
+                subs[0]->ss.dsat + SatInfo::Push() + SatInfo::OP_CSFS(),
+            };
             case Fragment::WRAP_V: return {subs[0]->ss.sat + SatInfo::OP_VERIFY(), {}};
             case Fragment::WRAP_J: return {
                 SatInfo::OP_SIZE() + SatInfo::OP_0NOTEQUAL() + SatInfo::If() + subs[0]->ss.sat,
@@ -1187,6 +1203,8 @@ private:
     }
 
     internal::WitnessSize CalcWitnessSize() const {
+        // NOTE: this is a 1-byte overestimation for 'cms()' / 'r:' fragments since CSFS signatures
+        // must always be 64-byte long.
         const uint32_t sig_size = IsTapscript(m_script_ctx) ? 1 + 65 : 1 + 72;
         const uint32_t pubkey_size = IsTapscript(m_script_ctx) ? 1 + 32 : 1 + 33;
         switch (fragment) {
@@ -1222,6 +1240,7 @@ private:
             case Fragment::WRAP_A:
             case Fragment::WRAP_N:
             case Fragment::WRAP_S:
+            case Fragment::WRAP_R:
             case Fragment::WRAP_C: return subs[0]->ws;
             case Fragment::WRAP_D: return {1 + 1 + subs[0]->ws.sat, 1};
             case Fragment::WRAP_V: return {subs[0]->ws.sat, {}};
@@ -1256,6 +1275,8 @@ private:
                 return TxSig{};
             } else if (node.fragment == Fragment::CMS) {
                 return CustomSig{.msg = std::span<const uint8_t>{node.data}};
+            } else if (node.fragment == Fragment::WRAP_R) {
+                return TxRebSig{};
             }
             return sig_type;
         };
@@ -1444,6 +1465,7 @@ private:
                 case Fragment::WRAP_S:
                 case Fragment::WRAP_C:
                 case Fragment::WRAP_N:
+                case Fragment::WRAP_R:
                     return std::move(subres[0]);
                 case Fragment::WRAP_D: {
                     auto &x = subres[0];
@@ -1789,6 +1811,8 @@ enum class ParseContext {
     ALT,
     /** CHECK wraps the top constructed node with c: */
     CHECK,
+    /** REBCHECK wraps the top constructed node with r: */
+    REBCHECK,
     /** DUP_IF wraps the top constructed node with d: */
     DUP_IF,
     /** VERIFY wraps the top constructed node with v: */
@@ -1998,6 +2022,10 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
                     script_size += 4;
                     constructed.push_back(MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::JUST_0));
                     to_parse.emplace_back(ParseContext::OR_I, -1, -1);
+                } else if (in[j] == 'r') {
+                    if (!IsTapscript(ctx.MsContext())) return {};
+                    script_size += 3;
+                    to_parse.emplace_back(ParseContext::REBCHECK, -1, -1);
                 } else {
                     return {};
                 }
@@ -2185,6 +2213,10 @@ inline NodeRef<Key> Parse(Span<const char> in, const Ctx& ctx)
             constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_C, Vector(std::move(constructed.back())));
             break;
         }
+        case ParseContext::REBCHECK: {
+            constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_R, Vector(std::move(constructed.back())));
+            break;
+        }
         case ParseContext::DUP_IF: {
             constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_D, Vector(std::move(constructed.back())));
             break;
@@ -2325,6 +2357,8 @@ enum class DecodeContext {
     ALT,
     /** CHECK wraps the top constructed node with c: */
     CHECK,
+    /** REBCHECK wraps the top constructed node with c: */
+    REBCHECK,
     /** DUP_IF wraps the top constructed node with d: */
     DUP_IF,
     /** VERIFY wraps the top constructed node with v: */
@@ -2553,6 +2587,14 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
                 to_parse.emplace_back(DecodeContext::SINGLE_BKV_EXPR, -1, -1);
                 break;
             }
+            // r: wrapper
+            if (last - in >= 3 && in[0].first == OP_CHECKSIGFROMSTACK && in[1].first == OP_SWAP && in[2].first == OP_TEMPLATEHASH) {
+                if (!IsTapscript(ctx.MsContext())) return {};
+                in += 3;
+                to_parse.emplace_back(DecodeContext::REBCHECK, -1, -1);
+                to_parse.emplace_back(DecodeContext::SINGLE_BKV_EXPR, -1, -1);
+                break;
+            }
             // v: wrapper
             if (in[0].first == OP_VERIFY) {
                 ++in;
@@ -2655,6 +2697,11 @@ inline NodeRef<Key> DecodeScript(I& in, I last, const Ctx& ctx)
             if (in >= last || in[0].first != OP_TOALTSTACK || constructed.empty()) return {};
             ++in;
             constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_A, Vector(std::move(constructed.back())));
+            break;
+        }
+        case DecodeContext::REBCHECK: {
+            if (constructed.empty()) return {};
+            constructed.back() = MakeNodeRef<Key>(internal::NoDupCheck{}, ctx.MsContext(), Fragment::WRAP_R, Vector(std::move(constructed.back())));
             break;
         }
         case DecodeContext::CHECK: {
