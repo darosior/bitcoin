@@ -987,6 +987,13 @@ const RPCResult decodepsbt_outputs{
                     }},
                 }},
             }},
+            {RPCResult::Type::OBJ_DYN, "committed_transactions", /*optional=*/true, "Map from template hash to corresponding transaction details",
+            {
+                {RPCResult::Type::OBJ, "xxxx", "Committed transaction details. Not all listed fields are committed to in the template hash, and may be different in a spending transaction.",
+                {
+                    {RPCResult::Type::ELISION, "", "The layout is the same as the output of decoderawtransaction."},
+                }},
+            }},
             {RPCResult::Type::OBJ_DYN, "unknown", /*optional=*/true, "The unknown output fields",
             {
                 {RPCResult::Type::STR_HEX, "key", "(key-value pair) An unknown key-value pair"},
@@ -1401,6 +1408,16 @@ static RPCHelpMan decodepsbt()
                 keypaths.push_back(std::move(path_obj));
             }
             out.pushKV("taproot_bip32_derivs", std::move(keypaths));
+        }
+
+        if (!output.m_committed_txs.empty()) {
+            UniValue tx_map{UniValue::VOBJ};
+            for (const auto& [template_hash, tx]: output.m_committed_txs) {
+                UniValue tx_details{UniValue::VOBJ};
+                TxToUniv(CTransaction{tx}, /*block_hash=*/uint256{}, /*entry=*/tx_details, /*include_hex=*/false);
+                tx_map.pushKV(HexStr(template_hash), std::move(tx_details));
+            }
+            out.pushKV("committed_transactions", tx_map);
         }
 
         // Proprietary

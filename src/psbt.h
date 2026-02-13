@@ -59,6 +59,7 @@ static constexpr uint8_t PSBT_OUT_BIP32_DERIVATION = 0x02;
 static constexpr uint8_t PSBT_OUT_TAP_INTERNAL_KEY = 0x05;
 static constexpr uint8_t PSBT_OUT_TAP_TREE = 0x06;
 static constexpr uint8_t PSBT_OUT_TAP_BIP32_DERIVATION = 0x07;
+static constexpr uint8_t PSBT_OUT_COMMITTED_TXS = 0x0b;
 static constexpr uint8_t PSBT_OUT_PROPRIETARY = 0xFC;
 
 // The separator is 0x00. Reading this in means that the unserializer can interpret it
@@ -719,6 +720,7 @@ struct PSBTOutput
     XOnlyPubKey m_tap_internal_key;
     std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>> m_tap_tree;
     std::map<XOnlyPubKey, std::pair<std::set<uint256>, KeyOriginInfo>> m_tap_bip32_paths;
+    std::map<uint256, CMutableTransaction> m_committed_txs;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
 
@@ -779,6 +781,12 @@ struct PSBTOutput
             s_value << leaf_hashes;
             SerializeKeyOrigin(s_value, origin);
             s << value;
+        }
+
+        // Write the OP_TEMPLATEHASH-committed transactions
+        for (const auto& [hash, tx]: m_committed_txs) {
+            SerializeToVector(s, PSBT_OUT_COMMITTED_TXS, hash);
+            SerializeToVector(s, TX_WITH_WITNESS(tx));
         }
 
         // Write unknown things
@@ -905,6 +913,19 @@ struct PSBTOutput
                     }
                     size_t origin_len = value_len - hashes_len;
                     m_tap_bip32_paths.emplace(xonly, std::make_pair(leaf_hashes, DeserializeKeyOrigin(s, origin_len)));
+                    break;
+                }
+                case PSBT_OUT_COMMITTED_TXS:
+                {
+                    if (!key_lookup.emplace(key).second) {
+                        throw std::ios_base::failure("Duplicate Key, output committed transaction already provided");
+                    } else if (key.size() != 33) {
+                        throw std::ios_base::failure("Output committed transaction key is not 33 bytes");
+                    }
+                    uint256 hash{std::span<uint8_t>{key.begin() + 1, key.end()}};
+                    CMutableTransaction tx;
+                    UnserializeFromVector(s, TX_WITH_WITNESS(tx));
+                    m_committed_txs.emplace(std::move(hash), std::move(tx));
                     break;
                 }
                 case PSBT_OUT_PROPRIETARY:
