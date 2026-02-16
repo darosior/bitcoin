@@ -60,6 +60,7 @@ static constexpr uint8_t PSBT_OUT_TAP_INTERNAL_KEY = 0x05;
 static constexpr uint8_t PSBT_OUT_TAP_TREE = 0x06;
 static constexpr uint8_t PSBT_OUT_TAP_BIP32_DERIVATION = 0x07;
 static constexpr uint8_t PSBT_OUT_COMMITTED_TXS = 0x0b;
+static constexpr uint8_t PSBT_OUT_TAP_INTERNAL_KEYS = 0x0c;
 static constexpr uint8_t PSBT_OUT_PROPRIETARY = 0xFC;
 
 // The separator is 0x00. Reading this in means that the unserializer can interpret it
@@ -721,6 +722,8 @@ struct PSBTOutput
     std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>> m_tap_tree;
     std::map<XOnlyPubKey, std::pair<std::set<uint256>, KeyOriginInfo>> m_tap_bip32_paths;
     std::map<uint256, CTransaction> m_committed_txs;
+    //! Map from output key to internal key for output of transactions committed in this output.
+    std::map<XOnlyPubKey, XOnlyPubKey> m_tap_internal_keys;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
 
@@ -787,6 +790,12 @@ struct PSBTOutput
         for (const auto& [hash, tx]: m_committed_txs) {
             SerializeToVector(s, PSBT_OUT_COMMITTED_TXS, hash);
             s << TX_WITH_WITNESS(tx);
+        }
+
+        // Write the additional Taproot internal keys
+        for (const auto& [output_key, internal_key]: m_tap_internal_keys) {
+            SerializeToVector(s, PSBT_OUT_TAP_INTERNAL_KEYS, output_key);
+            s << internal_key;
         }
 
         // Write unknown things
@@ -925,6 +934,18 @@ struct PSBTOutput
                     uint256 hash{std::span<uint8_t>{key.begin() + 1, key.end()}};
                     CTransaction tx{deserialize, TX_WITH_WITNESS, s};
                     m_committed_txs.emplace(std::move(hash), std::move(tx));
+                    break;
+                }
+                case PSBT_OUT_TAP_INTERNAL_KEYS:
+                {
+                    if (!key_lookup.emplace(key).second) {
+                        throw std::ios_base::failure("Duplicate Key, additional output Taproot internal key already provided");
+                    } else if (key.size() != 33) {
+                        throw std::ios_base::failure("Additional output Taproot internal key key is not 33 bytes");
+                    }
+                    XOnlyPubKey output_key{std::span(key).last(32)}, internal_key;
+                    s >> internal_key;
+                    m_tap_internal_keys.emplace(std::move(output_key), std::move(internal_key));
                     break;
                 }
                 case PSBT_OUT_PROPRIETARY:
