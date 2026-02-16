@@ -61,6 +61,7 @@ static constexpr uint8_t PSBT_OUT_TAP_TREE = 0x06;
 static constexpr uint8_t PSBT_OUT_TAP_BIP32_DERIVATION = 0x07;
 static constexpr uint8_t PSBT_OUT_COMMITTED_TXS = 0x0b;
 static constexpr uint8_t PSBT_OUT_TAP_INTERNAL_KEYS = 0x0c;
+static constexpr uint8_t PSBT_OUT_TAP_TREES = 0x0d;
 static constexpr uint8_t PSBT_OUT_PROPRIETARY = 0xFC;
 
 // The separator is 0x00. Reading this in means that the unserializer can interpret it
@@ -712,8 +713,10 @@ struct PSBTInput
     }
 };
 
+using TapTreeList = std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>>;
+
 template<typename Stream>
-void SerTapTree(Stream& s, const std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>>& tap_tree)
+void SerTapTree(Stream& s, const TapTreeList& tap_tree)
 {
     std::vector<unsigned char> value;
     VectorWriter s_value{value, 0};
@@ -726,7 +729,7 @@ void SerTapTree(Stream& s, const std::vector<std::tuple<uint8_t, uint8_t, std::v
 }
 
 template<typename Stream>
-void UnserTapTree(Stream& s, std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>>& tap_tree)
+void UnserTapTree(Stream& s, TapTreeList& tap_tree)
 {
     std::vector<unsigned char> tree_v;
     s >> tree_v;
@@ -763,11 +766,13 @@ struct PSBTOutput
     CScript witness_script;
     std::map<CPubKey, KeyOriginInfo> hd_keypaths;
     XOnlyPubKey m_tap_internal_key;
-    std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>> m_tap_tree;
+    TapTreeList m_tap_tree;
     std::map<XOnlyPubKey, std::pair<std::set<uint256>, KeyOriginInfo>> m_tap_bip32_paths;
     std::map<uint256, CTransaction> m_committed_txs;
     //! Map from output key to internal key for output of transactions committed in this output.
     std::map<XOnlyPubKey, XOnlyPubKey> m_tap_internal_keys;
+    //! Map from output key to Tap tree for output of transactions committed in this output.
+    std::map<XOnlyPubKey, TapTreeList> m_tap_trees;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
 
@@ -833,6 +838,12 @@ struct PSBTOutput
         for (const auto& [output_key, internal_key]: m_tap_internal_keys) {
             SerializeToVector(s, PSBT_OUT_TAP_INTERNAL_KEYS, output_key);
             s << internal_key;
+        }
+
+        // Write the additional Taproot trees
+        for (const auto& [output_key, tree]: m_tap_trees) {
+            SerializeToVector(s, PSBT_OUT_TAP_TREES, output_key);
+            SerTapTree(s, tree);
         }
 
         // Write unknown things
@@ -958,6 +969,17 @@ struct PSBTOutput
                     XOnlyPubKey output_key{std::span(key).last(32)}, internal_key;
                     s >> internal_key;
                     m_tap_internal_keys.emplace(std::move(output_key), std::move(internal_key));
+                    break;
+                }
+                case PSBT_OUT_TAP_TREES:
+                {
+                    if (!key_lookup.emplace(key).second) {
+                        throw std::ios_base::failure("Duplicate Key, additional output Taproot internal key already provided");
+                    } else if (key.size() != 33) {
+                        throw std::ios_base::failure("Additional output Taproot internal key key is not 33 bytes");
+                    }
+                    XOnlyPubKey output_key{std::span(key).last(32)};
+                    UnserTapTree(s, m_tap_trees[output_key]);
                     break;
                 }
                 case PSBT_OUT_PROPRIETARY:
