@@ -994,6 +994,10 @@ const RPCResult decodepsbt_outputs{
                     {RPCResult::Type::ELISION, "", "The layout is the same as the output of decoderawtransaction."},
                 }},
             }},
+            {RPCResult::Type::OBJ_DYN, "internal_keys", /*optional=*/true, "Map from output key to internal key for Taproot outputs of committed transactions",
+            {
+                {RPCResult::Type::STR_HEX, "xxxx", "Taproot internal key, keyed by Taproot output key"},
+            }},
             {RPCResult::Type::OBJ_DYN, "unknown", /*optional=*/true, "The unknown output fields",
             {
                 {RPCResult::Type::STR_HEX, "key", "(key-value pair) An unknown key-value pair"},
@@ -1418,6 +1422,14 @@ static RPCHelpMan decodepsbt()
                 tx_map.pushKV(HexStr(template_hash), std::move(tx_details));
             }
             out.pushKV("committed_transactions", tx_map);
+        }
+
+        if (!output.m_tap_internal_keys.empty()) {
+            UniValue keys_map{UniValue::VOBJ};
+            for (const auto& [output_key, internal_key]: output.m_tap_internal_keys) {
+                keys_map.pushKV(HexStr(output_key), HexStr(internal_key));
+            }
+            out.pushKV("internal_keys", std::move(keys_map));
         }
 
         // Proprietary
