@@ -712,6 +712,50 @@ struct PSBTInput
     }
 };
 
+template<typename Stream>
+void SerTapTree(Stream& s, const std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>>& tap_tree)
+{
+    std::vector<unsigned char> value;
+    VectorWriter s_value{value, 0};
+    for (const auto& [depth, leaf_ver, script] : tap_tree) {
+        s_value << depth;
+        s_value << leaf_ver;
+        s_value << script;
+    }
+    s << value;
+}
+
+template<typename Stream>
+void UnserTapTree(Stream& s, std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>>& tap_tree)
+{
+    std::vector<unsigned char> tree_v;
+    s >> tree_v;
+    SpanReader s_tree{tree_v};
+    if (s_tree.empty()) {
+        throw std::ios_base::failure("Output Taproot tree must not be empty");
+    }
+    TaprootBuilder builder;
+    while (!s_tree.empty()) {
+        uint8_t depth;
+        uint8_t leaf_ver;
+        std::vector<unsigned char> script;
+        s_tree >> depth;
+        s_tree >> leaf_ver;
+        s_tree >> script;
+        if (depth > TAPROOT_CONTROL_MAX_NODE_COUNT) {
+            throw std::ios_base::failure("Output Taproot tree has as leaf greater than Taproot maximum depth");
+        }
+        if ((leaf_ver & ~TAPROOT_LEAF_MASK) != 0) {
+            throw std::ios_base::failure("Output Taproot tree has a leaf with an invalid leaf version");
+        }
+        tap_tree.emplace_back(depth, leaf_ver, script);
+        builder.Add((int)depth, script, (int)leaf_ver, /*track=*/true);
+    }
+    if (!builder.IsComplete()) {
+        throw std::ios_base::failure("Output Taproot tree is malformed");
+    }
+}
+
 /** A structure for PSBTs which contains per output information */
 struct PSBTOutput
 {
@@ -765,14 +809,7 @@ struct PSBTOutput
         // Write taproot tree
         if (!m_tap_tree.empty()) {
             SerializeToVector(s, PSBT_OUT_TAP_TREE);
-            std::vector<unsigned char> value;
-            VectorWriter s_value{value, 0};
-            for (const auto& [depth, leaf_ver, script] : m_tap_tree) {
-                s_value << depth;
-                s_value << leaf_ver;
-                s_value << script;
-            }
-            s << value;
+            SerTapTree(s, m_tap_tree);
         }
 
         // Write taproot bip32 keypaths
@@ -875,32 +912,7 @@ struct PSBTOutput
                     } else if (key.size() != 1) {
                         throw std::ios_base::failure("Output Taproot tree key is more than one byte type");
                     }
-                    std::vector<unsigned char> tree_v;
-                    s >> tree_v;
-                    SpanReader s_tree{tree_v};
-                    if (s_tree.empty()) {
-                        throw std::ios_base::failure("Output Taproot tree must not be empty");
-                    }
-                    TaprootBuilder builder;
-                    while (!s_tree.empty()) {
-                        uint8_t depth;
-                        uint8_t leaf_ver;
-                        std::vector<unsigned char> script;
-                        s_tree >> depth;
-                        s_tree >> leaf_ver;
-                        s_tree >> script;
-                        if (depth > TAPROOT_CONTROL_MAX_NODE_COUNT) {
-                            throw std::ios_base::failure("Output Taproot tree has as leaf greater than Taproot maximum depth");
-                        }
-                        if ((leaf_ver & ~TAPROOT_LEAF_MASK) != 0) {
-                            throw std::ios_base::failure("Output Taproot tree has a leaf with an invalid leaf version");
-                        }
-                        m_tap_tree.emplace_back(depth, leaf_ver, script);
-                        builder.Add((int)depth, script, (int)leaf_ver, /*track=*/true);
-                    }
-                    if (!builder.IsComplete()) {
-                        throw std::ios_base::failure("Output Taproot tree is malformed");
-                    }
+                    UnserTapTree(s, m_tap_tree);
                     break;
                 }
                 case PSBT_OUT_TAP_BIP32_DERIVATION:
