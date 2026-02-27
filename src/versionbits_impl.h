@@ -7,6 +7,7 @@
 
 #include <chain.h>
 #include <sync.h>
+#include <util/check.h>
 #include <versionbits.h>
 
 /** BIP 9 defines a finite-state-machine to deploy a softfork in multiple stages.
@@ -71,7 +72,9 @@ protected:
     }
 
 public:
-    explicit VersionBitsConditionChecker(const Consensus::BIP9Deployment& dep) : dep{dep} {}
+    explicit VersionBitsConditionChecker(const Consensus::BIP9Deployment& dep) : dep{dep} {
+        Assert(dep.bit < VERSIONBITS_NUM_BITS);
+    }
     explicit VersionBitsConditionChecker(const Consensus::Params& params, Consensus::DeploymentPos id) : VersionBitsConditionChecker{params.vDeployments[id]} {}
 
     uint32_t Mask() const { return (uint32_t{1}) << dep.bit; }

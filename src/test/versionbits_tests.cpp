@@ -33,7 +33,7 @@ public:
 };
 
 namespace {
-constexpr uint32_t TEST_DEP_BIT{8};
+constexpr uint32_t TEST_DEP_BIT{3};
 
 struct Deployments
 {

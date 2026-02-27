@@ -44,7 +44,7 @@ constexpr bool ValidDeployment(DeploymentPos dep) { return dep < MAX_VERSION_BIT
  */
 struct BIP9Deployment {
     /** Bit position to select the particular bit in nVersion. */
-    int bit{28};
+    int bit{4};
     /** Start MedianTime for version bits miner confirmation. Can be a date in the past */
     int64_t nStartTime{NEVER_ACTIVE};
     /** Timeout/expiry MedianTime for the deployment attempt. */

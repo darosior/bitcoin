@@ -223,7 +223,7 @@ class BlockchainTest(BitcoinTestFramework):
             'testdummy': {
                 'type': 'bip9',
                 'bip9': {
-                    'bit': 28,
+                    'bit': 4,
                     'start_time': 0,
                     'timeout': 0x7fffffffffffffff,  # testdummy does not have a timeout so is set to the max int64 value
                     'min_activation_height': 0,
