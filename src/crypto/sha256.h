@@ -32,9 +32,10 @@ enum UseImplementation : uint8_t {
     USE_SSE4 = 1 << 0,
     USE_AVX2 = 1 << 1,
     USE_SHANI = 1 << 2,
+    USE_NEON = 1 << 3,
     USE_SSE4_AND_AVX2 = USE_SSE4 | USE_AVX2,
     USE_SSE4_AND_SHANI = USE_SSE4 | USE_SHANI,
-    USE_ALL = USE_SSE4 | USE_AVX2 | USE_SHANI,
+    USE_ALL = USE_SSE4 | USE_AVX2 | USE_SHANI | USE_NEON,
 };
 }
 

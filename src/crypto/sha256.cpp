@@ -58,6 +58,11 @@ namespace sha256d64_arm_shani
 {
 void Transform_2way(unsigned char* out, const unsigned char* in);
 }
+
+namespace sha256d64_neon
+{
+void Transform_4way(unsigned char* out, const unsigned char* in);
+}
 #endif // DISABLE_OPTIMIZED_SHA256
 
 // Internal implementation code.
@@ -683,6 +688,43 @@ std::string SHA256AutoDetect(sha256_implementation::UseImplementation use_implem
         ret = "arm_shani(1way;2way)";
     }
 #endif
+
+#if defined(ENABLE_ARM_NEON)
+    const bool use_neon{[&](){
+        if (!(use_implementation & sha256_implementation::USE_NEON)) {
+            return false;
+        }
+
+#if defined(__linux__)
+        const unsigned long capabilities{getauxval(AT_HWCAP)};
+#if defined(__arm__) // 32-bit
+        if (capabilities & HWCAP_NEON) {
+            return true;
+        }
+#endif
+#if defined(__aarch64__) // 64-bit
+        // https://www.kernel.org/doc/html/latest/arch/arm64/elf_hwcaps.html says that ASIMD checks
+        // register == 0b0000 and ASIMDHP checks that register == 0b0001, so check both to be sure.
+        if (capabilities & HWCAP_ASIMD || capabilities & HWCAP_ASIMDHP) {
+            return true;
+        }
+#endif
+#endif
+
+#if defined(__APPLE__)
+        // SIMD is always present on Apple silicon. See https://developer.apple.com/documentation/kernel/1387446-sysctlbyname/determining_instruction_set_characteristics
+        return true;
+#endif
+
+        return false;
+    }()};
+
+    if (use_neon) {
+        TransformD64_4way = sha256d64_neon::Transform_4way;
+        ret += ";neon(4way)";
+    }
+#endif // ENABLE_ARM_NEON
+
 #endif // DISABLE_OPTIMIZED_SHA256
 
     assert(SelfTest());

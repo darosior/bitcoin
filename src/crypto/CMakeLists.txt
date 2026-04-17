@@ -52,6 +52,14 @@ if(HAVE_SSE41 AND HAVE_X86_SHANI)
   )
 endif()
 
+if(HAVE_ARM_NEON)
+  target_compile_definitions(bitcoin_crypto PRIVATE ENABLE_ARM_NEON)
+  target_sources(bitcoin_crypto PRIVATE sha256_arm_neon.cpp)
+  set_property(SOURCE sha256_arm_neon.cpp PROPERTY
+    COMPILE_OPTIONS ${ARM_NEON_CXXFLAGS}
+  )
+endif()
+
 if(HAVE_ARM_SHANI)
   target_compile_definitions(bitcoin_crypto PRIVATE ENABLE_ARM_SHANI)
   target_sources(bitcoin_crypto PRIVATE sha256_arm_shani.cpp)
