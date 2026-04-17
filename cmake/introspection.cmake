@@ -194,6 +194,21 @@ if(NOT MSVC)
     CXXFLAGS ${X86_SHANI_CXXFLAGS}
   )
 
+  # Check for ARMv8 NEON intrinsics.
+  set(ARM_NEON_CXXFLAGS -march=armv8-a)
+  check_cxx_source_compiles_with_flags("
+    #include <arm_neon.h>
+
+    int main()
+    {
+      uint32x4_t a, b;
+      (void)vaddq_u32(a, b);
+      return 0;
+    }
+    " HAVE_ARM_NEON
+    CXXFLAGS ${ARM_NEON_CXXFLAGS}
+  )
+
   # Check for ARMv8 SHA-NI intrinsics.
   set(ARM_SHANI_CXXFLAGS -march=armv8-a+crypto)
   check_cxx_source_compiles_with_flags("
@@ -210,4 +225,5 @@ if(NOT MSVC)
     " HAVE_ARM_SHANI
     CXXFLAGS ${ARM_SHANI_CXXFLAGS}
   )
+
 endif()
