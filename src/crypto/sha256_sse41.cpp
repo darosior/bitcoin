@@ -22,7 +22,7 @@ static __m128i inline And(__m128i x, __m128i y) { return _mm_and_si128(x, y); }
 static __m128i inline ShR(__m128i x, int n) { return _mm_srli_epi32(x, n); }
 static __m128i inline ShL(__m128i x, int n) { return _mm_slli_epi32(x, n); }
 
-static __m128i inline Read4(const unsigned char* chunk, int offset) {
+static __m128i inline Read(const unsigned char* chunk, int offset) {
     __m128i ret = _mm_set_epi32(
         ReadLE32(chunk + 0 + offset),
         ReadLE32(chunk + 64 + offset),
@@ -32,7 +32,7 @@ static __m128i inline Read4(const unsigned char* chunk, int offset) {
     return _mm_shuffle_epi8(ret, _mm_set_epi32(0x0C0D0E0FUL, 0x08090A0BUL, 0x04050607UL, 0x00010203UL));
 }
 
-static void inline Write4(unsigned char* out, int offset, __m128i v) {
+static void inline Write(unsigned char* out, int offset, __m128i v) {
     v = _mm_shuffle_epi8(v, _mm_set_epi32(0x0C0D0E0FUL, 0x08090A0BUL, 0x04050607UL, 0x00010203UL));
     WriteLE32(out + 0 + offset, _mm_extract_epi32(v, 3));
     WriteLE32(out + 32 + offset, _mm_extract_epi32(v, 2));
@@ -80,22 +80,22 @@ void Transform_4way(unsigned char* out, const unsigned char* in)
 
     __m128i w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15;
 
-    Round(a, b, c, d, e, f, g, h, Add(K(0x428a2f98ul), w0 = Read4(in, 0)));
-    Round(h, a, b, c, d, e, f, g, Add(K(0x71374491ul), w1 = Read4(in, 4)));
-    Round(g, h, a, b, c, d, e, f, Add(K(0xb5c0fbcful), w2 = Read4(in, 8)));
-    Round(f, g, h, a, b, c, d, e, Add(K(0xe9b5dba5ul), w3 = Read4(in, 12)));
-    Round(e, f, g, h, a, b, c, d, Add(K(0x3956c25bul), w4 = Read4(in, 16)));
-    Round(d, e, f, g, h, a, b, c, Add(K(0x59f111f1ul), w5 = Read4(in, 20)));
-    Round(c, d, e, f, g, h, a, b, Add(K(0x923f82a4ul), w6 = Read4(in, 24)));
-    Round(b, c, d, e, f, g, h, a, Add(K(0xab1c5ed5ul), w7 = Read4(in, 28)));
-    Round(a, b, c, d, e, f, g, h, Add(K(0xd807aa98ul), w8 = Read4(in, 32)));
-    Round(h, a, b, c, d, e, f, g, Add(K(0x12835b01ul), w9 = Read4(in, 36)));
-    Round(g, h, a, b, c, d, e, f, Add(K(0x243185beul), w10 = Read4(in, 40)));
-    Round(f, g, h, a, b, c, d, e, Add(K(0x550c7dc3ul), w11 = Read4(in, 44)));
-    Round(e, f, g, h, a, b, c, d, Add(K(0x72be5d74ul), w12 = Read4(in, 48)));
-    Round(d, e, f, g, h, a, b, c, Add(K(0x80deb1feul), w13 = Read4(in, 52)));
-    Round(c, d, e, f, g, h, a, b, Add(K(0x9bdc06a7ul), w14 = Read4(in, 56)));
-    Round(b, c, d, e, f, g, h, a, Add(K(0xc19bf174ul), w15 = Read4(in, 60)));
+    Round(a, b, c, d, e, f, g, h, Add(K(0x428a2f98ul), w0 = Read(in, 0)));
+    Round(h, a, b, c, d, e, f, g, Add(K(0x71374491ul), w1 = Read(in, 4)));
+    Round(g, h, a, b, c, d, e, f, Add(K(0xb5c0fbcful), w2 = Read(in, 8)));
+    Round(f, g, h, a, b, c, d, e, Add(K(0xe9b5dba5ul), w3 = Read(in, 12)));
+    Round(e, f, g, h, a, b, c, d, Add(K(0x3956c25bul), w4 = Read(in, 16)));
+    Round(d, e, f, g, h, a, b, c, Add(K(0x59f111f1ul), w5 = Read(in, 20)));
+    Round(c, d, e, f, g, h, a, b, Add(K(0x923f82a4ul), w6 = Read(in, 24)));
+    Round(b, c, d, e, f, g, h, a, Add(K(0xab1c5ed5ul), w7 = Read(in, 28)));
+    Round(a, b, c, d, e, f, g, h, Add(K(0xd807aa98ul), w8 = Read(in, 32)));
+    Round(h, a, b, c, d, e, f, g, Add(K(0x12835b01ul), w9 = Read(in, 36)));
+    Round(g, h, a, b, c, d, e, f, Add(K(0x243185beul), w10 = Read(in, 40)));
+    Round(f, g, h, a, b, c, d, e, Add(K(0x550c7dc3ul), w11 = Read(in, 44)));
+    Round(e, f, g, h, a, b, c, d, Add(K(0x72be5d74ul), w12 = Read(in, 48)));
+    Round(d, e, f, g, h, a, b, c, Add(K(0x80deb1feul), w13 = Read(in, 52)));
+    Round(c, d, e, f, g, h, a, b, Add(K(0x9bdc06a7ul), w14 = Read(in, 56)));
+    Round(b, c, d, e, f, g, h, a, Add(K(0xc19bf174ul), w15 = Read(in, 60)));
     Round(a, b, c, d, e, f, g, h, Add(K(0xe49b69c1ul), Inc(w0, sigma1(w14), w9, sigma0(w1))));
     Round(h, a, b, c, d, e, f, g, Add(K(0xefbe4786ul), Inc(w1, sigma1(w15), w10, sigma0(w2))));
     Round(g, h, a, b, c, d, e, f, Add(K(0x0fc19dc6ul), Inc(w2, sigma1(w0), w11, sigma0(w3))));
@@ -307,14 +307,14 @@ void Transform_4way(unsigned char* out, const unsigned char* in)
     Round(b, c, d, e, f, g, h, a, Add(K(0xc67178f2ul), w15, sigma1(w13), w8, sigma0(w0)));
 
     // Output
-    Write4(out, 0, Add(a, K(0x6a09e667ul)));
-    Write4(out, 4, Add(b, K(0xbb67ae85ul)));
-    Write4(out, 8, Add(c, K(0x3c6ef372ul)));
-    Write4(out, 12, Add(d, K(0xa54ff53aul)));
-    Write4(out, 16, Add(e, K(0x510e527ful)));
-    Write4(out, 20, Add(f, K(0x9b05688cul)));
-    Write4(out, 24, Add(g, K(0x1f83d9abul)));
-    Write4(out, 28, Add(h, K(0x5be0cd19ul)));
+    Write(out, 0, Add(a, K(0x6a09e667ul)));
+    Write(out, 4, Add(b, K(0xbb67ae85ul)));
+    Write(out, 8, Add(c, K(0x3c6ef372ul)));
+    Write(out, 12, Add(d, K(0xa54ff53aul)));
+    Write(out, 16, Add(e, K(0x510e527ful)));
+    Write(out, 20, Add(f, K(0x9b05688cul)));
+    Write(out, 24, Add(g, K(0x1f83d9abul)));
+    Write(out, 28, Add(h, K(0x5be0cd19ul)));
 }
 
 }
