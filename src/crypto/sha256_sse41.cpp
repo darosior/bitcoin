@@ -11,7 +11,7 @@
 #include <crypto/common.h>
 
 namespace sha256d64_sse41 {
-namespace Ops {
+struct Ops {
     using Int = __m128i;
 
     static __m128i inline K(uint32_t x) { return _mm_set1_epi32(x); }
@@ -40,10 +40,10 @@ namespace Ops {
         WriteLE32(out + 64 + offset, _mm_extract_epi32(v, 1));
         WriteLE32(out + 96 + offset, _mm_extract_epi32(v, 0));
     }
+};
 
-}
-
-namespace SHA256DImpl {
+template<typename Ops>
+struct SHA256DImpl final : private Ops {
     using Ops::K;
     using Ops::Add;
     using Ops::Xor;
@@ -79,7 +79,7 @@ namespace SHA256DImpl {
         h = Add(t1, t2);
     }
 
-    void Transform(unsigned char* out, const unsigned char* in)
+    static void Transform(unsigned char* out, const unsigned char* in)
     {
         // Transform 1
         Int a = K(0x6a09e667ul);
@@ -329,11 +329,11 @@ namespace SHA256DImpl {
         Write(out, 24, Add(g, K(0x1f83d9abul)));
         Write(out, 28, Add(h, K(0x5be0cd19ul)));
     }
-}
+};
 
 void Transform_4way(unsigned char* out, const unsigned char* in)
 {
-    SHA256DImpl::Transform(out, in);
+    SHA256DImpl<Ops>::Transform(out, in);
 }
 
 }
