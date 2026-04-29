@@ -11,7 +11,7 @@
 #include <crypto/common.h>
 
 namespace sha256d64_sse41 {
-namespace {
+namespace Ops {
 
 static __m128i inline K(uint32_t x) { return _mm_set1_epi32(x); }
 
@@ -41,6 +41,16 @@ static void inline Write(unsigned char* out, int offset, __m128i v) {
 }
 
 }
+
+using Ops::K;
+using Ops::Add;
+using Ops::Xor;
+using Ops::Or;
+using Ops::And;
+using Ops::ShR;
+using Ops::ShL;
+using Ops::Read;
+using Ops::Write;
 
 static __m128i inline Add(__m128i x, __m128i y, __m128i z) { return Add(Add(x, y), z); }
 static __m128i inline Add(__m128i x, __m128i y, __m128i z, __m128i w) { return Add(Add(x, y), Add(z, w)); }
