@@ -22,20 +22,20 @@ struct SHA256DImpl final : private Ops {
     using Ops::Write;
     using Int = typename Ops::Int;
 
-    static Int inline Add(Int x, Int y, Int z) { return Add(Add(x, y), z); }
-    static Int inline Add(Int x, Int y, Int z, Int w) { return Add(Add(x, y), Add(z, w)); }
-    static Int inline Add(Int x, Int y, Int z, Int w, Int v) { return Add(Add(x, y, z), Add(w, v)); }
-    static Int inline Inc(Int& x, Int y) { x = Add(x, y); return x; }
-    static Int inline Inc(Int& x, Int y, Int z) { x = Add(x, y, z); return x; }
-    static Int inline Inc(Int& x, Int y, Int z, Int w) { x = Add(x, y, z, w); return x; }
-    static Int inline Xor(Int x, Int y, Int z) { return Xor(Xor(x, y), z); }
+    static Int ALWAYS_INLINE Add(Int x, Int y, Int z) { return Add(Add(x, y), z); }
+    static Int ALWAYS_INLINE Add(Int x, Int y, Int z, Int w) { return Add(Add(x, y), Add(z, w)); }
+    static Int ALWAYS_INLINE Add(Int x, Int y, Int z, Int w, Int v) { return Add(Add(x, y, z), Add(w, v)); }
+    static Int ALWAYS_INLINE Inc(Int& x, Int y) { x = Add(x, y); return x; }
+    static Int ALWAYS_INLINE Inc(Int& x, Int y, Int z) { x = Add(x, y, z); return x; }
+    static Int ALWAYS_INLINE Inc(Int& x, Int y, Int z, Int w) { x = Add(x, y, z, w); return x; }
+    static Int ALWAYS_INLINE Xor(Int x, Int y, Int z) { return Xor(Xor(x, y), z); }
 
-    static Int inline Ch(Int x, Int y, Int z) { return Xor(z, And(x, Xor(y, z))); }
-    static Int inline Maj(Int x, Int y, Int z) { return Or(And(x, y), And(z, Or(x, y))); }
-    static Int inline Sigma0(Int x) { return Xor(Or(ShR(x, 2), ShL(x, 30)), Or(ShR(x, 13), ShL(x, 19)), Or(ShR(x, 22), ShL(x, 10))); }
-    static Int inline Sigma1(Int x) { return Xor(Or(ShR(x, 6), ShL(x, 26)), Or(ShR(x, 11), ShL(x, 21)), Or(ShR(x, 25), ShL(x, 7))); }
-    static Int inline sigma0(Int x) { return Xor(Or(ShR(x, 7), ShL(x, 25)), Or(ShR(x, 18), ShL(x, 14)), ShR(x, 3)); }
-    static Int inline sigma1(Int x) { return Xor(Or(ShR(x, 17), ShL(x, 15)), Or(ShR(x, 19), ShL(x, 13)), ShR(x, 10)); }
+    static Int ALWAYS_INLINE Ch(Int x, Int y, Int z) { return Xor(z, And(x, Xor(y, z))); }
+    static Int ALWAYS_INLINE Maj(Int x, Int y, Int z) { return Or(And(x, y), And(z, Or(x, y))); }
+    static Int ALWAYS_INLINE Sigma0(Int x) { return Xor(Or(ShR(x, 2), ShL(x, 30)), Or(ShR(x, 13), ShL(x, 19)), Or(ShR(x, 22), ShL(x, 10))); }
+    static Int ALWAYS_INLINE Sigma1(Int x) { return Xor(Or(ShR(x, 6), ShL(x, 26)), Or(ShR(x, 11), ShL(x, 21)), Or(ShR(x, 25), ShL(x, 7))); }
+    static Int ALWAYS_INLINE sigma0(Int x) { return Xor(Or(ShR(x, 7), ShL(x, 25)), Or(ShR(x, 18), ShL(x, 14)), ShR(x, 3)); }
+    static Int ALWAYS_INLINE sigma1(Int x) { return Xor(Or(ShR(x, 17), ShL(x, 15)), Or(ShR(x, 19), ShL(x, 13)), ShR(x, 10)); }
 
     /** One round of SHA-256. */
     static void ALWAYS_INLINE Round(Int a, Int b, Int c, Int& d, Int e, Int f, Int g, Int& h, Int k)
@@ -46,7 +46,7 @@ struct SHA256DImpl final : private Ops {
         h = Add(t1, t2);
     }
 
-    static void Transform(unsigned char* out, const unsigned char* in)
+    static void ALWAYS_INLINE Transform(unsigned char* out, const unsigned char* in)
     {
         // Transform 1
         Int a = K(0x6a09e667ul);
