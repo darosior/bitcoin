@@ -43,6 +43,7 @@ static void inline Write(unsigned char* out, int offset, __m128i v) {
 
 }
 
+namespace SHA256DImpl {
 using Ops::K;
 using Ops::Add;
 using Ops::Xor;
@@ -78,7 +79,7 @@ static void ALWAYS_INLINE Round(Int a, Int b, Int c, Int& d, Int e, Int f, Int g
     h = Add(t1, t2);
 }
 
-void Transform_4way(unsigned char* out, const unsigned char* in)
+void Transform(unsigned char* out, const unsigned char* in)
 {
     // Transform 1
     Int a = K(0x6a09e667ul);
@@ -327,6 +328,12 @@ void Transform_4way(unsigned char* out, const unsigned char* in)
     Write(out, 20, Add(f, K(0x9b05688cul)));
     Write(out, 24, Add(g, K(0x1f83d9abul)));
     Write(out, 28, Add(h, K(0x5be0cd19ul)));
+}
+}
+
+void Transform_4way(unsigned char* out, const unsigned char* in)
+{
+    SHA256DImpl::Transform(out, in);
 }
 
 }
