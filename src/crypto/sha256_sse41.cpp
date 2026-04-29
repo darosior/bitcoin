@@ -12,6 +12,7 @@
 
 namespace sha256d64_sse41 {
 namespace Ops {
+using Int = __m128i;
 
 static __m128i inline K(uint32_t x) { return _mm_set1_epi32(x); }
 
@@ -51,27 +52,28 @@ using Ops::ShR;
 using Ops::ShL;
 using Ops::Read;
 using Ops::Write;
+using Int = typename Ops::Int;
 
-static __m128i inline Add(__m128i x, __m128i y, __m128i z) { return Add(Add(x, y), z); }
-static __m128i inline Add(__m128i x, __m128i y, __m128i z, __m128i w) { return Add(Add(x, y), Add(z, w)); }
-static __m128i inline Add(__m128i x, __m128i y, __m128i z, __m128i w, __m128i v) { return Add(Add(x, y, z), Add(w, v)); }
-static __m128i inline Inc(__m128i& x, __m128i y) { x = Add(x, y); return x; }
-static __m128i inline Inc(__m128i& x, __m128i y, __m128i z) { x = Add(x, y, z); return x; }
-static __m128i inline Inc(__m128i& x, __m128i y, __m128i z, __m128i w) { x = Add(x, y, z, w); return x; }
-static __m128i inline Xor(__m128i x, __m128i y, __m128i z) { return Xor(Xor(x, y), z); }
+static Int inline Add(Int x, Int y, Int z) { return Add(Add(x, y), z); }
+static Int inline Add(Int x, Int y, Int z, Int w) { return Add(Add(x, y), Add(z, w)); }
+static Int inline Add(Int x, Int y, Int z, Int w, Int v) { return Add(Add(x, y, z), Add(w, v)); }
+static Int inline Inc(Int& x, Int y) { x = Add(x, y); return x; }
+static Int inline Inc(Int& x, Int y, Int z) { x = Add(x, y, z); return x; }
+static Int inline Inc(Int& x, Int y, Int z, Int w) { x = Add(x, y, z, w); return x; }
+static Int inline Xor(Int x, Int y, Int z) { return Xor(Xor(x, y), z); }
 
-static __m128i inline Ch(__m128i x, __m128i y, __m128i z) { return Xor(z, And(x, Xor(y, z))); }
-static __m128i inline Maj(__m128i x, __m128i y, __m128i z) { return Or(And(x, y), And(z, Or(x, y))); }
-static __m128i inline Sigma0(__m128i x) { return Xor(Or(ShR(x, 2), ShL(x, 30)), Or(ShR(x, 13), ShL(x, 19)), Or(ShR(x, 22), ShL(x, 10))); }
-static __m128i inline Sigma1(__m128i x) { return Xor(Or(ShR(x, 6), ShL(x, 26)), Or(ShR(x, 11), ShL(x, 21)), Or(ShR(x, 25), ShL(x, 7))); }
-static __m128i inline sigma0(__m128i x) { return Xor(Or(ShR(x, 7), ShL(x, 25)), Or(ShR(x, 18), ShL(x, 14)), ShR(x, 3)); }
-static __m128i inline sigma1(__m128i x) { return Xor(Or(ShR(x, 17), ShL(x, 15)), Or(ShR(x, 19), ShL(x, 13)), ShR(x, 10)); }
+static Int inline Ch(Int x, Int y, Int z) { return Xor(z, And(x, Xor(y, z))); }
+static Int inline Maj(Int x, Int y, Int z) { return Or(And(x, y), And(z, Or(x, y))); }
+static Int inline Sigma0(Int x) { return Xor(Or(ShR(x, 2), ShL(x, 30)), Or(ShR(x, 13), ShL(x, 19)), Or(ShR(x, 22), ShL(x, 10))); }
+static Int inline Sigma1(Int x) { return Xor(Or(ShR(x, 6), ShL(x, 26)), Or(ShR(x, 11), ShL(x, 21)), Or(ShR(x, 25), ShL(x, 7))); }
+static Int inline sigma0(Int x) { return Xor(Or(ShR(x, 7), ShL(x, 25)), Or(ShR(x, 18), ShL(x, 14)), ShR(x, 3)); }
+static Int inline sigma1(Int x) { return Xor(Or(ShR(x, 17), ShL(x, 15)), Or(ShR(x, 19), ShL(x, 13)), ShR(x, 10)); }
 
 /** One round of SHA-256. */
-static void ALWAYS_INLINE Round(__m128i a, __m128i b, __m128i c, __m128i& d, __m128i e, __m128i f, __m128i g, __m128i& h, __m128i k)
+static void ALWAYS_INLINE Round(Int a, Int b, Int c, Int& d, Int e, Int f, Int g, Int& h, Int k)
 {
-    __m128i t1 = Add(h, Sigma1(e), Ch(e, f, g), k);
-    __m128i t2 = Add(Sigma0(a), Maj(a, b, c));
+    Int t1 = Add(h, Sigma1(e), Ch(e, f, g), k);
+    Int t2 = Add(Sigma0(a), Maj(a, b, c));
     d = Add(d, t1);
     h = Add(t1, t2);
 }
@@ -79,16 +81,16 @@ static void ALWAYS_INLINE Round(__m128i a, __m128i b, __m128i c, __m128i& d, __m
 void Transform_4way(unsigned char* out, const unsigned char* in)
 {
     // Transform 1
-    __m128i a = K(0x6a09e667ul);
-    __m128i b = K(0xbb67ae85ul);
-    __m128i c = K(0x3c6ef372ul);
-    __m128i d = K(0xa54ff53aul);
-    __m128i e = K(0x510e527ful);
-    __m128i f = K(0x9b05688cul);
-    __m128i g = K(0x1f83d9abul);
-    __m128i h = K(0x5be0cd19ul);
+    Int a = K(0x6a09e667ul);
+    Int b = K(0xbb67ae85ul);
+    Int c = K(0x3c6ef372ul);
+    Int d = K(0xa54ff53aul);
+    Int e = K(0x510e527ful);
+    Int f = K(0x9b05688cul);
+    Int g = K(0x1f83d9abul);
+    Int h = K(0x5be0cd19ul);
 
-    __m128i w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15;
+    Int w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15;
 
     Round(a, b, c, d, e, f, g, h, Add(K(0x428a2f98ul), w0 = Read(in, 0)));
     Round(h, a, b, c, d, e, f, g, Add(K(0x71374491ul), w1 = Read(in, 4)));
@@ -164,7 +166,7 @@ void Transform_4way(unsigned char* out, const unsigned char* in)
     g = Add(g, K(0x1f83d9abul));
     h = Add(h, K(0x5be0cd19ul));
 
-    __m128i t0 = a, t1 = b, t2 = c, t3 = d, t4 = e, t5 = f, t6 = g, t7 = h;
+    Int t0 = a, t1 = b, t2 = c, t3 = d, t4 = e, t5 = f, t6 = g, t7 = h;
 
     // Transform 2
     Round(a, b, c, d, e, f, g, h, K(0xc28a2f98ul));
