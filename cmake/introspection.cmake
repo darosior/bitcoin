@@ -178,6 +178,24 @@ if(NOT MSVC)
     CXXFLAGS ${AVX2_CXXFLAGS}
   )
 
+  # Check for AVX512 intrinsics.
+  set(AVX512_CXXFLAGS -mavx512f)
+  check_cxx_source_compiles_with_flags("
+    #include <array>
+    #include <cstdint>
+    #include <immintrin.h>
+
+    int main()
+    {
+      __m512i v = _mm512_set1_epi32(0);
+      alignas(64) std::array<uint32_t, 16> lanes;
+      _mm512_store_si512(lanes.data(), v);
+      return lanes[15];
+    }
+    " HAVE_AVX512
+    CXXFLAGS ${AVX512_CXXFLAGS}
+  )
+
   # Check for x86 SHA-NI intrinsics.
   set(X86_SHANI_CXXFLAGS -msse4 -msha)
   check_cxx_source_compiles_with_flags("

@@ -171,6 +171,16 @@ static void SHA256D64_1024_AVX2(benchmark::Bench& bench)
     SHA256AutoDetect();
 }
 
+static void SHA256D64_1024_AVX512(benchmark::Bench& bench)
+{
+    bench.name(strprintf("%s using the '%s' SHA256 implementation", __func__, SHA256AutoDetect(sha256_implementation::USE_SSE4_AND_ALL_AVX)));
+    std::vector<uint8_t> in(64 * 1024, 0);
+    bench.batch(in.size()).unit("byte").run([&] {
+        SHA256D64(in.data(), in.data(), 1024);
+    });
+    SHA256AutoDetect();
+}
+
 static void SHA256D64_1024_NEON(benchmark::Bench& bench)
 {
     bench.name(strprintf("%s using the '%s' SHA256 implementation", __func__, SHA256AutoDetect(sha256_implementation::USE_NEON)));
@@ -287,6 +297,7 @@ BENCHMARK(SipHash_32b);
 BENCHMARK(SHA256D64_1024_STANDARD);
 BENCHMARK(SHA256D64_1024_SSE4);
 BENCHMARK(SHA256D64_1024_AVX2);
+BENCHMARK(SHA256D64_1024_AVX512);
 BENCHMARK(SHA256D64_1024_NEON);
 BENCHMARK(SHA256D64_1024_SHANI);
 

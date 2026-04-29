@@ -1,6 +1,7 @@
 // Copyright (c) 2014-present The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+#include<iostream>
 
 #include <crypto/sha256.h>
 #include <crypto/common.h>
@@ -38,6 +39,11 @@ void Transform_4way(unsigned char* out, const unsigned char* in);
 namespace sha256d64_avx2
 {
 void Transform_8way(unsigned char* out, const unsigned char* in);
+}
+
+namespace sha256d64_avx512
+{
+void Transform_16way(unsigned char* out, const unsigned char* in);
 }
 
 namespace sha256d64_x86_shani
@@ -263,6 +269,7 @@ TransformD64Type TransformD64 = sha256::TransformD64;
 TransformD64Type TransformD64_2way = nullptr;
 TransformD64Type TransformD64_4way = nullptr;
 TransformD64Type TransformD64_8way = nullptr;
+TransformD64Type TransformD64_16way = nullptr;
 
 bool SelfTest() {
     // Input state (equal to the initial SHA256 state)
@@ -346,17 +353,33 @@ bool SelfTest() {
         if (!std::equal(out, out + 256, result_d64)) return false;
     }
 
+    // Test TransformD64_16way, if available.
+    if (TransformD64_16way) {
+        unsigned char out[512];
+        TransformD64_16way(out, data + 1);
+        if (!std::equal(out, out + 256, result_d64)) return false;
+    }
+
     return true;
 }
 
 #if !defined(DISABLE_OPTIMIZED_SHA256)
 #if (defined(__x86_64__) || defined(__amd64__) || defined(__i386__))
 /** Check whether the OS has enabled AVX registers. */
-bool AVXEnabled()
+bool AVX2Enabled()
 {
     uint32_t a, d;
     __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
     return (a & 6) == 6;
+}
+/** Check whether the OS has enabled AVX-512 registers. */
+bool AVX512Enabled()
+{
+    uint32_t a, d;
+    __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
+    // Section 15.2 of https://cdrdv2.intel.com/v1/dl/getContent/671200
+    //std::cout << a << std::endl;
+    return (a & 0xE0) == 0xE0;
 }
 #endif
 #endif // DISABLE_OPTIMIZED_SHA256
@@ -371,6 +394,7 @@ std::string SHA256AutoDetect(sha256_implementation::UseImplementation use_implem
     TransformD64_2way = nullptr;
     TransformD64_4way = nullptr;
     TransformD64_8way = nullptr;
+    TransformD64_16way = nullptr;
 
 #if !defined(DISABLE_OPTIMIZED_SHA256)
 #if defined(HAVE_GETCPUID)
@@ -378,8 +402,10 @@ std::string SHA256AutoDetect(sha256_implementation::UseImplementation use_implem
     bool have_xsave = false;
     bool have_avx = false;
     [[maybe_unused]] bool have_avx2 = false;
+    [[maybe_unused]] bool have_avx512 = false;
     [[maybe_unused]] bool have_x86_shani = false;
     [[maybe_unused]] bool enabled_avx = false;
+    [[maybe_unused]] bool enabled_avx512 = false;
 
     uint32_t eax, ebx, ecx, edx;
     GetCPUID(1, 0, eax, ebx, ecx, edx);
@@ -389,12 +415,18 @@ std::string SHA256AutoDetect(sha256_implementation::UseImplementation use_implem
     have_xsave = (ecx >> 27) & 1;
     have_avx = (ecx >> 28) & 1;
     if (have_xsave && have_avx) {
-        enabled_avx = AVXEnabled();
+        enabled_avx = AVX2Enabled();
+    }
+    if (have_xsave && have_avx) {
+        enabled_avx512 = AVX512Enabled();
     }
     if (have_sse4) {
         GetCPUID(7, 0, eax, ebx, ecx, edx);
         if (use_implementation & sha256_implementation::USE_AVX2) {
             have_avx2 = (ebx >> 5) & 1;
+        }
+        if (use_implementation & sha256_implementation::USE_AVX512) {
+            have_avx512 = (ebx >> 16) & 1;
         }
         if (use_implementation & sha256_implementation::USE_SHANI) {
             have_x86_shani = (ebx >> 29) & 1;
@@ -407,7 +439,7 @@ std::string SHA256AutoDetect(sha256_implementation::UseImplementation use_implem
         TransformD64 = TransformD64Wrapper<sha256_x86_shani::Transform>;
         TransformD64_2way = sha256d64_x86_shani::Transform_2way;
         ret = "x86_shani(1way;2way)";
-        have_sse4 = false; // Disable SSE4/AVX2;
+        have_sse4 = false; // Disable SSE4/AVX2 (but not AVX512);
         have_avx2 = false;
     }
 #endif
@@ -428,6 +460,13 @@ std::string SHA256AutoDetect(sha256_implementation::UseImplementation use_implem
     if (have_avx2 && have_avx && enabled_avx) {
         TransformD64_8way = sha256d64_avx2::Transform_8way;
         ret += ";avx2(8way)";
+    }
+#endif
+
+#if defined(ENABLE_AVX512)
+    if (have_avx512 && have_avx && enabled_avx512) {
+        TransformD64_16way = sha256d64_avx512::Transform_16way;
+        ret += ";avx512(16way)";
     }
 #endif
 #endif // defined(HAVE_GETCPUID)
@@ -566,6 +605,14 @@ CSHA256& CSHA256::Reset()
 
 void SHA256D64(unsigned char* out, const unsigned char* in, size_t blocks)
 {
+    if (TransformD64_16way) {
+        while (blocks >= 16) {
+            TransformD64_16way(out, in);
+            out += 512;
+            in += 1024;
+            blocks -= 16;
+        }
+    }
     if (TransformD64_8way) {
         while (blocks >= 8) {
             TransformD64_8way(out, in);
