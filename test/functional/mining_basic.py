@@ -59,7 +59,7 @@ def assert_template(node, block, expect, rehash=True):
     rsp = node.getblocktemplate(template_request={
         'data': block.serialize().hex(),
         'mode': 'proposal',
-        'rules': ['segwit'],
+        **NORMAL_GBT_REQUEST_PARAMS,
     })
     assert_equal(rsp, expect)
 
@@ -422,7 +422,7 @@ class MiningTest(BitcoinTestFramework):
         assert_raises_rpc_error(-22, "Block decode failed", node.getblocktemplate, {
             'data': block.serialize()[:-1].hex(),
             'mode': 'proposal',
-            'rules': ['segwit'],
+            **NORMAL_GBT_REQUEST_PARAMS,
         })
 
         self.log.info("getblocktemplate: Test duplicate transaction")
@@ -455,7 +455,7 @@ class MiningTest(BitcoinTestFramework):
         assert_raises_rpc_error(-22, "Block decode failed", node.getblocktemplate, {
             'data': bad_block_sn.hex(),
             'mode': 'proposal',
-            'rules': ['segwit'],
+            **NORMAL_GBT_REQUEST_PARAMS,
         })
 
         self.log.info("getblocktemplate: Test bad bits")
