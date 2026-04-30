@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <attributes.h>
 #include <crypto/sha256.h>
 #include <crypto/common.h>
 
@@ -66,15 +67,15 @@ namespace
 /// Internal SHA-256 implementation.
 namespace sha256
 {
-uint32_t inline Ch(uint32_t x, uint32_t y, uint32_t z) { return z ^ (x & (y ^ z)); }
-uint32_t inline Maj(uint32_t x, uint32_t y, uint32_t z) { return (x & y) | (z & (x | y)); }
-uint32_t inline Sigma0(uint32_t x) { return (x >> 2 | x << 30) ^ (x >> 13 | x << 19) ^ (x >> 22 | x << 10); }
-uint32_t inline Sigma1(uint32_t x) { return (x >> 6 | x << 26) ^ (x >> 11 | x << 21) ^ (x >> 25 | x << 7); }
-uint32_t inline sigma0(uint32_t x) { return (x >> 7 | x << 25) ^ (x >> 18 | x << 14) ^ (x >> 3); }
-uint32_t inline sigma1(uint32_t x) { return (x >> 17 | x << 15) ^ (x >> 19 | x << 13) ^ (x >> 10); }
+uint32_t ALWAYS_INLINE Ch(uint32_t x, uint32_t y, uint32_t z) { return z ^ (x & (y ^ z)); }
+uint32_t ALWAYS_INLINE Maj(uint32_t x, uint32_t y, uint32_t z) { return (x & y) | (z & (x | y)); }
+uint32_t ALWAYS_INLINE Sigma0(uint32_t x) { return (x >> 2 | x << 30) ^ (x >> 13 | x << 19) ^ (x >> 22 | x << 10); }
+uint32_t ALWAYS_INLINE Sigma1(uint32_t x) { return (x >> 6 | x << 26) ^ (x >> 11 | x << 21) ^ (x >> 25 | x << 7); }
+uint32_t ALWAYS_INLINE sigma0(uint32_t x) { return (x >> 7 | x << 25) ^ (x >> 18 | x << 14) ^ (x >> 3); }
+uint32_t ALWAYS_INLINE sigma1(uint32_t x) { return (x >> 17 | x << 15) ^ (x >> 19 | x << 13) ^ (x >> 10); }
 
 /** One round of SHA-256. */
-void inline Round(uint32_t a, uint32_t b, uint32_t c, uint32_t& d, uint32_t e, uint32_t f, uint32_t g, uint32_t& h, uint32_t k)
+void ALWAYS_INLINE Round(uint32_t a, uint32_t b, uint32_t c, uint32_t& d, uint32_t e, uint32_t f, uint32_t g, uint32_t& h, uint32_t k)
 {
     uint32_t t1 = h + Sigma1(e) + Ch(e, f, g) + k;
     uint32_t t2 = Sigma0(a) + Maj(a, b, c);
@@ -83,7 +84,7 @@ void inline Round(uint32_t a, uint32_t b, uint32_t c, uint32_t& d, uint32_t e, u
 }
 
 /** Initialize SHA-256 state. */
-void inline Initialize(uint32_t* s)
+void ALWAYS_INLINE Initialize(uint32_t* s)
 {
     s[0] = 0x6a09e667ul;
     s[1] = 0xbb67ae85ul;

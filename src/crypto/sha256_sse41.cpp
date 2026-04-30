@@ -13,28 +13,28 @@
 namespace sha256d64_sse41 {
 namespace {
 
-__m128i inline K(uint32_t x) { return _mm_set1_epi32(x); }
+__m128i ALWAYS_INLINE K(uint32_t x) { return _mm_set1_epi32(x); }
 
-__m128i inline Add(__m128i x, __m128i y) { return _mm_add_epi32(x, y); }
-__m128i inline Add(__m128i x, __m128i y, __m128i z) { return Add(Add(x, y), z); }
-__m128i inline Add(__m128i x, __m128i y, __m128i z, __m128i w) { return Add(Add(x, y), Add(z, w)); }
-__m128i inline Add(__m128i x, __m128i y, __m128i z, __m128i w, __m128i v) { return Add(Add(x, y, z), Add(w, v)); }
-__m128i inline Inc(__m128i& x, __m128i y) { x = Add(x, y); return x; }
-__m128i inline Inc(__m128i& x, __m128i y, __m128i z) { x = Add(x, y, z); return x; }
-__m128i inline Inc(__m128i& x, __m128i y, __m128i z, __m128i w) { x = Add(x, y, z, w); return x; }
-__m128i inline Xor(__m128i x, __m128i y) { return _mm_xor_si128(x, y); }
-__m128i inline Xor(__m128i x, __m128i y, __m128i z) { return Xor(Xor(x, y), z); }
-__m128i inline Or(__m128i x, __m128i y) { return _mm_or_si128(x, y); }
-__m128i inline And(__m128i x, __m128i y) { return _mm_and_si128(x, y); }
-__m128i inline ShR(__m128i x, int n) { return _mm_srli_epi32(x, n); }
-__m128i inline ShL(__m128i x, int n) { return _mm_slli_epi32(x, n); }
+__m128i ALWAYS_INLINE Add(__m128i x, __m128i y) { return _mm_add_epi32(x, y); }
+__m128i ALWAYS_INLINE Add(__m128i x, __m128i y, __m128i z) { return Add(Add(x, y), z); }
+__m128i ALWAYS_INLINE Add(__m128i x, __m128i y, __m128i z, __m128i w) { return Add(Add(x, y), Add(z, w)); }
+__m128i ALWAYS_INLINE Add(__m128i x, __m128i y, __m128i z, __m128i w, __m128i v) { return Add(Add(x, y, z), Add(w, v)); }
+__m128i ALWAYS_INLINE Inc(__m128i& x, __m128i y) { x = Add(x, y); return x; }
+__m128i ALWAYS_INLINE Inc(__m128i& x, __m128i y, __m128i z) { x = Add(x, y, z); return x; }
+__m128i ALWAYS_INLINE Inc(__m128i& x, __m128i y, __m128i z, __m128i w) { x = Add(x, y, z, w); return x; }
+__m128i ALWAYS_INLINE Xor(__m128i x, __m128i y) { return _mm_xor_si128(x, y); }
+__m128i ALWAYS_INLINE Xor(__m128i x, __m128i y, __m128i z) { return Xor(Xor(x, y), z); }
+__m128i ALWAYS_INLINE Or(__m128i x, __m128i y) { return _mm_or_si128(x, y); }
+__m128i ALWAYS_INLINE And(__m128i x, __m128i y) { return _mm_and_si128(x, y); }
+__m128i ALWAYS_INLINE ShR(__m128i x, int n) { return _mm_srli_epi32(x, n); }
+__m128i ALWAYS_INLINE ShL(__m128i x, int n) { return _mm_slli_epi32(x, n); }
 
-__m128i inline Ch(__m128i x, __m128i y, __m128i z) { return Xor(z, And(x, Xor(y, z))); }
-__m128i inline Maj(__m128i x, __m128i y, __m128i z) { return Or(And(x, y), And(z, Or(x, y))); }
-__m128i inline Sigma0(__m128i x) { return Xor(Or(ShR(x, 2), ShL(x, 30)), Or(ShR(x, 13), ShL(x, 19)), Or(ShR(x, 22), ShL(x, 10))); }
-__m128i inline Sigma1(__m128i x) { return Xor(Or(ShR(x, 6), ShL(x, 26)), Or(ShR(x, 11), ShL(x, 21)), Or(ShR(x, 25), ShL(x, 7))); }
-__m128i inline sigma0(__m128i x) { return Xor(Or(ShR(x, 7), ShL(x, 25)), Or(ShR(x, 18), ShL(x, 14)), ShR(x, 3)); }
-__m128i inline sigma1(__m128i x) { return Xor(Or(ShR(x, 17), ShL(x, 15)), Or(ShR(x, 19), ShL(x, 13)), ShR(x, 10)); }
+__m128i ALWAYS_INLINE Ch(__m128i x, __m128i y, __m128i z) { return Xor(z, And(x, Xor(y, z))); }
+__m128i ALWAYS_INLINE Maj(__m128i x, __m128i y, __m128i z) { return Or(And(x, y), And(z, Or(x, y))); }
+__m128i ALWAYS_INLINE Sigma0(__m128i x) { return Xor(Or(ShR(x, 2), ShL(x, 30)), Or(ShR(x, 13), ShL(x, 19)), Or(ShR(x, 22), ShL(x, 10))); }
+__m128i ALWAYS_INLINE Sigma1(__m128i x) { return Xor(Or(ShR(x, 6), ShL(x, 26)), Or(ShR(x, 11), ShL(x, 21)), Or(ShR(x, 25), ShL(x, 7))); }
+__m128i ALWAYS_INLINE sigma0(__m128i x) { return Xor(Or(ShR(x, 7), ShL(x, 25)), Or(ShR(x, 18), ShL(x, 14)), ShR(x, 3)); }
+__m128i ALWAYS_INLINE sigma1(__m128i x) { return Xor(Or(ShR(x, 17), ShL(x, 15)), Or(ShR(x, 19), ShL(x, 13)), ShR(x, 10)); }
 
 /** One round of SHA-256. */
 void ALWAYS_INLINE Round(__m128i a, __m128i b, __m128i c, __m128i& d, __m128i e, __m128i f, __m128i g, __m128i& h, __m128i k)
@@ -45,7 +45,7 @@ void ALWAYS_INLINE Round(__m128i a, __m128i b, __m128i c, __m128i& d, __m128i e,
     h = Add(t1, t2);
 }
 
-__m128i inline Read4(const unsigned char* chunk, int offset) {
+__m128i ALWAYS_INLINE Read4(const unsigned char* chunk, int offset) {
     __m128i ret = _mm_set_epi32(
         ReadLE32(chunk + 0 + offset),
         ReadLE32(chunk + 64 + offset),
@@ -55,7 +55,7 @@ __m128i inline Read4(const unsigned char* chunk, int offset) {
     return _mm_shuffle_epi8(ret, _mm_set_epi32(0x0C0D0E0FUL, 0x08090A0BUL, 0x04050607UL, 0x00010203UL));
 }
 
-void inline Write4(unsigned char* out, int offset, __m128i v) {
+void ALWAYS_INLINE Write4(unsigned char* out, int offset, __m128i v) {
     v = _mm_shuffle_epi8(v, _mm_set_epi32(0x0C0D0E0FUL, 0x08090A0BUL, 0x04050607UL, 0x00010203UL));
     WriteLE32(out + 0 + offset, _mm_extract_epi32(v, 3));
     WriteLE32(out + 32 + offset, _mm_extract_epi32(v, 2));
