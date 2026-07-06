@@ -52,7 +52,7 @@ from test_framework.wallet import (
 
 DIFFICULTY_ADJUSTMENT_INTERVAL = 144
 MAX_FUTURE_BLOCK_TIME = 2 * 3600
-MAX_TIMEWARP = 600
+MAX_TIMEWARP_TESTNET4 = 600
 VERSIONBITS_TOP_BITS = 0x20000000
 VERSIONBITS_DEPLOYMENT_TESTDUMMY_BIT = 28
 DEFAULT_BLOCK_MIN_TX_FEE = 1 # default `-blockmintxfee` setting [sat/kvB]
@@ -214,7 +214,7 @@ class MiningTest(BitcoinTestFramework):
         self.nodes[0].setmocktime(t)
         # The template will have an adjusted timestamp, which we then modify
         tmpl = node.getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
-        assert_greater_than_or_equal(tmpl['curtime'], t + MAX_FUTURE_BLOCK_TIME - MAX_TIMEWARP)
+        assert_greater_than_or_equal(tmpl['curtime'], t + MAX_FUTURE_BLOCK_TIME - MAX_TIMEWARP_TESTNET4)
         # mintime and curtime should match
         assert_equal(tmpl['mintime'], tmpl['curtime'])
 
@@ -230,7 +230,7 @@ class MiningTest(BitcoinTestFramework):
         assert_equal(node.getblocktemplate(template_request={
             'data': block.serialize().hex(),
             'mode': 'proposal',
-            'rules': ['segwit'],
+            **NORMAL_GBT_REQUEST_PARAMS,
         }), None)
 
         bad_block = copy.deepcopy(block)
@@ -239,11 +239,11 @@ class MiningTest(BitcoinTestFramework):
         assert_raises_rpc_error(-25, 'time-timewarp-attack', lambda: node.submitheader(hexdata=CBlockHeader(bad_block).serialize().hex()))
 
         self.log.info("Test timewarp protection boundary")
-        bad_block.nTime = t + MAX_FUTURE_BLOCK_TIME - MAX_TIMEWARP - 1
+        bad_block.nTime = t + MAX_FUTURE_BLOCK_TIME - MAX_TIMEWARP_TESTNET4 - 1
         bad_block.solve()
         assert_raises_rpc_error(-25, 'time-timewarp-attack', lambda: node.submitheader(hexdata=CBlockHeader(bad_block).serialize().hex()))
 
-        bad_block.nTime = t + MAX_FUTURE_BLOCK_TIME - MAX_TIMEWARP
+        bad_block.nTime = t + MAX_FUTURE_BLOCK_TIME - MAX_TIMEWARP_TESTNET4
         bad_block.solve()
         node.submitheader(hexdata=CBlockHeader(bad_block).serialize().hex())
 

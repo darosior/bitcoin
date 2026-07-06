@@ -15,6 +15,7 @@ from test_framework.blocktools import (
     create_block,
     create_coinbase,
     add_witness_commitment,
+    NORMAL_GBT_REQUEST_PARAMS,
 )
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -39,7 +40,7 @@ def assert_template(node, block, expect, *, rehash=True, submit=True, solve=True
     rsp = node.getblocktemplate(template_request={
         'data': block.serialize().hex(),
         'mode': 'proposal',
-        'rules': ['segwit'],
+        **NORMAL_GBT_REQUEST_PARAMS,
     })
     assert_equal(rsp, expect)
     # Only attempt to submit invalid templates
@@ -82,7 +83,7 @@ class MiningTemplateVerificationTest(BitcoinTestFramework):
             template_request={
                 "data": block.serialize()[:-1].hex(),
                 "mode": "proposal",
-                "rules": ["segwit"],
+                **NORMAL_GBT_REQUEST_PARAMS,
             }
         )
 
@@ -115,7 +116,7 @@ class MiningTemplateVerificationTest(BitcoinTestFramework):
         assert_raises_rpc_error(-22, "Block decode failed", node.getblocktemplate, {
             'data': bad_block_sn.hex(),
             'mode': 'proposal',
-            'rules': ['segwit'],
+            **NORMAL_GBT_REQUEST_PARAMS,
         })
 
     def nbits_test(self, node, block):
