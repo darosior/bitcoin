@@ -77,12 +77,41 @@ static CBlock CreateGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
 
+void CChainParams::ApplyDeploymentOptions(const DeploymentOptions& opts)
+{
+    for (const auto& [dep, height] : opts.activation_heights) {
+        switch (dep) {
+        case Consensus::BuriedDeployment::DEPLOYMENT_SEGWIT:
+            consensus.SegwitHeight = int{height};
+            break;
+        case Consensus::BuriedDeployment::DEPLOYMENT_HEIGHTINCB:
+            consensus.BIP34Height = int{height};
+            break;
+        case Consensus::BuriedDeployment::DEPLOYMENT_DERSIG:
+            consensus.BIP66Height = int{height};
+            break;
+        case Consensus::BuriedDeployment::DEPLOYMENT_CLTV:
+            consensus.BIP65Height = int{height};
+            break;
+        case Consensus::BuriedDeployment::DEPLOYMENT_CSV:
+            consensus.CSVHeight = int{height};
+            break;
+        }
+    }
+
+    for (const auto& [deployment_pos, version_bits_params] : opts.version_bits_parameters) {
+        consensus.vDeployments[deployment_pos].nStartTime = version_bits_params.start_time;
+        consensus.vDeployments[deployment_pos].nTimeout = version_bits_params.timeout;
+        consensus.vDeployments[deployment_pos].min_activation_height = version_bits_params.min_activation_height;
+    }
+}
+
 /**
  * Main network on which people trade goods and services.
  */
 class CMainParams : public CChainParams {
 public:
-    CMainParams() {
+    CMainParams(const MainNetOptions& opts) {
         m_chain_type = ChainType::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -116,6 +145,13 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = 1619222400; // April 24th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 709632; // Approximately November 12th, 2021
+
+        // Deployment of the Consensus Cleanup (BIP 54)
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+
+        ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000b1f3b93b65b16d035a82be84"};
         consensus.defaultAssumeValid = uint256{"00000000000000000001b658dd1120e82e66d2790811f89ede9742ada3ed6d77"}; // 886157
@@ -213,7 +249,7 @@ public:
  */
 class CTestNetParams : public CChainParams {
 public:
-    CTestNetParams() {
+    CTestNetParams(const TestNetOptions& opts) {
         m_chain_type = ChainType::TESTNET;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -245,6 +281,13 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = 1619222400; // April 24th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = 1628640000; // August 11th, 2021
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
+
+        // Deployment of the Consensus Cleanup (BIP 54)
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+
+        ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000015f5e0c9f13455b0eb17"};
         consensus.defaultAssumeValid = uint256{"00000000000003fc7967410ba2d0a8a8d50daedc318d43e8baf1a9782c236a57"}; // 3974606
@@ -314,7 +357,7 @@ public:
  */
 class CTestNet4Params : public CChainParams {
 public:
-    CTestNet4Params() {
+    CTestNet4Params(const TestNetOptions& opts) {
         m_chain_type = ChainType::TESTNET4;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -344,6 +387,13 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
+
+        // Deployment of the Consensus Cleanup (BIP 54)
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+
+        ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000001d6dce8651b6094e4c1"};
         consensus.defaultAssumeValid = uint256{"0000000000003ed4f08dbdf6f7d6b271a6bcffce25675cb40aa9fa43179a89f3"}; // 72600
@@ -483,6 +533,13 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
+        // Deployment of the Consensus Cleanup (BIP 54)
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+
+        ApplyDeploymentOptions(options.dep_opts);
+
         // message start is defined as the first 4 bytes of the sha256d of the block script
         HashWriter h{};
         h << consensus.signet_challenge;
@@ -558,6 +615,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0; // No activation delay
 
+        // Deployment of the Consensus Cleanup (BIP 54)
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_CONSENSUSCLEANUP].min_activation_height = 0; // No activation delay
+
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
@@ -570,31 +633,7 @@ public:
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;
 
-        for (const auto& [dep, height] : opts.activation_heights) {
-            switch (dep) {
-            case Consensus::BuriedDeployment::DEPLOYMENT_SEGWIT:
-                consensus.SegwitHeight = int{height};
-                break;
-            case Consensus::BuriedDeployment::DEPLOYMENT_HEIGHTINCB:
-                consensus.BIP34Height = int{height};
-                break;
-            case Consensus::BuriedDeployment::DEPLOYMENT_DERSIG:
-                consensus.BIP66Height = int{height};
-                break;
-            case Consensus::BuriedDeployment::DEPLOYMENT_CLTV:
-                consensus.BIP65Height = int{height};
-                break;
-            case Consensus::BuriedDeployment::DEPLOYMENT_CSV:
-                consensus.CSVHeight = int{height};
-                break;
-            }
-        }
-
-        for (const auto& [deployment_pos, version_bits_params] : opts.version_bits_parameters) {
-            consensus.vDeployments[deployment_pos].nStartTime = version_bits_params.start_time;
-            consensus.vDeployments[deployment_pos].nTimeout = version_bits_params.timeout;
-            consensus.vDeployments[deployment_pos].min_activation_height = version_bits_params.min_activation_height;
-        }
+        ApplyDeploymentOptions(opts.dep_opts);
 
         genesis = CreateGenesisBlock(1296688602, 2, 0x207fffff, 1, 50 * COIN);
         consensus.hashGenesisBlock = genesis.GetHash();
@@ -617,23 +656,23 @@ public:
         m_assumeutxo_data = {
             {   // For use by unit tests
                 .height = 110,
-                .hash_serialized = AssumeutxoHash{uint256{"6657b736d4fe4db0cbc796789e812d5dba7f5c143764b1b6905612f1830609d1"}},
+                .hash_serialized = AssumeutxoHash{uint256{"b952555c8ab81fec46f3d4253b7af256d766ceb39fb7752b9d18cdf4a0141327"}},
                 .m_chain_tx_count = 111,
-                .blockhash = consteval_ctor(uint256{"696e92821f65549c7ee134edceeeeaaa4105647a3c4fd9f298c0aec0ab50425c"}),
+                .blockhash = consteval_ctor(uint256{"6affe030b7965ab538f820a56ef56c8149b7dc1d1c144af57113be080db7c397"}),
             },
             {
                 // For use by fuzz target src/test/fuzz/utxo_snapshot.cpp
                 .height = 200,
-                .hash_serialized = AssumeutxoHash{uint256{"4f34d431c3e482f6b0d67b64609ece3964dc8d7976d02ac68dd7c9c1421738f2"}},
+                .hash_serialized = AssumeutxoHash{uint256{"17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a"}},
                 .m_chain_tx_count = 201,
-                .blockhash = consteval_ctor(uint256{"5e93653318f294fb5aa339d00bbf8cf1c3515488ad99412c37608b139ea63b27"}),
+                .blockhash = consteval_ctor(uint256{"385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9"}),
             },
             {
                 // For use by test/functional/feature_assumeutxo.py
                 .height = 299,
-                .hash_serialized = AssumeutxoHash{uint256{"a4bf3407ccb2cc0145c49ebba8fa91199f8a3903daf0883875941497d2493c27"}},
+                .hash_serialized = AssumeutxoHash{uint256{"d2b051ff5e8eef46520350776f4100dd710a63447a8e01d917e92e79751a63e2"}},
                 .m_chain_tx_count = 334,
-                .blockhash = consteval_ctor(uint256{"3bb7ce5eba0be48939b7a521ac1ba9316afee2c7bada3a0cca24188e6d7d96c0"}),
+                .blockhash = consteval_ctor(uint256{"7cc695046fec709f8c9394b6f928f81e81fd3ac20977bb68760fa1faa7916ea2"}),
             },
         };
 
@@ -663,19 +702,19 @@ std::unique_ptr<const CChainParams> CChainParams::RegTest(const RegTestOptions& 
     return std::make_unique<const CRegTestParams>(options);
 }
 
-std::unique_ptr<const CChainParams> CChainParams::Main()
+std::unique_ptr<const CChainParams> CChainParams::Main(const MainNetOptions& options)
 {
-    return std::make_unique<const CMainParams>();
+    return std::make_unique<const CMainParams>(options);
 }
 
-std::unique_ptr<const CChainParams> CChainParams::TestNet()
+std::unique_ptr<const CChainParams> CChainParams::TestNet(const TestNetOptions& options)
 {
-    return std::make_unique<const CTestNetParams>();
+    return std::make_unique<const CTestNetParams>(options);
 }
 
-std::unique_ptr<const CChainParams> CChainParams::TestNet4()
+std::unique_ptr<const CChainParams> CChainParams::TestNet4(const TestNetOptions& options)
 {
-    return std::make_unique<const CTestNet4Params>();
+    return std::make_unique<const CTestNet4Params>(options);
 }
 
 std::vector<int> CChainParams::GetAvailableSnapshotHeights() const

@@ -160,7 +160,7 @@ class FullBlockTest(BitcoinTestFramework):
             blockname = f"for_invalid.{TxTemplate.__name__}"
             self.next_block(blockname)
             badtx = template.get_tx()
-            if TxTemplate != invalid_txs.InputMissing:
+            if TxTemplate != invalid_txs.InputMissing and TxTemplate != invalid_txs.SizeExactly64:
                 self.sign_tx(badtx, attempt_spend_tx)
             badtx.rehash()
             badblock = self.update_block(blockname, [badtx])
@@ -822,6 +822,10 @@ class FullBlockTest(BitcoinTestFramework):
         self.send_blocks([b60], True)
         self.save_spendable_output()
 
+        # Disable the consensus cleanup for the BIP30 checks.
+        self.restart_node(0, ["-vbparams=consensuscleanup:0:0"])
+        self.reconnect_p2p()
+
         # Test BIP30 (reject duplicate)
         #
         # -> b39 (11) -> b42 (12) -> b43 (13) -> b53 (14) -> b55 (15) -> b57 (16) -> b60 ()
@@ -834,6 +838,7 @@ class FullBlockTest(BitcoinTestFramework):
         self.log.info("Reject a block with a transaction with a duplicate hash of a previous transaction (BIP30)")
         self.move_tip(60)
         b61 = self.next_block(61)
+        b61.vtx[0].nLockTime = 0
         b61.vtx[0].vin[0].scriptSig = DUPLICATE_COINBASE_SCRIPT_SIG
         b61.vtx[0].rehash()
         b61 = self.update_block(61, [])
@@ -856,6 +861,7 @@ class FullBlockTest(BitcoinTestFramework):
         b_spend_dup_cb = self.update_block('spend_dup_cb', [tx])
 
         b_dup_2 = self.next_block('dup_2')
+        b_dup_2.vtx[0].nLockTime = 0
         b_dup_2.vtx[0].vin[0].scriptSig = DUPLICATE_COINBASE_SCRIPT_SIG
         b_dup_2.vtx[0].rehash()
         b_dup_2 = self.update_block('dup_2', [])
@@ -864,6 +870,10 @@ class FullBlockTest(BitcoinTestFramework):
         self.send_blocks([b_spend_dup_cb, b_dup_2], success=True)
         # The duplicate has less confirmations
         assert_equal(self.nodes[0].gettxout(txid=duplicate_tx.hash, n=0)['confirmations'], 1)
+
+        # Re-enable the consensus cleanup now that BIP30 checks were performed.
+        self.restart_node(0)
+        self.reconnect_p2p()
 
         # Test tx.isFinal is properly rejected (not an exhaustive tx.isFinal test, that should be in data-driven transaction tests)
         #

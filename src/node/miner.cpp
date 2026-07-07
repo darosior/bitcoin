@@ -34,10 +34,10 @@ int64_t GetMinimumTime(const CBlockIndex* pindexPrev, const int64_t difficulty_a
     int64_t min_time{pindexPrev->GetMedianTimePast() + 1};
     // Height of block to be mined.
     const int height{pindexPrev->nHeight + 1};
-    // Account for BIP94 timewarp rule on all networks. This makes future
-    // activation safer.
+    // Account for BIP94 timewarp rule on all networks. This makes BIP54
+    // activation safer since BIP94 sets a tighter bound.
     if (height % difficulty_adjustment_interval == 0) {
-        min_time = std::max<int64_t>(min_time, pindexPrev->GetBlockTime() - MAX_TIMEWARP);
+        min_time = std::max<int64_t>(min_time, pindexPrev->GetBlockTime() - MAX_TIMEWARP_TESTNET4);
     }
     return min_time;
 }
@@ -159,10 +159,13 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     CMutableTransaction coinbaseTx;
     coinbaseTx.vin.resize(1);
     coinbaseTx.vin[0].prevout.SetNull();
+    coinbaseTx.vin[0].nSequence = CTxIn::MAX_SEQUENCE_NONFINAL; // Make sure timelock is enforced.
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = m_options.coinbase_output_script;
     coinbaseTx.vout[0].nValue = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
+    Assert(nHeight > 0);
+    coinbaseTx.nLockTime = static_cast<uint32_t>(nHeight - 1);
     pblock->vtx[0] = MakeTransactionRef(std::move(coinbaseTx));
     pblocktemplate->vchCoinbaseCommitment = m_chainstate.m_chainman.GenerateCoinbaseCommitment(*pblock, pindexPrev);
     pblocktemplate->vTxFees[0] = -nFees;
