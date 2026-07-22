@@ -786,6 +786,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // Alias what we need out of ws
     TxValidationState& state = ws.m_state;
 
+    // Whether to return consensus errors for BIP 54 failures.
+    const bool bip54_active{DeploymentActiveAfter(m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman, Consensus::DEPLOYMENT_CONSENSUSCLEANUP)};
+
     if (!CheckTransaction(tx, state)) {
         return false; // state filled in by CheckTransaction
     }
@@ -880,8 +883,14 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     // The mempool holds txs for the next block, so pass height+1 to CheckTxInputs
-    if (!Consensus::CheckTxInputs(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, ws.m_base_fees, /*enforce_bip54=*/true)) {
+    if (!Consensus::CheckTxInputs(tx, state, m_view, m_active_chainstate.m_chain.Height() + 1, ws.m_base_fees)) {
         return false; // state filled in by CheckTxInputs
+    }
+
+    // If BIP 54 is active, return a consensus error on legacy sigops violation. Otherwise
+    // a standardness error will be returned below.
+    if (bip54_active && !Consensus::CheckSigopsBIP54(tx, m_view)) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-legacy-sigops", "too many legacy sigops (BIP54)");
     }
 
     if (m_pool.m_opts.require_standard && !AreInputsStandard(tx, m_view)) {
@@ -2633,7 +2642,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         {
             CAmount txfee = 0;
             TxValidationState tx_state;
-            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, /*enforce_bip54=*/enforce_bip54)) {
+            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                               tx_state.GetRejectReason(),
@@ -2645,6 +2654,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-accumulated-fee-outofrange",
                               "accumulated fee in the block out of range");
                 break;
+            }
+
+            if (enforce_bip54 && !Consensus::CheckSigopsBIP54(tx, view)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-legacy-sigops",
+                                     "contains a transaction with too many legacy sigops (BIP54)");
             }
 
             // Check that transaction is BIP68 final
