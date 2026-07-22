@@ -23,8 +23,10 @@ from test_framework.script import (
     OP_CHECKSIG,
     OP_DUP,
     OP_ENDIF,
+    OP_IF,
     OP_NOT,
     OP_NOTIF,
+    OP_0,
     OP_1,
 )
 from test_framework.test_framework import BitcoinTestFramework
@@ -96,6 +98,18 @@ class Bip54Test(BitcoinTestFramework):
         txs = [tx.serialize().hex() for tx in txs]
         coinbase_spk = self.wallet.get_output_script().hex()
         self.generateblock(node, f"raw({coinbase_spk})", txs)
+
+    def submit_tx_many_sigops(self, node):
+        """Create and submit to the mempool a transaction that violates the BIP54 sigops limit."""
+        # A bare scriptPubKey that accounts for 2501 sigops
+        prep_spk = CScript([OP_0, OP_IF] + [OP_CHECKMULTISIG] * 125 + [OP_CHECKSIG, OP_ENDIF, OP_1])
+        prep_tx = self.create_prep_tx(prep_spk)
+        tx = self.create_spend_tx(prep_tx, 0, CScript())
+
+        # Mine the (non-standard) preparation tx and submit the BIP54-invalid tx.
+        coinbase_spk = self.wallet.get_output_script().hex()
+        self.generateblock(node, f"raw({coinbase_spk})", [prep_tx.serialize().hex()])
+        node.sendrawtransaction(tx.serialize().hex())
 
     def timewarp_attack(self, node):
         """Perform a pseudo Timewarp attack. Pseudo because regtest does not have retargets, so we only do the first period."""
@@ -305,9 +319,8 @@ class Bip54Test(BitcoinTestFramework):
         if err is not None:
             raise JSONRPCException({"message": err, "code": -25})
 
-    def mine_block_64byte(self, node):
-        """Create a block that contains a 64-byte (Segwit) transaction."""
-        # Create a 64-byte tx that spends a single Segwit input and contains a single p2a output.
+    def create_64byte_tx(self):
+        """Create a 64-byte tx that spends a single Segwit input and contains a single p2a output."""
         prevout = self.wallet.get_utxo(confirmed_only=True)
         tx = CTransaction()
         tx.vin = [CTxIn(COutPoint(int(prevout['txid'], 16), prevout['vout']))]
@@ -315,6 +328,11 @@ class Bip54Test(BitcoinTestFramework):
         tx.vout = [CTxOut(0, anchor_spk)]
         self.wallet.sign_tx(tx)
         assert_equal(len(tx.serialize_without_witness()), 64)
+        return tx
+
+    def mine_block_64byte(self, node):
+        """Create a block that contains a 64-byte (Segwit) transaction."""
+        tx = self.create_64byte_tx()
 
         # Mine a block containing that transaction.
         prev_hash = node.getbestblockhash()
@@ -327,6 +345,11 @@ class Bip54Test(BitcoinTestFramework):
         block.solve()
 
         return block
+
+    def submit_tx_64byte(self, node):
+        """Submit a 64-byte mempool transaction."""
+        tx = self.create_64byte_tx()
+        node.sendrawtransaction(tx.serialize().hex())
 
     def run_test(self):
         node = self.nodes[0]
@@ -346,6 +369,10 @@ class Bip54Test(BitcoinTestFramework):
         # - Accept a block containing a 64-byte transaction.
         block_64b = self.mine_block_64byte(node).serialize().hex()
         assert_equal(node.submitblock(block_64b), None)
+        # - Return a standardness error for legacy sigops violation in mempool submission
+        assert_raises_rpc_error(-26, "bad-txns-nonstandard-inputs", self.submit_tx_many_sigops, node)
+        # - Return a standardness error for 64-byte transactions in mempool submission
+        assert_raises_rpc_error(-26, "tx-size-small", self.submit_tx_64byte, node)
 
         # Create a block with a version such as it will lock in the BIP54 deployment, then transition to activate.
         self.log.info("Activating BIP54")
@@ -376,6 +403,10 @@ class Bip54Test(BitcoinTestFramework):
         # - Refuse a block containing a 64-byte transaction
         block_64b = self.mine_block_64byte(node).serialize().hex()
         assert_equal(node.submitblock(block_64b), "bad-txns-size")
+        # - Return a consensus error for legacy sigops violation in mempool submission
+        assert_raises_rpc_error(-26, "bad-txns-legacy-sigops", self.submit_tx_many_sigops, node)
+        # - Return a consensus error for 64-byte transactions in mempool submission
+        assert_raises_rpc_error(-26, "txn-size-64", self.submit_tx_64byte, node)
 
 
 if __name__ == "__main__":
