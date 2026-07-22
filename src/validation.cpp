@@ -803,7 +803,12 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, reason);
     }
 
-    // Transactions smaller than 65 non-witness bytes are not relayed to mitigate CVE-2017-12842.
+    // To mitigate CVE-2017-12842, transactions smaller than 65 non-witness bytes are not relayed,
+    // and BIP 54 extends this protection at consensus by making the 64-byte case invalid.
+    const auto stripped_size{::GetSerializeSize(TX_NO_WITNESS(tx))};
+    if (bip54_active && stripped_size == INVALID_TX_NONWITNESS_SIZE) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "txn-size-64", "Transactions with a witness-stripped size of exactly 64 bytes are invalid.");
+    }
     if (::GetSerializeSize(TX_NO_WITNESS(tx)) < MIN_STANDARD_TX_NONWITNESS_SIZE)
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "tx-size-small");
 
