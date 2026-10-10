@@ -26,8 +26,12 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <optional>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 class CTxMemPool;
@@ -154,13 +158,12 @@ BOOST_FIXTURE_TEST_CASE(chainstate_update_tip, TestChain100Setup)
     // TODO: much of this is inlined from ProcessNewBlock(); just reuse PNB()
     // once it is changed to support multiple chainstates.
     {
-        LOCK(::cs_main);
         bool checked = CheckBlock(*pblockone, state, chainparams.GetConsensus());
         BOOST_CHECK(checked);
-        bool accepted = chainman.AcceptBlock(
-            pblockone, state, &pindex, true, nullptr, &newblock, true);
-        BOOST_CHECK(accepted);
     }
+    bool accepted = chainman.AcceptBlock(
+        pblockone, state, &pindex, true, nullptr, &newblock, true);
+    BOOST_CHECK(accepted);
 
     // UpdateTip is called here
     bool block_added = background_cs.ActivateBestChain(state, pblockone);
@@ -237,6 +240,224 @@ BOOST_FIXTURE_TEST_CASE(header_on_block_being_invalidated, TestChain100Setup)
     BOOST_CHECK(blockman.LookupBlockIndex(fork.GetHash()));
 
     WITH_LOCK(blockman.m_block_storage_mutex, blockman.m_blocks_being_invalidated.clear());
+}
+
+BOOST_FIXTURE_TEST_CASE(processnewblock_concurrent_storage, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+
+    // The number of blocks stored in the block files, which must not depend on how many times
+    // a block was delivered.
+    const auto count_stored_blocks{[&] {
+        LOCK(chainman.m_blockman.m_block_storage_mutex);
+        uint64_t total{0};
+        for (size_t file{0};; ++file) {
+            try {
+                total += chainman.m_blockman.GetBlockFileInfo(file)->nBlocks;
+            } catch (const std::out_of_range&) {
+                return total;
+            }
+        }
+    }};
+
+    constexpr int NUM_THREADS{4};
+    constexpr int NUM_BLOCKS{4};
+    for (int round{0}; round < 3; ++round) {
+        // Distinct blocks competing at the same height, on the current tip.
+        std::vector<std::shared_ptr<const CBlock>> blocks;
+        for (int i{0}; i < NUM_BLOCKS; ++i) {
+            blocks.push_back(std::make_shared<const CBlock>(CreateBlock({}, CScript() << round << i)));
+        }
+        const int height_before{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Height())};
+        const uint64_t stored_before{count_stored_blocks()};
+
+        // Each thread delivers every block, starting from a different one, so that the
+        // threads race on the same blocks.
+        std::vector<std::vector<int>> accepted(NUM_THREADS, std::vector<int>(NUM_BLOCKS));
+        std::vector<std::vector<int>> stored(NUM_THREADS, std::vector<int>(NUM_BLOCKS));
+        std::vector<std::thread> threads;
+        for (int t{0}; t < NUM_THREADS; ++t) {
+            threads.emplace_back([&, t] {
+                for (int i{0}; i < NUM_BLOCKS; ++i) {
+                    const int idx{(i + t) % NUM_BLOCKS};
+                    bool new_block{false};
+                    accepted[t][idx] = chainman.ProcessNewBlock(blocks[idx], /*force_processing=*/true, /*min_pow_checked=*/true, &new_block);
+                    stored[t][idx] = new_block;
+                }
+            });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        for (int idx{0}; idx < NUM_BLOCKS; ++idx) {
+            int stored_by{0};
+            for (int t{0}; t < NUM_THREADS; ++t) {
+                BOOST_CHECK(accepted[t][idx]);
+                stored_by += stored[t][idx];
+            }
+            // Exactly one call stored each block, even when several were in progress at once.
+            BOOST_CHECK_EQUAL(stored_by, 1);
+        }
+        BOOST_CHECK_EQUAL(count_stored_blocks() - stored_before, static_cast<uint64_t>(NUM_BLOCKS));
+        // One of the competing blocks extends the chain.
+        BOOST_CHECK_EQUAL(WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Height()), height_before + 1);
+    }
+}
+
+//! A block invalidated while its data is written without cs_main must not be recorded as stored.
+BOOST_FIXTURE_TEST_CASE(invalidate_block_while_storing, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const CBlock block{CreateBlock({}, CScript{} << OP_TRUE)};
+    const auto pblock{std::make_shared<const CBlock>(block)};
+    const CBlockHeader& header{block};
+
+    BlockValidationState state;
+    const CBlockIndex* header_index{nullptr};
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state, &header_index));
+
+    CBlockIndex* pindex{nullptr};
+    std::optional<int> store_height;
+    bool new_block{false};
+    {
+        LOCK(::cs_main);
+        pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        BOOST_REQUIRE(pindex);
+        BOOST_REQUIRE(chainman.PrepareAcceptBlock(pblock, state, pindex, /*fRequested=*/true, &new_block, /*min_pow_checked=*/true, store_height));
+        BOOST_CHECK(new_block);
+    }
+
+    // The block passed validation and is now written to disk without cs_main. Invalidate it in the meantime.
+    chainman.ActiveChainstate().InvalidateBlock(state, pindex);
+
+    BOOST_CHECK(!chainman.StoreAcceptedBlock(pblock, state, pindex, *store_height, /*dbp=*/nullptr));
+    BOOST_CHECK_EQUAL(state.GetResult(), BlockValidationResult::BLOCK_CACHED_INVALID);
+
+    // The data must not be recorded, since the block cannot be made valid again later without it being
+    // re-downloaded: BLOCK_HAVE_DATA would prevent that, while BLOCK_VALID_TRANSACTIONS is never set.
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.m_blockman.GetStatus(*pindex) & BLOCK_FAILED_VALID);
+    BOOST_CHECK(!(chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA));
+    BOOST_CHECK_EQUAL(chainman.m_blockman.GetNumTx(*pindex), 0U);
+}
+
+//! A caller delivering a block that another caller is still writing waits for that write, and then
+//! reports the block as already known, rather than reporting success before it is stored.
+BOOST_FIXTURE_TEST_CASE(processnewblock_waits_for_store, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const CBlock block{CreateBlock({}, CScript{} << OP_TRUE)};
+    const auto pblock{std::make_shared<const CBlock>(block)};
+    const CBlockHeader& header{block};
+
+    BlockValidationState state;
+    const CBlockIndex* header_index{nullptr};
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state, &header_index));
+
+    // The first caller has validated the block and is writing it to disk, but has not recorded it yet.
+    CBlockIndex* pindex{nullptr};
+    std::optional<int> store_height;
+    {
+        LOCK(::cs_main);
+        pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        BOOST_REQUIRE(pindex);
+        BOOST_REQUIRE(chainman.PrepareAcceptBlock(pblock, state, pindex, /*fRequested=*/true, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true, store_height));
+        BOOST_REQUIRE(store_height);
+    }
+
+    // A second caller delivers the same block meanwhile. It must not return before the first store is recorded.
+    std::atomic<bool> second_done{false};
+    bool second_accepted{false};
+    bool second_new_block{true};
+    std::thread second{[&] {
+        bool new_block{false};
+        second_accepted = chainman.ProcessNewBlock(pblock, /*force_processing=*/true, /*min_pow_checked=*/true, &new_block);
+        second_new_block = new_block;
+        second_done = true;
+    }};
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    BOOST_CHECK(!second_done);
+
+    BOOST_CHECK(chainman.StoreAcceptedBlock(pblock, state, pindex, *store_height, /*dbp=*/nullptr));
+    second.join();
+
+    BOOST_CHECK(second_accepted);
+    BOOST_CHECK(!second_new_block);
+    LOCK(::cs_main);
+    BOOST_CHECK(chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA);
+}
+
+//! WaitForBlockStore() returns once a block being stored is recorded in the block index, so that a
+//! request for a block announced before it was written can be answered.
+BOOST_FIXTURE_TEST_CASE(wait_for_block_store, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto pblock{std::make_shared<const CBlock>(CreateBlock({}, CScript{} << OP_TRUE))};
+    const CBlockHeader& header{*pblock};
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state));
+
+    // Returns right away for a block that is not being stored, known or not.
+    chainman.WaitForBlockStore(pblock->GetHash());
+    chainman.WaitForBlockStore(uint256::ONE);
+
+    CBlockIndex* pindex{nullptr};
+    std::optional<int> store_height;
+    {
+        LOCK(::cs_main);
+        pindex = chainman.m_blockman.LookupBlockIndex(pblock->GetHash());
+        BOOST_REQUIRE(chainman.PrepareAcceptBlock(pblock, state, pindex, /*fRequested=*/true, /*fNewBlock=*/nullptr, /*min_pow_checked=*/true, store_height));
+        BOOST_REQUIRE(store_height);
+    }
+
+    std::atomic<bool> waited{false};
+    bool stored_when_done{false};
+    std::thread waiter{[&] {
+        chainman.WaitForBlockStore(pblock->GetHash());
+        stored_when_done = chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA;
+        waited = true;
+    }};
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    BOOST_CHECK(!waited);
+
+    BOOST_CHECK(chainman.StoreAcceptedBlock(pblock, state, pindex, *store_height, /*dbp=*/nullptr));
+    waiter.join();
+    BOOST_CHECK(waited);
+    // The block is recorded by the time the wait is over.
+    BOOST_CHECK(stored_when_done);
+}
+
+//! A block invalidated while its data is written must be acceptable again once it is reconsidered.
+BOOST_FIXTURE_TEST_CASE(reconsider_after_invalidate_while_storing, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const CBlock block{CreateBlock({}, CScript{} << OP_TRUE)};
+    const auto pblock{std::make_shared<const CBlock>(block)};
+    const CBlockHeader& header{block};
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state));
+
+    CBlockIndex* pindex{nullptr};
+    std::optional<int> store_height;
+    {
+        LOCK(::cs_main);
+        pindex = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        BOOST_REQUIRE(chainman.PrepareAcceptBlock(pblock, state, pindex, /*fRequested=*/true, nullptr, /*min_pow_checked=*/true, store_height));
+    }
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(state, pindex));
+    BOOST_CHECK(!chainman.StoreAcceptedBlock(pblock, state, pindex, *store_height, /*dbp=*/nullptr));
+
+    // Clearing the failure flags also recalculates the best header.
+    {
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().ResetBlockFailureFlags(pindex);
+    }
+    BOOST_REQUIRE(chainman.ActiveChainstate().ActivateBestChain(state));
+    bool new_block{false};
+    BOOST_CHECK(chainman.ProcessNewBlock(pblock, /*force_processing=*/true, /*min_pow_checked=*/true, &new_block));
+    BOOST_CHECK(new_block);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()), pindex);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

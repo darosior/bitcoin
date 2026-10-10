@@ -2581,6 +2581,23 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         a_recent_block = m_most_recent_block;
         a_recent_compact_block = m_most_recent_compact_block;
     }
+    if (a_recent_block && a_recent_block->GetHash() == inv.hash) {
+        // The most recent block is announced before its data is written to disk, which happens
+        // without cs_main, so the peer may request it before it is recorded in the block index.
+        // Wait for that, so that the request is answered as for any other block.
+        //
+        // Latency: this blocks the message handler thread, and so every other peer, until the
+        // write is recorded in the block index. That includes the sync of the previous block file
+        // when the write moved on to a new one. Today it only happens for blocks written by another
+        // thread (submitblock, generateblock, -loadblock): blocks received from peers are written by
+        // this thread before it handles the next message. It is no worse than before, when the
+        // write held cs_main, which this thread needs for nearly every message. It becomes a cost
+        // on the block relay path once blocks are validated and written on their own thread.
+        // TODO: serve a_recent_block from memory instead, before the block index checks below, as
+        // GETBLOCKTXN already does. That requires deciding which of those checks (BlockRequestAllowed(),
+        // pruning, the limits on historical blocks) apply to a block that is not stored yet.
+        m_chainman.WaitForBlockStore(inv.hash);
+    }
 
     bool need_activate_chain = false;
     {

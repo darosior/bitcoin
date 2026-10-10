@@ -2732,6 +2732,7 @@ bool Chainstate::FlushStateToDisk(
         const std::pair<int, int> chain_prune_range{m_blockman.IsPruneMode() ? GetPruneRange(std::numeric_limits<int>::max()) : std::pair<int, int>{}};
         {
             LOCK(m_blockman.m_block_storage_mutex);
+            // Block files that blocks are being written to are skipped by the pruning functions, see CanPruneBlockFile().
             if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && m_chainman.m_blockman.m_blockfiles_indexed) {
                 // make sure we don't prune above any of the prune locks bestblocks
                 // pruning is height-based
@@ -4354,16 +4355,13 @@ void ChainstateManager::ReportHeadersPresync(int64_t height, int64_t timestamp)
     }
 }
 
-/** Store block on disk. If dbp is non-nullptr, the file is known to already reside on disk */
-bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked)
+bool ChainstateManager::PrepareAcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex*& pindex, bool fRequested, bool* fNewBlock, bool min_pow_checked, std::optional<int>& store_height)
 {
     const CBlock& block = *pblock;
 
+    store_height.reset();
     if (fNewBlock) *fNewBlock = false;
     AssertLockHeld(cs_main);
-
-    CBlockIndex *pindexDummy = nullptr;
-    CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
 
     bool accepted_header{AcceptBlockHeader(block, state, &pindex, min_pow_checked)};
     CheckBlockIndex();
@@ -4392,7 +4390,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     // TODO: deal better with return value and error conditions for duplicate
     // and unrequested blocks.
-    if (fAlreadyHave) return true;
+    // If another caller is storing this block right now, AcceptBlock() waits for it.
+    if (fAlreadyHave || m_blocks_being_stored.contains(pindex)) return true;
     if (!fRequested) {  // If we didn't ask for it:
         if (m_blockman.GetNumTx(*pindex) != 0) return true;    // This is a previously-processed block that was pruned
         if (!fHasMoreOrSameWork) return true; // Don't process less-work chains
@@ -4417,26 +4416,32 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     }
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
-    // (but if it does not build on our best tip, let the SendMessages loop relay it)
+    // (but if it does not build on our best tip, let the SendMessages loop relay it).
+    // The block data is written after this, without cs_main, so a peer may request the block before
+    // it is stored. ProcessGetBlockData() waits for the store in that case.
     if (!IsInitialBlockDownload() && ActiveTip() == pindex->pprev && m_options.signals) {
         m_options.signals->NewPoWValidBlock(pindex, pblock);
     }
 
-    // Write block to history file
+    // The block is written to the history file by StoreAcceptedBlock().
     if (fNewBlock) *fNewBlock = true;
+    store_height = pindex->nHeight;
+    m_blocks_being_stored.insert(pindex);
+    return true;
+}
+
+bool ChainstateManager::FinishAcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex* pindex, const FlatFilePos& pos)
+{
+    AssertLockHeld(cs_main);
+    if (m_blockman.GetStatus(*pindex) & BLOCK_FAILED_VALID) {
+        // The block was marked invalid while its data was written without cs_main. Recording the
+        // data now would leave the entry with BLOCK_HAVE_DATA but without BLOCK_VALID_TRANSACTIONS,
+        // which ReconsiderBlock() cannot recover from, so reject it as a known invalid block instead.
+        return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid",
+                             strprintf("block %s was previously marked invalid", pindex->GetBlockHash().ToString()));
+    }
     try {
-        FlatFilePos blockPos{};
-        if (dbp) {
-            blockPos = *dbp;
-            m_blockman.UpdateBlockInfo(block, pindex->nHeight, blockPos);
-        } else {
-            blockPos = m_blockman.WriteBlock(block, pindex->nHeight);
-            if (blockPos.IsNull()) {
-                state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
-                return false;
-            }
-        }
-        ReceivedBlockTransactions(block, pindex, blockPos);
+        ReceivedBlockTransactions(*pblock, pindex, pos);
     } catch (const std::runtime_error& e) {
         return FatalError(GetNotifications(), state, strprintf(_("System error while saving block to disk: %s"), e.what()));
     }
@@ -4462,6 +4467,88 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     return true;
 }
 
+bool ChainstateManager::StoreAcceptedBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex* pindex, int height, const FlatFilePos* dbp)
+{
+    // The block data is written without cs_main, so that the (possibly slow) disk write does not
+    // hold up the validation of other blocks. The block stays in m_blocks_being_stored until it is
+    // recorded in the block index below, or discarded, so that concurrent callers do not store it a
+    // second time.
+    AssertLockNotHeld(cs_main);
+    FlatFilePos block_pos{};
+    try {
+        if (dbp) {
+            block_pos = *dbp;
+            m_blockman.UpdateBlockInfo(*pblock, height, block_pos);
+        } else {
+            block_pos = m_blockman.WriteBlock(*pblock, height);
+            if (block_pos.IsNull()) {
+                state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
+            }
+        }
+    } catch (const std::runtime_error& e) {
+        FatalError(GetNotifications(), state, strprintf(_("System error while saving block to disk: %s"), e.what()));
+        block_pos = FlatFilePos{};
+    } catch (...) {
+        WITH_LOCK(cs_main, EndBlockStore(pindex));
+        throw;
+    }
+
+    LOCK(cs_main);
+    EndBlockStore(pindex);
+    if (block_pos.IsNull()) return false;
+    bool recorded{false};
+    try {
+        recorded = FinishAcceptBlock(pblock, state, pindex, block_pos);
+    } catch (...) {
+        if (!dbp) m_blockman.FinishBlockWrite(block_pos);
+        throw;
+    }
+    // The block is now recorded in the block index, or discarded, so its file may be pruned.
+    if (!dbp) m_blockman.FinishBlockWrite(block_pos);
+    return recorded;
+}
+
+void ChainstateManager::EndBlockStore(const CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+    m_blocks_being_stored.erase(pindex);
+    m_blocks_stored_cv.notify_all();
+}
+
+void ChainstateManager::WaitForBlockStore(const uint256& hash)
+{
+    AssertLockNotHeld(cs_main);
+    const CBlockIndex* pindex{m_blockman.LookupBlockIndex(hash)};
+    if (!pindex) return;
+    WAIT_LOCK(cs_main, lock);
+    m_blocks_stored_cv.wait(lock, [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return !m_blocks_being_stored.contains(pindex); });
+}
+
+/** Store block on disk. If dbp is non-nullptr, the file is known to already reside on disk */
+bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked)
+{
+    // Waiting for a concurrent store below releases cs_main, which must therefore not be held recursively.
+    AssertLockNotHeld(cs_main);
+    CBlockIndex *pindexDummy = nullptr;
+    CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
+
+    std::optional<int> store_height;
+    bool accepted;
+    {
+        WAIT_LOCK(cs_main, lock);
+        accepted = PrepareAcceptBlock(pblock, state, pindex, fRequested, fNewBlock, min_pow_checked, store_height);
+        while (accepted && !store_height && pindex && m_blocks_being_stored.contains(pindex)) {
+            // Another caller is writing this block to disk. Wait until it is recorded in the block index,
+            // then check again: the block is reported as already known, or stored if that store failed.
+            m_blocks_stored_cv.wait(lock, [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return !m_blocks_being_stored.contains(pindex); });
+            accepted = PrepareAcceptBlock(pblock, state, pindex, fRequested, fNewBlock, min_pow_checked, store_height);
+        }
+    }
+    if (!accepted || !store_height) return accepted;
+
+    return StoreAcceptedBlock(pblock, state, pindex, *store_height, dbp);
+}
+
 bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block)
 {
     AssertLockNotHeld(cs_main);
@@ -4472,20 +4559,21 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         BlockValidationState state;
 
         // CheckBlock() does not support multi-threaded block validation because CBlock::fChecked can cause data race.
-        // Therefore, the following critical section must include the CheckBlock() call as well.
-        LOCK(cs_main);
-
+        // Therefore, it is called with cs_main held. AcceptBlock() takes cs_main itself, and writes the block to disk
+        // without it.
+        //
         // Skipping AcceptBlock() for CheckBlock() failures means that we will never mark a block as invalid if
         // CheckBlock() fails.  This is protective against consensus failure if there are any unknown forms of block
         // malleability that cause CheckBlock() to fail; see e.g. CVE-2012-2459 and
         // https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2019-February/016697.html.  Because CheckBlock() is
         // not very expensive, the anti-DoS benefits of caching failure (of a definitely-invalid block) are not substantial.
-        bool ret = CheckBlock(*block, state, GetConsensus());
+        bool ret = WITH_LOCK(cs_main, return CheckBlock(*block, state, GetConsensus()));
         if (ret) {
             // Store to disk
             ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked);
         }
         if (!ret) {
+            LOCK(cs_main);
             if (m_options.signals) {
                 m_options.signals->BlockChecked(block, state);
             }
@@ -5026,6 +5114,7 @@ bool ChainstateManager::LoadGenesisBlock()
         }
         CBlockIndex* pindex{m_blockman.AddToBlockIndex(genesis_block)};
         ReceivedBlockTransactions(genesis_block, pindex, blockPos);
+        m_blockman.FinishBlockWrite(blockPos);
     } catch (const std::runtime_error& e) {
         LogError("Failed to write genesis block: %s", e.what());
         return false;
@@ -5092,6 +5181,7 @@ void ChainstateManager::LoadExternalBlockFile(
 
                 std::shared_ptr<CBlock> pblock{}; // needs to remain available after the cs_main lock is released to avoid duplicate reads from disk
 
+                bool process_block{false};
                 {
                     LOCK(cs_main);
                     // detect out of order blocks, and store them for later
@@ -5106,22 +5196,26 @@ void ChainstateManager::LoadExternalBlockFile(
 
                     // process in case the block isn't known yet
                     const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
-                    if (!pindex || (m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA) == 0) {
-                        // This block can be processed immediately; rewind to its start, read and deserialize it.
-                        blkdat.SetPos(nBlockPos);
-                        pblock = std::make_shared<CBlock>();
-                        blkdat >> TX_WITH_WITNESS(*pblock);
-                        nRewind = blkdat.GetPos();
-
-                        BlockValidationState state;
-                        if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
-                            nLoaded++;
-                        }
-                        if (state.IsError()) {
-                            break;
-                        }
-                    } else if (hash != params.GetConsensus().hashGenesisBlock && pindex->nHeight % 1000 == 0) {
+                    process_block = !pindex || (m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA) == 0;
+                    if (!process_block && hash != params.GetConsensus().hashGenesisBlock && pindex->nHeight % 1000 == 0) {
                         LogDebug(BCLog::REINDEX, "Block Import: already had block %s at height %d\n", hash.ToString(), pindex->nHeight);
+                    }
+                }
+
+                // AcceptBlock() takes cs_main itself, so that the block data is written without holding it.
+                if (process_block) {
+                    // This block can be processed immediately; rewind to its start, read and deserialize it.
+                    blkdat.SetPos(nBlockPos);
+                    pblock = std::make_shared<CBlock>();
+                    blkdat >> TX_WITH_WITNESS(*pblock);
+                    nRewind = blkdat.GetPos();
+
+                    BlockValidationState state;
+                    if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
+                        nLoaded++;
+                    }
+                    if (state.IsError()) {
+                        break;
                     }
                 }
 
@@ -5170,7 +5264,6 @@ void ChainstateManager::LoadExternalBlockFile(
                         if (m_blockman.ReadBlock(*pblockrecursive, it->second, {})) {
                             const auto& block_hash{pblockrecursive->GetHash()};
                             LogDebug(BCLog::REINDEX, "%s: Processing out of order child %s of %s", __func__, block_hash.ToString(), head.ToString());
-                            LOCK(cs_main);
                             BlockValidationState dummy;
                             if (AcceptBlock(pblockrecursive, dummy, nullptr, true, &it->second, nullptr, true)) {
                                 nLoaded++;

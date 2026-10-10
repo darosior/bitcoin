@@ -377,9 +377,9 @@ public:
      * index map, the mutable fields of each CBlockIndex entry (nStatus, nFile, nDataPos,
      * nUndoPos, nTx), the best header, the set of dirty block index entries, the block
      * index database handle, the blockfile cursors, the block file info, the sets of dirty and
-     * unsynced block files, the undo files to finalize, the flag requesting a pruning check,
-     * the snapshot height used to segment block files, the prune locks, whether block files
-     * have ever been pruned, and the blocks being invalidated.
+     * unsynced block files, the undo files to finalize, the pending block writes, the flag
+     * requesting a pruning check, the snapshot height used to segment block files, the prune
+     * locks, whether block files have ever been pruned, and the blocks being invalidated.
      * ChainstateManager::m_last_notified_header is also guarded by this mutex.
      *
      * The chain selection fields (CBlockIndex::m_chain_tx_count and nSequenceId) and
@@ -526,7 +526,9 @@ public:
     /** Create a new block index entry for a given block hash */
     CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
-    //! Mark one block file as pruned (modify associated database entries)
+    //! Whether a block file can be pruned without losing a block that is being written to it.
+    bool CanPruneBlockFile(int file) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    //! Mark one block file as pruned (modify associated database entries). A cursor pointing to it moves on to a new file.
     void PruneOneBlockFile(int fileNumber) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_block_storage_mutex);
 
     CBlockIndex* LookupBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
@@ -550,14 +552,18 @@ public:
      * @param[in]  nHeight      the height of the block
      *
      * The position is reserved under the storage mutex, and the write itself runs without it,
-     * so block file state is not blocked by the disk I/O. Callers hold cs_main, which keeps
-     * the block files from being pruned while the write is in progress. The caller records the
-     * position in the block index, which also records the block file as unsynced.
+     * so block file state is not blocked by the disk I/O. The block file holding the block is
+     * not pruned until FinishBlockWrite() is called with the returned position, which the caller
+     * does once it has recorded the position in the block index, or discarded the block.
+     * Recording the position also records the block file as unsynced.
      *
      * @returns in case of success, the position to which the block was written to
      *          in case of an error, an empty FlatFilePos
      */
     FlatFilePos WriteBlock(const CBlock& block, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+
+    /** Mark a block written by WriteBlock() as recorded in the block index, or as discarded. */
+    void FinishBlockWrite(const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
 
     /** Update blockfile info while processing a block during reindex. The block must be available on disk.
      *
@@ -624,6 +630,14 @@ public:
      * invalid, and be left unmarked while that block is.
      */
     std::vector<const CBlockIndex*> m_blocks_being_invalidated GUARDED_BY(m_block_storage_mutex);
+
+    /**
+     * The number of blocks being written by WriteBlock() to each block file, from the
+     * reservation of their range until FinishBlockWrite(). Their positions are not in the block
+     * index yet, so the files must not be pruned. A block file left behind by a write also
+     * counts as pending until it is finalized.
+     */
+    std::map<int, unsigned int> m_pending_block_writes GUARDED_BY(m_block_storage_mutex);
 
     //! Check whether the block associated with this index entry is pruned or not.
     bool IsBlockPruned(const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);

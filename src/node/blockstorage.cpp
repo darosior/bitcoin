@@ -505,6 +505,13 @@ size_t BlockManager::BlockIndexSize() const
     return BlockIndexSizeLocked();
 }
 
+bool BlockManager::CanPruneBlockFile(int file) const
+{
+    AssertLockHeld(m_block_storage_mutex);
+    // Blocks being written to the file are not in the block index yet, so pruning it would unlink them.
+    return !m_pending_block_writes.contains(file);
+}
+
 void BlockManager::PruneOneBlockFile(const int fileNumber)
 {
     AssertLockHeld(cs_main);
@@ -537,6 +544,18 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
 
     m_blockfile_info.at(fileNumber) = CBlockFileInfo{};
     m_dirty_fileinfo.insert(fileNumber);
+    // Block writes do not hold cs_main, so if a cursor still pointed to the file, a block could be
+    // written to it between pruning it and unlinking it. Such a cursor moves on to a new file instead.
+    for (auto& cursor : m_blockfile_cursors) {
+        if (cursor && cursor->file_num == fileNumber) {
+            const int new_file{MaxBlockfileNum() + 1};
+            LogDebug(BCLog::BLOCKSTORAGE, "Leaving pruned block file %i (onto %i)\n", fileNumber, new_file);
+            cursor = BlockfileCursor{new_file};
+            if (static_cast<int>(m_blockfile_info.size()) <= new_file) {
+                m_blockfile_info.resize(new_file + 1);
+            }
+        }
+    }
     // The file is about to be unlinked, and no index entry refers to its data any more. Syncing or
     // finalizing it now would recreate it.
     m_unsynced_block_files.erase(fileNumber);
@@ -563,6 +582,9 @@ void BlockManager::FindFilesToPruneManual(
     for (int fileNumber = 0; fileNumber < this->MaxBlockfileNum(); fileNumber++) {
         const auto& fileinfo = m_blockfile_info[fileNumber];
         if (fileinfo.nSize == 0 || fileinfo.nHeightLast > (unsigned)last_block_can_prune || fileinfo.nHeightFirst < (unsigned)min_block_to_prune) {
+            continue;
+        }
+        if (!CanPruneBlockFile(fileNumber)) {
             continue;
         }
 
@@ -639,6 +661,10 @@ void BlockManager::FindFilesToPrune(
             // don't prune files that could have a block that's not within the allowable
             // prune range for the chain being pruned.
             if (fileinfo.nHeightLast > (unsigned)last_block_can_prune || fileinfo.nHeightFirst < (unsigned)min_block_to_prune) {
+                continue;
+            }
+
+            if (!CanPruneBlockFile(fileNumber)) {
                 continue;
             }
 
@@ -1453,7 +1479,16 @@ FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
 {
     const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(TX_WITH_WITNESS(block)))};
     std::optional<FlatFilePos> finalize_block_file;
-    FlatFilePos pos{WITH_LOCK(m_block_storage_mutex, return FindNextBlockPos(block_size + STORAGE_HEADER_BYTES, nHeight, block.GetBlockTime(), finalize_block_file))};
+    FlatFilePos pos;
+    {
+        LOCK(m_block_storage_mutex);
+        pos = FindNextBlockPos(block_size + STORAGE_HEADER_BYTES, nHeight, block.GetBlockTime(), finalize_block_file);
+        // The write counts as pending from the moment its range is reserved, so the file cannot be pruned
+        // while the data is written. The previous file is held the same way until it is finalized, since
+        // finalizing a pruned file would recreate it.
+        if (!pos.IsNull()) ++m_pending_block_writes[pos.nFile];
+        if (finalize_block_file) ++m_pending_block_writes[finalize_block_file->nFile];
+    }
 
     if (finalize_block_file) {
         // Do not propagate the return code. The flush concerns a previous block
@@ -1464,13 +1499,24 @@ FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
         if (!FinalizeBlockFile(*finalize_block_file)) {
             LogWarning("Failed to flush previous block file %05i before writing to %05i\n", finalize_block_file->nFile, pos.nFile);
         }
+        FinishBlockWrite(*finalize_block_file);
     }
 
     if (pos.IsNull()) {
         LogError("FindNextBlockPos failed for %s while writing block", pos.ToString());
         return FlatFilePos();
     }
-    if (!WriteBlockBytes(block, pos, block_size)) {
+    // The caller releases the pending write of a block that was written. Release it here otherwise,
+    // including when the write throws, so that the file can still be pruned.
+    bool written{false};
+    try {
+        written = WriteBlockBytes(block, pos, block_size);
+    } catch (...) {
+        FinishBlockWrite(pos);
+        throw;
+    }
+    if (!written) {
+        FinishBlockWrite(pos);
         return FlatFilePos();
     }
     pos.nPos += STORAGE_HEADER_BYTES;
@@ -1501,6 +1547,16 @@ bool BlockManager::WriteBlockBytes(const CBlock& block, const FlatFilePos& pos, 
         return false;
     }
     return true;
+}
+
+void BlockManager::FinishBlockWrite(const FlatFilePos& pos)
+{
+    LOCK(m_block_storage_mutex);
+    const auto it{m_pending_block_writes.find(pos.nFile)};
+    assert(it != m_pending_block_writes.end());
+    if (--it->second == 0) {
+        m_pending_block_writes.erase(it);
+    }
 }
 
 static auto InitBlocksdirXorKey(const BlockManager::Options& opts)

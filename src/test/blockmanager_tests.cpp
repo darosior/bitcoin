@@ -18,6 +18,10 @@
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>
 
+#include <set>
+#include <thread>
+#include <vector>
+
 using kernel::CBlockFileInfo;
 using node::STORAGE_HEADER_BYTES;
 using node::BlockManager;
@@ -44,7 +48,9 @@ BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
     BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
     // simulate adding a genesis block normally
     LOCK(::cs_main);
-    BOOST_CHECK_EQUAL(blockman.WriteBlock(params->GenesisBlock(), 0).nPos, STORAGE_HEADER_BYTES);
+    const FlatFilePos genesis_pos{blockman.WriteBlock(params->GenesisBlock(), 0)};
+    blockman.FinishBlockWrite(genesis_pos);
+    BOOST_CHECK_EQUAL(genesis_pos.nPos, STORAGE_HEADER_BYTES);
     // simulate what happens during reindex
     // simulate a well-formed genesis block being found at offset 8 in the blk00000.dat file
     // the block is found at offset 8 because there is an 8 byte serialization header
@@ -58,6 +64,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
     // 8 bytes (for serialization header) + 285 (for serialized genesis block) = 293
     // add another 8 bytes for the second block's serialization header and we get 293 + 8 = 301
     FlatFilePos actual{blockman.WriteBlock(params->GenesisBlock(), 1)};
+    blockman.FinishBlockWrite(actual);
     BOOST_CHECK_EQUAL(actual.nPos, STORAGE_HEADER_BYTES + ::GetSerializeSize(TX_WITH_WITNESS(params->GenesisBlock())) + STORAGE_HEADER_BYTES);
 }
 
@@ -312,9 +319,11 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
 
     // Write the first block to a new location.
     FlatFilePos pos1{blockman.WriteBlock(block1, /*nHeight=*/1)};
+    blockman.FinishBlockWrite(pos1);
 
     // Write second block
     FlatFilePos pos2{blockman.WriteBlock(block2, /*nHeight=*/2)};
+    blockman.FinishBlockWrite(pos2);
 
     // Two blocks in the file
     BOOST_CHECK_EQUAL(WITH_LOCK(blockman.m_block_storage_mutex, return blockman.CalculateCurrentUsage()), (TEST_BLOCK_SIZE + STORAGE_HEADER_BYTES) * 2);
@@ -371,6 +380,122 @@ BOOST_FIXTURE_TEST_CASE(prune_lock_update_and_delete, TestingSetup)
 
     // Deleting a non-existent lock returns false
     BOOST_CHECK(!blockman.DeletePruneLock("nonexistent"));
+}
+
+BOOST_AUTO_TEST_CASE(blockmanager_storage_without_cs_main)
+{
+    const auto params {CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    KernelNotifications notifications{Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings)};
+    const BlockManager::Options blockman_opts{
+        .chainparams = *params,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+        .block_tree_db_params = DBParams{
+            .path = m_args.GetDataDirNet() / "blocks" / "index",
+            .cache_bytes = 0,
+        },
+    };
+    BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
+
+    // Block file state is guarded by m_block_storage_mutex, not cs_main, so the
+    // block storage functions below must not require cs_main.
+    const CBlock& block{params->GenesisBlock()};
+    const auto block_size{static_cast<uint64_t>(::GetSerializeSize(TX_WITH_WITNESS(block)))};
+    const auto usage_before{WITH_LOCK(blockman.m_block_storage_mutex, return blockman.CalculateCurrentUsage())};
+
+    const FlatFilePos pos{blockman.WriteBlock(block, /*nHeight=*/0)};
+    blockman.FinishBlockWrite(pos);
+    BOOST_CHECK(!pos.IsNull());
+    BOOST_CHECK_EQUAL(WITH_LOCK(blockman.m_block_storage_mutex, return blockman.CalculateCurrentUsage()),
+                      usage_before + block_size + STORAGE_HEADER_BYTES);
+
+    blockman.UpdatePruneLock("storage_without_cs_main", node::PruneLockInfo{.height_first = 1});
+    BOOST_CHECK(blockman.DeletePruneLock("storage_without_cs_main"));
+    BOOST_CHECK(!blockman.DeletePruneLock("storage_without_cs_main"));
+}
+
+BOOST_AUTO_TEST_CASE(blockmanager_concurrent_write_block)
+{
+    const auto params {CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    KernelNotifications notifications{Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings)};
+    const BlockManager::Options blockman_opts{
+        .chainparams = *params,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+        .block_tree_db_params = DBParams{
+            .path = m_args.GetDataDirNet() / "blocks" / "index",
+            .cache_bytes = 0,
+        },
+    };
+    BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
+
+    const CBlock& block{params->GenesisBlock()};
+    const auto block_size{static_cast<uint64_t>(::GetSerializeSize(TX_WITH_WITNESS(block)))};
+    constexpr int NUM_THREADS{4};
+    constexpr int BLOCKS_PER_THREAD{25};
+
+    // Concurrent writers must never be handed overlapping positions. This relies
+    // on m_block_storage_mutex serializing the allocation of block file space.
+    std::vector<std::vector<FlatFilePos>> positions(NUM_THREADS);
+    std::vector<std::thread> threads;
+    for (int t{0}; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&blockman, &block, &positions, t] {
+            for (int i{0}; i < BLOCKS_PER_THREAD; ++i) {
+                const FlatFilePos pos{blockman.WriteBlock(block, /*nHeight=*/0)};
+                blockman.FinishBlockWrite(pos);
+                positions[t].push_back(pos);
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    std::set<std::pair<int, uint32_t>> seen;
+    for (const auto& thread_positions : positions) {
+        for (const FlatFilePos& pos : thread_positions) {
+            BOOST_CHECK(!pos.IsNull());
+            BOOST_CHECK(seen.emplace(pos.nFile, pos.nPos).second);
+        }
+    }
+    BOOST_CHECK_EQUAL(seen.size(), static_cast<size_t>(NUM_THREADS * BLOCKS_PER_THREAD));
+    BOOST_CHECK_EQUAL(WITH_LOCK(blockman.m_block_storage_mutex, return blockman.CalculateCurrentUsage()),
+                      NUM_THREADS * BLOCKS_PER_THREAD * (block_size + STORAGE_HEADER_BYTES));
+}
+
+//! A block file cannot be pruned while a block is being written to it. Once a block file is pruned,
+//! no block is written to it any more, since block writes do not hold cs_main and could otherwise
+//! write to it between pruning it and unlinking it.
+BOOST_AUTO_TEST_CASE(blockmanager_prune_block_file_being_written)
+{
+    const auto params {CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    KernelNotifications notifications{Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings)};
+    const BlockManager::Options blockman_opts{
+        .chainparams = *params,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+        .block_tree_db_params = DBParams{
+            .path = m_args.GetDataDirNet() / "blocks" / "index",
+            .cache_bytes = 0,
+        },
+    };
+    BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
+    const CBlock& block{params->GenesisBlock()};
+
+    const FlatFilePos pos{blockman.WriteBlock(block, /*nHeight=*/1)};
+    BOOST_REQUIRE_EQUAL(pos.nFile, 0);
+    BOOST_CHECK(!WITH_LOCK(blockman.m_block_storage_mutex, return blockman.CanPruneBlockFile(0)));
+    blockman.FinishBlockWrite(pos);
+    BOOST_CHECK(WITH_LOCK(blockman.m_block_storage_mutex, return blockman.CanPruneBlockFile(0)));
+
+    // File 0 is the file the cursor points to. Once it is pruned, the next block goes to a new file.
+    {
+        LOCK2(::cs_main, blockman.m_block_storage_mutex);
+        blockman.PruneOneBlockFile(0);
+    }
+    const FlatFilePos next_pos{blockman.WriteBlock(block, /*nHeight=*/2)};
+    blockman.FinishBlockWrite(next_pos);
+    BOOST_CHECK_EQUAL(next_pos.nFile, 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

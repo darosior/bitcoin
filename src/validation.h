@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -1086,6 +1087,23 @@ public:
     }
 
 
+    /**
+     * Blocks that passed validation in PrepareAcceptBlock() and whose data is being
+     * written to disk, until StoreAcceptedBlock() records their position in the block
+     * index or discards them. Concurrent callers for such a block wait for that instead
+     * of storing it again.
+     */
+    std::set<const CBlockIndex*> m_blocks_being_stored GUARDED_BY(::cs_main);
+
+    /** Notified when a block leaves m_blocks_being_stored. */
+    std::condition_variable_any m_blocks_stored_cv;
+
+    /**
+     * If the block with the given hash is in m_blocks_being_stored, wait until it has been
+     * recorded in the block index or discarded.
+     */
+    void WaitForBlockStore(const uint256& hash) LOCKS_EXCLUDED(::cs_main);
+
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
     size_t m_total_coinstip_cache{0};
@@ -1297,9 +1315,38 @@ public:
      * @param[out]  fNewBlock   Optional return parameter to indicate if the
      *                          block is new to our storage.
      *
+     * If another caller is already storing the block, this waits for that store to finish,
+     * and then returns what storing it would have returned, with `fNewBlock` false.
+     *
      * @returns   False if the block or header is invalid, or if saving to disk fails (likely a fatal error); true otherwise.
      */
-    bool AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked) LOCKS_EXCLUDED(cs_main);
+
+    /**
+     * First phase of accepting a block: the checks and index updates that need cs_main.
+     *
+     * Returns false if the block or header is invalid. Otherwise, `store_height` is set
+     * if the block data still has to be written to disk, in which case the block is
+     * added to m_blocks_being_stored and StoreAcceptedBlock() must be called for it.
+     */
+    bool PrepareAcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex*& pindex, bool fRequested, bool* fNewBlock, bool min_pow_checked, std::optional<int>& store_height) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /**
+     * Write the data of a block that passed PrepareAcceptBlock() to disk, without cs_main, then
+     * record it in the block index with FinishAcceptBlock() and remove it from
+     * m_blocks_being_stored. With `dbp`, the block is already on disk at that position and
+     * nothing is written.
+     */
+    bool StoreAcceptedBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex* pindex, int height, const FlatFilePos* dbp) LOCKS_EXCLUDED(cs_main);
+
+    /**
+     * Last phase of accepting a block, once its data is at `pos`: records the position in
+     * the block index, unless the block was marked invalid while its data was written.
+     */
+    bool FinishAcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex* pindex, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** Remove a block from m_blocks_being_stored, and wake the callers waiting for it. */
+    void EndBlockStore(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
