@@ -2795,21 +2795,16 @@ bool Chainstate::FlushStateToDisk(
                 return FatalError(m_chainman.GetNotifications(), state, _("Disk space is too low!"));
             }
             {
-                LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCH);
+                LOG_TIME_MILLIS_WITH_CATEGORY("write block files and block index to disk", BCLog::BENCH);
 
-                // First make sure all block and undo data is flushed to disk.
-                // TODO: Handle return error, or add detailed comment why it is
-                // safe to not return an error upon failure.
-                if (!m_blockman.FlushChainstateBlockFile(m_chain.Height())) {
-                    LogWarning("%s: Failed to flush block file.\n", __func__);
+                // First sync all block and undo data, then update the block file information and the
+                // block index, which refer to those files. If that fails, the pruned files are not
+                // unlinked and the chainstate is not written, because the block index on disk may
+                // still refer to the pruned files, and not yet to the blocks of the chainstate. The
+                // failure was already reported as fatal.
+                if (!m_blockman.FlushBlockFilesAndIndex()) {
+                    return state.Error("Failed to flush block files and block index to disk");
                 }
-            }
-
-            // Then update all block file information (which may refer to block and undo files).
-            {
-                LOG_TIME_MILLIS_WITH_CATEGORY("write block index to disk", BCLog::BENCH);
-
-                m_blockman.WriteBlockIndexDB();
             }
             // Finally remove any pruned files
             if (fFlushForPrune) {
@@ -3847,6 +3842,8 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
         });
         m_blockman.RaiseValidityLocked(*pindexNew, BLOCK_VALID_TRANSACTIONS);
         m_blockman.MarkBlockIndexDirtyLocked(pindexNew);
+        // The index refers to the block's file from now on, so the next flush must sync it first.
+        m_blockman.m_unsynced_block_files.insert(pos.nFile);
     }
 
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {

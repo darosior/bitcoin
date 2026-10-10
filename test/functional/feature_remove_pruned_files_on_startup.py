@@ -64,8 +64,9 @@ class FeatureRemovePrunedFilesOnStartupTest(BitcoinTestFramework):
         assert_equal(len(ls_files()), 4)
         self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex"])
         assert_equal(self.nodes[0].getblockcount(), 0)
-        self.stop_node(0)  # Stop node to flush the two newly created files
-        assert_equal(ls_files(), ["blk00000.dat", "rev00000.dat"])
+        self.stop_node(0)  # Stop node to flush the newly created file
+        # Only the genesis block is left. It has no undo data, so no undo file is created.
+        assert_equal(ls_files(), ["blk00000.dat"])
 
 
 if __name__ == '__main__':

@@ -89,9 +89,8 @@ bool BlockTreeDB::ReadLastBlockFile(int& nFile)
     return Read(DB_LAST_BLOCK, nFile);
 }
 
-void BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo)
+void BlockTreeDB::WriteToBatch(CDBBatch& batch, const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo) const
 {
-    CDBBatch batch(*this);
     for (const auto& [file, info] : fileInfo) {
         batch.Write(std::make_pair(DB_BLOCK_FILES, file), *info);
     }
@@ -99,7 +98,6 @@ void BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFi
     for (const CBlockIndex* bi : blockinfo) {
         batch.Write(std::make_pair(DB_BLOCK_INDEX, bi->GetBlockHash()), CDiskBlockIndex{bi});
     }
-    WriteBatch(batch, true);
 }
 
 void BlockTreeDB::WriteFlag(const std::string& name, bool fValue)
@@ -539,6 +537,11 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
 
     m_blockfile_info.at(fileNumber) = CBlockFileInfo{};
     m_dirty_fileinfo.insert(fileNumber);
+    // The file is about to be unlinked, and no index entry refers to its data any more. Syncing or
+    // finalizing it now would recreate it.
+    m_unsynced_block_files.erase(fileNumber);
+    m_unsynced_undo_files.erase(fileNumber);
+    m_undo_files_to_finalize.erase(fileNumber);
 }
 
 void BlockManager::FindFilesToPruneManual(
@@ -770,26 +773,6 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     return true;
 }
 
-void BlockManager::WriteBlockIndexDB()
-{
-    AssertLockHeld(::cs_main);
-    LOCK(m_block_storage_mutex);
-    std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
-    vFiles.reserve(m_dirty_fileinfo.size());
-    for (std::set<int>::iterator it = m_dirty_fileinfo.begin(); it != m_dirty_fileinfo.end();) {
-        vFiles.emplace_back(*it, &m_blockfile_info[*it]);
-        m_dirty_fileinfo.erase(it++);
-    }
-    std::vector<const CBlockIndex*> vBlocks;
-    vBlocks.reserve(m_dirty_blockindex.size());
-    for (std::set<CBlockIndex*>::iterator it = m_dirty_blockindex.begin(); it != m_dirty_blockindex.end();) {
-        vBlocks.push_back(*it);
-        m_dirty_blockindex.erase(it++);
-    }
-    int max_blockfile{this->MaxBlockfileNum()};
-    m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks);
-}
-
 bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
 {
     AssertLockHeld(::cs_main);
@@ -993,44 +976,67 @@ bool BlockManager::ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index
     return true;
 }
 
-bool BlockManager::FlushUndoFile(int block_file, bool finalize)
+bool BlockManager::SyncBlockFiles(const std::set<int>& block_files, const std::set<int>& undo_files) const
 {
-    AssertLockHeld(m_block_storage_mutex);
-    FlatFilePos undo_pos_old(block_file, m_blockfile_info[block_file].nUndoSize);
-    if (!m_undo_file_seq.Flush(undo_pos_old, finalize)) {
+    AssertLockNotHeld(m_block_storage_mutex);
+    bool success{true};
+    for (const int file : block_files) {
+        if (!m_block_file_seq.Flush(FlatFilePos(file, 0))) {
+            m_opts.notifications.flushError(_("Flushing block file to disk failed. This is likely the result of an I/O error."));
+            success = false;
+        }
+    }
+    for (const int file : undo_files) {
+        if (!m_undo_file_seq.Flush(FlatFilePos(file, 0))) {
+            m_opts.notifications.flushError(_("Flushing undo file to disk failed. This is likely the result of an I/O error."));
+            success = false;
+        }
+    }
+    return success;
+}
+
+bool BlockManager::FinalizeBlockFile(const FlatFilePos& end) const
+{
+    AssertLockNotHeld(m_block_storage_mutex);
+    if (!m_block_file_seq.Flush(end, /*finalize=*/true)) {
+        m_opts.notifications.flushError(_("Flushing block file to disk failed. This is likely the result of an I/O error."));
+        return false;
+    }
+    return true;
+}
+
+bool BlockManager::FinalizeUndoFile(const FlatFilePos& end) const
+{
+    AssertLockHeld(::cs_main);
+    AssertLockNotHeld(m_block_storage_mutex);
+    if (!m_undo_file_seq.Flush(end, /*finalize=*/true)) {
         m_opts.notifications.flushError(_("Flushing undo file to disk failed. This is likely the result of an I/O error."));
         return false;
     }
     return true;
 }
 
-bool BlockManager::FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo)
+void BlockManager::FinalizeCompleteUndoFiles()
 {
-    AssertLockHeld(m_block_storage_mutex);
-    bool success = true;
-
-    if (m_blockfile_info.size() < 1) {
-        // Return if we haven't loaded any blockfiles yet. This happens during
-        // chainstate init, when we call ChainstateManager::MaybeRebalanceCaches() (which
-        // then calls FlushStateToDisk()), resulting in a call to this function before we
-        // have populated `m_blockfile_info` via LoadBlockIndexDB().
-        return true;
+    AssertLockHeld(::cs_main);
+    std::vector<FlatFilePos> ends;
+    {
+        LOCK(m_block_storage_mutex);
+        for (const int file : m_undo_files_to_finalize) {
+            ends.emplace_back(file, m_blockfile_info[file].nUndoSize);
+        }
+        m_undo_files_to_finalize.clear();
     }
-    assert(static_cast<int>(m_blockfile_info.size()) > blockfile_num);
-
-    FlatFilePos block_pos_old(blockfile_num, m_blockfile_info[blockfile_num].nSize);
-    if (!m_block_file_seq.Flush(block_pos_old, fFinalize)) {
-        m_opts.notifications.flushError(_("Flushing block file to disk failed. This is likely the result of an I/O error."));
-        success = false;
-    }
-    // we do not always flush the undo file, as the chain tip may be lagging behind the incoming blocks,
-    // e.g. during IBD or a sync after a node going offline
-    if (!fFinalize || finalize_undo) {
-        if (!FlushUndoFile(blockfile_num, finalize_undo)) {
-            success = false;
+    for (const FlatFilePos& end : ends) {
+        // Do not propagate the return code, a failed flush here should not
+        // be an indication for a failed write. If it were propagated here,
+        // the caller would assume the undo data not to be written, when in
+        // fact it is. Note though, that a failed flush might leave the data
+        // file untrimmed.
+        if (!FinalizeUndoFile(end)) {
+            LogWarning("Failed to flush undo file %05i\n", end.nFile);
         }
     }
-    return success;
 }
 
 BlockfileType BlockManager::BlockfileTypeForHeight(int height)
@@ -1042,18 +1048,62 @@ BlockfileType BlockManager::BlockfileTypeForHeight(int height)
     return (height >= *m_snapshot_height) ? BlockfileType::ASSUMED : BlockfileType::NORMAL;
 }
 
-bool BlockManager::FlushChainstateBlockFile(int tip_height)
+bool BlockManager::FlushBlockFilesAndIndex()
+{
+    AssertLockHeld(::cs_main);
+    // The handle is only set when the BlockManager is constructed, so it can be used without the mutex.
+    BlockTreeDB& db{*WITH_LOCK(m_block_storage_mutex, return m_block_tree_db.get())};
+    CDBBatch batch{db};
+    std::set<int> unsynced_block_files, unsynced_undo_files;
+    std::vector<int> dirty_files;
+    std::vector<CBlockIndex*> dirty_blocks;
+    {
+        // Take a snapshot of the dirty state, serialized into the batch so that it is written without
+        // the mutex. Everything in it was recorded in the block index after its data was written and
+        // closed, and its file was recorded as unsynced at the same time, so syncing the unsynced files
+        // of the snapshot covers it. Entries recorded after this point stay dirty for the next flush.
+        LOCK(m_block_storage_mutex);
+        unsynced_block_files.swap(m_unsynced_block_files);
+        unsynced_undo_files.swap(m_unsynced_undo_files);
+        dirty_files.assign(m_dirty_fileinfo.begin(), m_dirty_fileinfo.end());
+        dirty_blocks.assign(m_dirty_blockindex.begin(), m_dirty_blockindex.end());
+        std::vector<std::pair<int, const CBlockFileInfo*>> files;
+        files.reserve(dirty_files.size());
+        for (const int file : dirty_files) {
+            files.emplace_back(file, &m_blockfile_info[file]);
+        }
+        db.WriteToBatch(batch, files, MaxBlockfileNum(), {dirty_blocks.begin(), dirty_blocks.end()});
+        m_dirty_fileinfo.clear();
+        m_dirty_blockindex.clear();
+    }
+
+    FinalizeCompleteUndoFiles();
+
+    // The index must never refer to data that is not on disk, so the files are synced before the index is written.
+    if (!SyncBlockFiles(unsynced_block_files, unsynced_undo_files)) {
+        // Keep the snapshot dirty, so that the next flush retries it.
+        LOCK(m_block_storage_mutex);
+        m_unsynced_block_files.merge(unsynced_block_files);
+        m_unsynced_undo_files.merge(unsynced_undo_files);
+        m_dirty_fileinfo.insert(dirty_files.begin(), dirty_files.end());
+        m_dirty_blockindex.insert(dirty_blocks.begin(), dirty_blocks.end());
+        return false;
+    }
+
+    db.WriteBatch(batch, /*fSync=*/true);
+    return true;
+}
+
+std::set<int> BlockManager::GetUnsyncedBlockFiles() const
 {
     LOCK(m_block_storage_mutex);
-    auto& cursor = m_blockfile_cursors[BlockfileTypeForHeight(tip_height)];
-    // If the cursor does not exist, it means an assumeutxo snapshot is loaded,
-    // but no blocks past the snapshot height have been written yet, so there
-    // is no data associated with the chainstate, and it is safe not to flush.
-    if (cursor) {
-        return FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false);
-    }
-    // No need to log warnings in this case.
-    return true;
+    return m_unsynced_block_files;
+}
+
+std::set<int> BlockManager::GetUnsyncedUndoFiles() const
+{
+    LOCK(m_block_storage_mutex);
+    return m_unsynced_undo_files;
 }
 
 uint64_t BlockManager::CalculateCurrentUsage()
@@ -1095,7 +1145,7 @@ fs::path BlockManager::GetBlockPosFilename(const FlatFilePos& pos) const
     return m_block_file_seq.FileName(pos);
 }
 
-FlatFilePos BlockManager::FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime)
+FlatFilePos BlockManager::FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, std::optional<FlatFilePos>& finalize_block_file)
 {
     AssertLockHeld(m_block_storage_mutex);
     const BlockfileType chain_type = BlockfileTypeForHeight(nHeight);
@@ -1114,7 +1164,6 @@ FlatFilePos BlockManager::FindNextBlockPos(unsigned int nAddSize, unsigned int n
         m_blockfile_info.resize(nFile + 1);
     }
 
-    bool finalize_undo = false;
     unsigned int max_blockfile_size{MAX_BLOCKFILE_SIZE};
     // Use smaller blockfiles in test-only -fastprune mode - but avoid
     // the possibility of having a block not fit into the block file.
@@ -1127,6 +1176,7 @@ FlatFilePos BlockManager::FindNextBlockPos(unsigned int nAddSize, unsigned int n
     }
     assert(nAddSize < max_blockfile_size);
 
+    bool finalize_undo = false;
     while (m_blockfile_info[nFile].nSize + nAddSize >= max_blockfile_size) {
         // when the undo file is keeping up with the block file, we want to flush it explicitly
         // when it is lagging behind (more blocks arrive than are being connected), we let the
@@ -1151,17 +1201,13 @@ FlatFilePos BlockManager::FindNextBlockPos(unsigned int nAddSize, unsigned int n
         LogDebug(BCLog::BLOCKSTORAGE, "Leaving block file %i: %s (onto %i) (height %i)\n",
                  last_blockfile, m_blockfile_info[last_blockfile].ToString(), nFile, nHeight);
 
-        // Do not propagate the return code. The flush concerns a previous block
-        // and undo file that has already been written to. If a flush fails
-        // here, and we crash, there is no expected additional block data
-        // inconsistency arising from the flush failure here. However, the undo
-        // data may be inconsistent after a crash if the flush is called during
-        // a reindex. A flush error might also leave some of the data files
-        // untrimmed.
-        if (!FlushBlockFile(last_blockfile, /*fFinalize=*/true, finalize_undo)) {
-            LogWarning(
-                          "Failed to flush previous block file %05i (finalize=1, finalize_undo=%i) before opening new block file %05i\n",
-                          last_blockfile, finalize_undo, nFile);
+        // The previous file gets no more blocks. Its end is the last reserved position, so the caller
+        // can truncate it there once the storage mutex is released.
+        finalize_block_file = FlatFilePos(last_blockfile, m_blockfile_info[last_blockfile].nSize);
+        if (finalize_undo) {
+            // Undo files are only truncated with cs_main held, so that no undo write is in progress.
+            // The caller may not hold it, so the next undo write or flush finalizes the undo file.
+            m_undo_files_to_finalize.insert(last_blockfile);
         }
         // No undo data yet in the new file, so reset our undo-height tracking.
         m_blockfile_cursors[chain_type] = BlockfileCursor{nFile};
@@ -1228,71 +1274,80 @@ bool BlockManager::FindUndoPos(BlockValidationState& state, int nFile, FlatFileP
 
 bool BlockManager::WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationState& state, CBlockIndex& block)
 {
+    // Undo files are only written and truncated with cs_main held, and pruning also holds it. So no other
+    // undo write, nor the truncation or unlinking of an undo file, can run concurrently with this one.
     AssertLockHeld(::cs_main);
-    LOCK(m_block_storage_mutex);
-    const BlockfileType type = BlockfileTypeForHeight(block.nHeight);
-    auto& cursor = *Assert(m_blockfile_cursors[type]);
-
-    // Write undo information to disk
-    if (GetUndoPosLocked(block).IsNull()) {
-        FlatFilePos pos;
-        const auto blockundo_size{static_cast<uint32_t>(GetSerializeSize(blockundo))};
+    const auto blockundo_size{static_cast<uint32_t>(GetSerializeSize(blockundo))};
+    FlatFilePos pos;
+    {
+        LOCK(m_block_storage_mutex);
+        if (block.nStatus & BLOCK_HAVE_UNDO) {
+            return true;
+        }
         if (!FindUndoPos(state, block.nFile, pos, blockundo_size + UNDO_DATA_DISK_OVERHEAD)) {
             LogError("FindUndoPos failed for %s while writing block undo", pos.ToString());
             return false;
         }
+    }
 
-        // Open history file to append
-        AutoFile file{OpenUndoFile(pos)};
-        if (file.IsNull()) {
-            LogError("OpenUndoFile failed for %s while writing block undo", pos.ToString());
-            return FatalError(m_opts.notifications, state, _("Failed to write undo data."));
-        }
-        {
-            BufferedWriter fileout{file};
+    if (!WriteUndoBytes(blockundo, blockundo_size, block.pprev->GetBlockHash(), pos, state)) {
+        return false;
+    }
+    pos.nPos += STORAGE_HEADER_BYTES;
 
-            // Write index header
-            fileout << GetParams().MessageStart() << blockundo_size;
-            pos.nPos += STORAGE_HEADER_BYTES;
-            {
-                // Calculate checksum
-                HashWriter hasher{};
-                hasher << block.pprev->GetBlockHash() << blockundo;
-                // Write undo data & checksum
-                fileout << blockundo << hasher.GetHash();
-            }
-            // BufferedWriter will flush pending data to file when fileout goes out of scope.
-        }
-
-        // Make sure that the file is closed before we call `FlushUndoFile`.
-        if (file.fclose() != 0) {
-            LogError("Failed to close block undo file %s: %s", pos.ToString(), SysErrorString(errno));
-            return FatalError(m_opts.notifications, state, _("Failed to close block undo file."));
-        }
-
+    {
+        LOCK(m_block_storage_mutex);
+        auto& cursor = *Assert(m_blockfile_cursors[BlockfileTypeForHeight(block.nHeight)]);
         // rev files are written in block height order, whereas blk files are written as blocks come in (often out of order)
         // we want to flush the rev (undo) file once we've written the last block, which is indicated by the last height
         // in the block file info as below; note that this does not catch the case where the undo writes are keeping up
         // with the block writes (usually when a synced up node is getting newly mined blocks) -- this case is caught in
-        // the FindNextBlockPos function
+        // the FindNextBlockPos function, which records the undo file for the next undo write or flush to finalize
         if (pos.nFile < cursor.file_num && static_cast<uint32_t>(block.nHeight) == m_blockfile_info[pos.nFile].nHeightLast) {
-            // Do not propagate the return code, a failed flush here should not
-            // be an indication for a failed write. If it were propagated here,
-            // the caller would assume the undo data not to be written, when in
-            // fact it is. Note though, that a failed flush might leave the data
-            // file untrimmed.
-            if (!FlushUndoFile(pos.nFile, true)) {
-                LogWarning("Failed to flush undo file %05i\n", pos.nFile);
-            }
+            m_undo_files_to_finalize.insert(pos.nFile);
         } else if (pos.nFile == cursor.file_num && block.nHeight > cursor.undo_height) {
             cursor.undo_height = block.nHeight;
         }
-        // update nUndoPos in block index
+        // Publish the undo position only now that the data has been written.
         block.nUndoPos = pos.nPos;
         block.nStatus |= BLOCK_HAVE_UNDO;
         m_dirty_blockindex.insert(&block);
+        m_unsynced_undo_files.insert(pos.nFile);
+    }
+    FinalizeCompleteUndoFiles();
+    return true;
+}
+
+bool BlockManager::WriteUndoBytes(const CBlockUndo& blockundo, uint32_t blockundo_size, const uint256& prev_hash, const FlatFilePos& pos, BlockValidationState& state) const
+{
+    AssertLockHeld(::cs_main);
+    AssertLockNotHeld(m_block_storage_mutex);
+    // Open history file to append
+    AutoFile file{OpenUndoFile(pos)};
+    if (file.IsNull()) {
+        LogError("OpenUndoFile failed for %s while writing block undo", pos.ToString());
+        return FatalError(m_opts.notifications, state, _("Failed to write undo data."));
+    }
+    {
+        BufferedWriter fileout{file};
+
+        // Write index header
+        fileout << GetParams().MessageStart() << blockundo_size;
+        {
+            // Calculate checksum
+            HashWriter hasher{};
+            hasher << prev_hash << blockundo;
+            // Write undo data & checksum
+            fileout << blockundo << hasher.GetHash();
+        }
+        // BufferedWriter will flush pending data to file when fileout goes out of scope.
     }
 
+    // Make sure that the file is closed before the caller syncs it.
+    if (file.fclose() != 0) {
+        LogError("Failed to close block undo file %s: %s", pos.ToString(), SysErrorString(errno));
+        return FatalError(m_opts.notifications, state, _("Failed to close block undo file."));
+    }
     return true;
 }
 
@@ -1396,25 +1451,46 @@ BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& p
 
 FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
 {
-    LOCK(m_block_storage_mutex);
     const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(TX_WITH_WITNESS(block)))};
-    FlatFilePos pos{FindNextBlockPos(block_size + STORAGE_HEADER_BYTES, nHeight, block.GetBlockTime())};
+    std::optional<FlatFilePos> finalize_block_file;
+    FlatFilePos pos{WITH_LOCK(m_block_storage_mutex, return FindNextBlockPos(block_size + STORAGE_HEADER_BYTES, nHeight, block.GetBlockTime(), finalize_block_file))};
+
+    if (finalize_block_file) {
+        // Do not propagate the return code. The flush concerns a previous block
+        // file that has already been written to. If a flush fails here, and we
+        // crash, there is no expected additional block data inconsistency
+        // arising from the flush failure here. A flush error might leave the
+        // file untrimmed.
+        if (!FinalizeBlockFile(*finalize_block_file)) {
+            LogWarning("Failed to flush previous block file %05i before writing to %05i\n", finalize_block_file->nFile, pos.nFile);
+        }
+    }
+
     if (pos.IsNull()) {
         LogError("FindNextBlockPos failed for %s while writing block", pos.ToString());
         return FlatFilePos();
     }
+    if (!WriteBlockBytes(block, pos, block_size)) {
+        return FlatFilePos();
+    }
+    pos.nPos += STORAGE_HEADER_BYTES;
+    return pos;
+}
+
+bool BlockManager::WriteBlockBytes(const CBlock& block, const FlatFilePos& pos, unsigned int block_size) const
+{
+    AssertLockNotHeld(m_block_storage_mutex);
     AutoFile file{OpenBlockFile(pos, /*fReadOnly=*/false)};
     if (file.IsNull()) {
         LogError("OpenBlockFile failed for %s while writing block", pos.ToString());
         m_opts.notifications.fatalError(_("Failed to write block."));
-        return FlatFilePos();
+        return false;
     }
     {
         BufferedWriter fileout{file};
 
         // Write index header
         fileout << GetParams().MessageStart() << block_size;
-        pos.nPos += STORAGE_HEADER_BYTES;
         // Write block
         fileout << TX_WITH_WITNESS(block);
     }
@@ -1422,10 +1498,9 @@ FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
     if (file.fclose() != 0) {
         LogError("Failed to close block file %s: %s", pos.ToString(), SysErrorString(errno));
         m_opts.notifications.fatalError(_("Failed to close file when writing block."));
-        return FlatFilePos();
+        return false;
     }
-
-    return pos;
+    return true;
 }
 
 static auto InitBlocksdirXorKey(const BlockManager::Options& opts)

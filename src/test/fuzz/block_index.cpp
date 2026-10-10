@@ -92,7 +92,9 @@ FUZZ_TARGET(block_index, .init = init_block_index)
     }
 
     // Store these files and blocks in the block index. It should not fail.
-    block_index.WriteBatchSync(files_info, files_count - 1, blocks_info);
+    CDBBatch batch{block_index};
+    block_index.WriteToBatch(batch, files_info, files_count - 1, blocks_info);
+    block_index.WriteBatch(batch, /*fSync=*/true);
 
     // We should be able to read every block file info we stored. Its value should correspond to
     // what we stored above.

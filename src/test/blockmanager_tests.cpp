@@ -23,6 +23,7 @@ using node::STORAGE_HEADER_BYTES;
 using node::BlockManager;
 using node::KernelNotifications;
 using node::MAX_BLOCKFILE_SIZE;
+using node::UNDOFILE_CHUNK_SIZE;
 
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
@@ -58,6 +59,52 @@ BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
     // add another 8 bytes for the second block's serialization header and we get 293 + 8 = 301
     FlatFilePos actual{blockman.WriteBlock(params->GenesisBlock(), 1)};
     BOOST_CHECK_EQUAL(actual.nPos, STORAGE_HEADER_BYTES + ::GetSerializeSize(TX_WITH_WITNESS(params->GenesisBlock())) + STORAGE_HEADER_BYTES);
+}
+
+//! The files of the blocks and undo data recorded in the block index are synced by the next flush, which
+//! syncs them before it writes the index.
+BOOST_FIXTURE_TEST_CASE(flush_syncs_files_of_indexed_data, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& blockman{chainman.m_blockman};
+    chainman.ActiveChainstate().ForceFlushStateToDisk();
+    BOOST_CHECK(blockman.GetUnsyncedBlockFiles().empty());
+    BOOST_CHECK(blockman.GetUnsyncedUndoFiles().empty());
+
+    // The block and its undo data are recorded in the block index when it is processed and connected.
+    const CBlock block{CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()))};
+    const int file{blockman.GetBlockPos(*Assert(blockman.LookupBlockIndex(block.GetHash()))).nFile};
+    BOOST_CHECK((blockman.GetUnsyncedBlockFiles() == std::set<int>{file}));
+    BOOST_CHECK((blockman.GetUnsyncedUndoFiles() == std::set<int>{file}));
+
+    chainman.ActiveChainstate().ForceFlushStateToDisk();
+    BOOST_CHECK(blockman.GetUnsyncedBlockFiles().empty());
+    BOOST_CHECK(blockman.GetUnsyncedUndoFiles().empty());
+}
+
+struct FastPruneSetup : public TestChain100Setup {
+    FastPruneSetup() : TestChain100Setup{ChainType::REGTEST, {.extra_args = {"-fastprune"}}} {}
+};
+
+//! When the undo data keeps up with the blocks, the undo file of a block file that is left behind is
+//! truncated to its data once the next block is connected.
+BOOST_FIXTURE_TEST_CASE(undo_file_finalized_when_keeping_up, FastPruneSetup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& blockman{chainman.m_blockman};
+    const auto tip_file{[&] { return blockman.GetBlockPos(*WITH_LOCK(::cs_main, return chainman.ActiveTip())).nFile; }};
+    const int first_file{tip_file()};
+    // Large outputs fill the 64 KiB block files of -fastprune with a few blocks. Each block is connected
+    // right after it is written, so the undo data keeps up with the blocks.
+    const CScript big_output{CScript() << OP_RETURN << std::vector<unsigned char>(8000)};
+    while (tip_file() == first_file) {
+        CreateAndProcessBlock({}, big_output);
+    }
+
+    const uint32_t undo_size{WITH_LOCK(blockman.m_block_storage_mutex, return blockman.GetBlockFileInfo(first_file)->nUndoSize)};
+    // The file is preallocated in chunks, so it is only that small if it was truncated.
+    BOOST_REQUIRE(undo_size % UNDOFILE_CHUNK_SIZE != 0);
+    BOOST_CHECK_EQUAL(fs::file_size(m_args.GetBlocksDirPath() / fs::PathFromString(strprintf("rev%05u.dat", first_file))), undo_size);
 }
 
 BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain100Setup)

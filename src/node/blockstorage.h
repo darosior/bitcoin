@@ -100,7 +100,8 @@ class BlockTreeDB : public CDBWrapper
 {
 public:
     using CDBWrapper::CDBWrapper;
-    void WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo);
+    /** Serialize block file info, the last block file number and block index entries into `batch`, to be written with WriteBatch(). */
+    void WriteToBatch(CDBBatch& batch, const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo) const;
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo& info);
     bool ReadLastBlockFile(int& nFile);
     void WriteReindexing(bool fReindexing);
@@ -207,11 +208,23 @@ private:
     bool LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_block_storage_mutex);
 
-    /** Return false if block file or undo file flushing fails. */
-    [[nodiscard]] bool FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    /** Sync the given block and undo files to disk. Does disk I/O, so the storage mutex must not be held. */
+    [[nodiscard]] bool SyncBlockFiles(const std::set<int>& block_files, const std::set<int>& undo_files) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
 
-    /** Return false if undo file flushing fails. */
-    [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    /** Truncate a block file to `end` and sync it. Used once FindNextBlockPos() has moved on to a new block file. */
+    [[nodiscard]] bool FinalizeBlockFile(const FlatFilePos& end) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+
+    /** Truncate an undo file to `end` and sync it. Undo files are only written with cs_main held, so this is serialized with them. */
+    [[nodiscard]] bool FinalizeUndoFile(const FlatFilePos& end) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
+
+    /** Finalize the undo files in m_undo_files_to_finalize. */
+    void FinalizeCompleteUndoFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
+
+    /** Write a serialized block at the position reserved by WriteBlock(). Does disk I/O. */
+    [[nodiscard]] bool WriteBlockBytes(const CBlock& block, const FlatFilePos& pos, unsigned int block_size) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+
+    /** Write undo data at the position reserved by WriteBlockUndo(). Does disk I/O. */
+    [[nodiscard]] bool WriteUndoBytes(const CBlockUndo& blockundo, uint32_t blockundo_size, const uint256& prev_hash, const FlatFilePos& pos, BlockValidationState& state) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
 
     /**
      * Helper function performing various preparations before a block can be saved to disk:
@@ -221,9 +234,12 @@ private:
      *
      * The nAddSize argument passed to this function should include not just the size of the serialized CBlock, but also the size of
      * separator fields (STORAGE_HEADER_BYTES).
+     *
+     * The returned range is reserved for the caller: nothing else is written there. If the
+     * previous block file is left behind, its end position is returned in `finalize_block_file`,
+     * for the caller to finalize with FinalizeBlockFile() after releasing the storage mutex.
      */
-    [[nodiscard]] FlatFilePos FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    [[nodiscard]] FlatFilePos FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, std::optional<FlatFilePos>& finalize_block_file) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
     [[nodiscard]] bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
     AutoFile OpenUndoFile(const FlatFilePos& pos, bool fReadOnly = false) const;
@@ -323,6 +339,22 @@ protected:
     /** Dirty block file entries. */
     std::set<int> m_dirty_fileinfo GUARDED_BY(m_block_storage_mutex);
 
+    /**
+     * Block and undo files that block index entries refer to, but that have not been synced to
+     * disk since. They are recorded together with the entries, so that a flush syncs them
+     * before it writes the index.
+     */
+    std::set<int> m_unsynced_block_files GUARDED_BY(m_block_storage_mutex);
+    std::set<int> m_unsynced_undo_files GUARDED_BY(m_block_storage_mutex);
+
+    /**
+     * Undo files that will get no more undo data in the usual case, recorded when their block file
+     * was left behind with complete undo data or when their last undo data was written. Undo files
+     * are only written and truncated with cs_main held, so they are finalized by the next undo write
+     * or flush rather than by the block write that leaves the block file behind.
+     */
+    std::set<int> m_undo_files_to_finalize GUARDED_BY(m_block_storage_mutex);
+
 public:
     using Options = kernel::BlockManagerOpts;
     using ReadRawBlockResult = util::Expected<std::vector<std::byte>, ReadRawError>;
@@ -344,10 +376,11 @@ public:
      * Protects the block index and the state of the block files. This covers the block
      * index map, the mutable fields of each CBlockIndex entry (nStatus, nFile, nDataPos,
      * nUndoPos, nTx), the best header, the set of dirty block index entries, the block
-     * index database handle, the blockfile cursors, the block file info, the set of dirty
-     * block files, the flag requesting a pruning check, the snapshot height used to segment
-     * block files, the prune locks, whether block files have ever been pruned, and the blocks
-     * being invalidated. ChainstateManager::m_last_notified_header is also guarded by this mutex.
+     * index database handle, the blockfile cursors, the block file info, the sets of dirty and
+     * unsynced block files, the undo files to finalize, the flag requesting a pruning check,
+     * the snapshot height used to segment block files, the prune locks, whether block files
+     * have ever been pruned, and the blocks being invalidated.
+     * ChainstateManager::m_last_notified_header is also guarded by this mutex.
      *
      * The chain selection fields (CBlockIndex::m_chain_tx_count and nSequenceId) and
      * m_blocks_unlinked are guarded by cs_main instead, since they change together with the
@@ -356,6 +389,9 @@ public:
      * Lock order: `cs_main` must be acquired before this mutex, never after. Code
      * holding this mutex must not acquire `cs_main`. Notifications (m_opts.notifications)
      * may be sent while this mutex is held, so their handlers must not acquire either lock.
+     * Disk I/O is done without this mutex held, except preallocating space in block and undo
+     * files: block and undo writes reserve their range under it, and flushes take a snapshot
+     * under it.
      */
     mutable Mutex m_block_storage_mutex ACQUIRED_AFTER(::cs_main);
 
@@ -453,7 +489,18 @@ public:
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(m_block_storage_mutex);
 
-    void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
+    /**
+     * Sync the block and undo files that hold indexed data, then write the dirty block index
+     * entries and block file info to the database. The storage mutex is only held to take a
+     * snapshot of the dirty state; the disk I/O runs without it. Flushes are serialized by cs_main.
+     *
+     * @returns false if the files could not be synced. Nothing is written to the database then,
+     *          and the snapshot stays dirty for the next flush.
+     */
+    [[nodiscard]] bool FlushBlockFilesAndIndex() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
+    /** Block and undo files holding indexed data that has not been synced since. For tests. */
+    std::set<int> GetUnsyncedBlockFiles() const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    std::set<int> GetUnsyncedUndoFiles() const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
 
@@ -490,6 +537,10 @@ public:
     /** Get block file info entry for one block file */
     CBlockFileInfo* GetBlockFileInfo(size_t n) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
+    /**
+     * Write the undo data of a connected block, and record its position in the block index.
+     * Undo files are only written and truncated with cs_main held, so undo writes are serialized.
+     */
     bool WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationState& state, CBlockIndex& block)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
 
@@ -497,6 +548,11 @@ public:
      *
      * @param[in]  block        the block to be stored
      * @param[in]  nHeight      the height of the block
+     *
+     * The position is reserved under the storage mutex, and the write itself runs without it,
+     * so block file state is not blocked by the disk I/O. Callers hold cs_main, which keeps
+     * the block files from being pruned while the write is in progress. The caller records the
+     * position in the block index, which also records the block file as unsynced.
      *
      * @returns in case of success, the position to which the block was written to
      *          in case of an error, an empty FlatFilePos
