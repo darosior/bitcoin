@@ -366,7 +366,7 @@ static bool rest_spent_txouts(const std::any& context, HTTPRequest* req, const s
         return false;
     }
 
-    const CBlockIndex* pblockindex = WITH_LOCK(cs_main, return chainman->m_blockman.LookupBlockIndex(*hash));
+    const CBlockIndex* pblockindex = chainman->m_blockman.LookupBlockIndex(*hash);
     if (!pblockindex) {
         return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
     }
@@ -805,7 +805,7 @@ static bool rest_deploymentinfo(const std::any& context, HTTPRequest* req, const
 
             const ChainstateManager* chainman = GetChainman(context, req);
             if (!chainman) return false;
-            if (!WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(*hash))) {
+            if (!chainman->m_blockman.LookupBlockIndex(*hash)) {
                 return RESTERR(req, HTTP_BAD_REQUEST, "Block not found");
             }
 

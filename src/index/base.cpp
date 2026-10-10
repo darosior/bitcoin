@@ -507,7 +507,7 @@ void BaseIndex::SetBestBlockIndex(const CBlockIndex* block)
     if (AllowPrune()) {
         node::PruneLockInfo prune_lock;
         prune_lock.height_first = block ? block->nHeight : 0;
-        WITH_LOCK(::cs_main, m_chainstate->m_blockman.UpdatePruneLock(GetName(), prune_lock));
+        m_chainstate->m_blockman.UpdatePruneLock(GetName(), prune_lock);
     }
 
     // Intentionally set m_best_block_index as the last step in this function,

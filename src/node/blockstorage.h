@@ -107,8 +107,9 @@ public:
     void ReadReindexing(bool& fReindexing);
     void WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
-    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Loads the block index entries into memory. Writes the entries' fields directly, so `storage_mutex` must be held. */
+    bool LoadBlockIndexGuts(Mutex& storage_mutex, const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
+        EXCLUSIVE_LOCKS_REQUIRED(storage_mutex);
 };
 } // namespace kernel
 
@@ -227,10 +228,15 @@ private:
 
     AutoFile OpenUndoFile(const FlatFilePos& pos, bool fReadOnly = false) const;
 
-    /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
+    /**
+     * Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain.
+     * `chain_prune_range` is the result of Chainstate::GetPruneRange() for `chain`, without a height limit. It is
+     * computed by the caller, because GetPruneRange() cannot be called with the storage mutex held.
+     */
     void FindFilesToPruneManual(
         std::set<int>& setFilesToPrune,
         int nManualPruneHeight,
+        const std::pair<int, int>& chain_prune_range,
         const Chainstate& chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_block_storage_mutex);
 
     /**
@@ -248,10 +254,14 @@ private:
      *
      * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
      * @param        last_prune        The last height we're able to prune, according to the prune locks
+     * @param        chain_prune_range The result of Chainstate::GetPruneRange() for `chain`, without a height limit.
+     *                                 It is computed by the caller, because GetPruneRange() cannot be called with
+     *                                 the storage mutex held.
      */
     void FindFilesToPrune(
         std::set<int>& setFilesToPrune,
         int last_prune,
+        const std::pair<int, int>& chain_prune_range,
         const Chainstate& chain,
         ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_block_storage_mutex);
 
@@ -308,7 +318,7 @@ protected:
     std::vector<CBlockFileInfo> m_blockfile_info GUARDED_BY(m_block_storage_mutex);
 
     /** Dirty block index entries. */
-    std::set<CBlockIndex*> m_dirty_blockindex;
+    std::set<CBlockIndex*> m_dirty_blockindex GUARDED_BY(m_block_storage_mutex);
 
     /** Dirty block file entries. */
     std::set<int> m_dirty_fileinfo GUARDED_BY(m_block_storage_mutex);
@@ -331,10 +341,16 @@ public:
     std::atomic_bool m_blockfiles_indexed{true};
 
     /**
-     * Protects the state of the block files: the blockfile cursors, the block file
-     * info and the set of dirty block files, the flag requesting a pruning check, the
-     * snapshot height used to segment block files, the prune locks, and whether block
-     * files have ever been pruned.
+     * Protects the block index and the state of the block files. This covers the block
+     * index map, the mutable fields of each CBlockIndex entry (nStatus, nFile, nDataPos,
+     * nUndoPos, nTx), the best header, the set of dirty block index entries, the block
+     * index database handle, the blockfile cursors, the block file info, the set of dirty
+     * block files, the flag requesting a pruning check, the snapshot height used to segment
+     * block files, the prune locks, and whether block files have ever been pruned.
+     *
+     * The chain selection fields (CBlockIndex::m_chain_tx_count and nSequenceId) and
+     * m_blocks_unlinked are guarded by cs_main instead, since they change together with the
+     * set of block index candidates.
      *
      * Lock order: `cs_main` must be acquired before this mutex, never after. Code
      * holding this mutex must not acquire `cs_main`. Notifications (m_opts.notifications)
@@ -342,7 +358,15 @@ public:
      */
     mutable Mutex m_block_storage_mutex ACQUIRED_AFTER(::cs_main);
 
-    BlockMap m_block_index GUARDED_BY(cs_main);
+    BlockMap m_block_index GUARDED_BY(m_block_storage_mutex);
+
+    /**
+     * Best header we've seen so far for which the block is not known to be invalid
+     * (used, among others, for getheaders queries' starting points).
+     * In case of multiple best headers with the same work, it could point to any
+     * because CBlockIndexWorkComparator tiebreaker rules are not applied.
+     */
+    CBlockIndex* m_best_header GUARDED_BY(m_block_storage_mutex){nullptr};
 
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
@@ -358,7 +382,10 @@ public:
      */
     std::optional<int> m_snapshot_height GUARDED_BY(m_block_storage_mutex);
 
-    std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    std::vector<CBlockIndex*> GetAllBlockIndicesLocked() EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    std::vector<const CBlockIndex*> GetAllBlockIndices() const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    std::vector<const CBlockIndex*> GetAllBlockIndicesLocked() const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
     /** The mutable fields of a block index entry, passed to ModifyIndex(). */
     struct IndexFields {
@@ -370,24 +397,42 @@ public:
     };
 
     /** Read access to the mutable state of a block index entry. */
-    uint32_t GetStatus(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    unsigned int GetNumTx(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    uint32_t GetStatus(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    uint32_t GetStatusLocked(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    unsigned int GetNumTx(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    unsigned int GetNumTxLocked(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
     //! Raw file and offset fields, which are only meaningful if the matching status flag is set.
-    int GetFileNum(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    unsigned int GetDataOffset(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    unsigned int GetUndoOffset(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    FlatFilePos GetBlockPos(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    FlatFilePos GetUndoPos(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    int GetFileNum(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    int GetFileNumLocked(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    unsigned int GetDataOffset(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    unsigned int GetDataOffsetLocked(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    unsigned int GetUndoOffset(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    unsigned int GetUndoOffsetLocked(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    FlatFilePos GetBlockPos(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    FlatFilePos GetBlockPosLocked(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    FlatFilePos GetUndoPos(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    FlatFilePos GetUndoPosLocked(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
     //! Check whether this block index entry is valid up to the passed validity level.
-    bool IsValid(const CBlockIndex& index, enum BlockStatus nUpTo) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsValid(const CBlockIndex& index, enum BlockStatus nUpTo) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    bool IsValidLocked(const CBlockIndex& index, enum BlockStatus nUpTo) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
     //! Raise the validity level of this block index entry. Returns true if the validity was changed.
-    bool RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    //! RaiseValidity() for callers that already hold m_block_storage_mutex.
+    bool RaiseValidityLocked(CBlockIndex& index, enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
     /** Change the mutable state of a block index entry. `modify` must not call back into BlockManager. */
     template <typename F>
-    void ModifyIndex(CBlockIndex& index, F&& modify) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    void ModifyIndex(CBlockIndex& index, F&& modify) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex)
     {
-        AssertLockHeld(::cs_main);
+        LOCK(m_block_storage_mutex);
+        ModifyIndexLocked(index, std::forward<F>(modify));
+    }
+
+    /** ModifyIndex() for callers that already hold m_block_storage_mutex. */
+    template <typename F>
+    void ModifyIndexLocked(CBlockIndex& index, F&& modify) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex)
+    {
+        AssertLockHeld(m_block_storage_mutex);
         IndexFields fields{index.nStatus, index.nFile, index.nDataPos, index.nUndoPos, index.nTx};
         std::forward<F>(modify)(fields);
     }
@@ -398,8 +443,14 @@ public:
     //! Unlinked blocks feed the candidates for chain selection, so this is guarded by cs_main.
     std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked GUARDED_BY(::cs_main);
     void AddUnlinkedBlock(CBlockIndex* block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    //! Flag a block index entry for writing to the block tree database.
+    void MarkBlockIndexDirty(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    void MarkBlockIndexDirtyLocked(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    //! Number of entries in the block index.
+    size_t BlockIndexSize() const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    size_t BlockIndexSizeLocked() const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
-    std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
+    std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(m_block_storage_mutex);
 
     void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
@@ -412,15 +463,28 @@ public:
      */
     void ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
 
-    CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* AddToBlockIndex(const CBlockHeader& block) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    CBlockIndex* AddToBlockIndexLocked(const CBlockHeader& block) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    //! Best header that is not known to be invalid, see m_best_header.
+    CBlockIndex* GetBestHeader() const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    CBlockIndex* GetBestHeaderLocked() const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    void SetBestHeader(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    void SetBestHeaderLocked(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    //! Set the best header to `index`, unless one is already set. Atomic, unlike a separate read and write.
+    void SetBestHeaderIfUnset(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    void SetBestHeaderIfUnsetLocked(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    /** Recalculate the best header: the most-work entry that is not known to be invalid, or `active_tip` if it is more work. */
+    void RecalculateBestHeaderLocked(CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
     /** Create a new block index entry for a given block hash */
-    CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
     //! Mark one block file as pruned (modify associated database entries)
     void PruneOneBlockFile(int fileNumber) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_block_storage_mutex);
 
-    CBlockIndex* LookupBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    const CBlockIndex* LookupBlockIndex(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* LookupBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    CBlockIndex* LookupBlockIndexLocked(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
+    const CBlockIndex* LookupBlockIndex(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
+    const CBlockIndex* LookupBlockIndexLocked(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
 
     /** Get block file info entry for one block file */
     CBlockFileInfo* GetBlockFileInfo(size_t n) EXCLUSIVE_LOCKS_REQUIRED(m_block_storage_mutex);
@@ -462,7 +526,7 @@ public:
     //! defined by the status mask.
     //! The caller is responsible for ensuring that lower_block is an ancestor of upper_block
     //! (part of the same chain).
-    bool CheckBlockDataAvailability(const CBlockIndex& upper_block, const CBlockIndex& lower_block, BlockStatus block_status = BLOCK_HAVE_DATA) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool CheckBlockDataAvailability(const CBlockIndex& upper_block, const CBlockIndex& lower_block, BlockStatus block_status = BLOCK_HAVE_DATA) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
 
     /**
      * @brief Returns the earliest block with specified `status_mask` flags set after
@@ -490,13 +554,13 @@ public:
         const CBlockIndex& upper_block LIFETIMEBOUND,
         uint32_t status_mask,
         const CBlockIndex* lower_block LIFETIMEBOUND = nullptr
-    ) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    ) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
 
     /** True if any block files have ever been pruned. */
     bool m_have_pruned GUARDED_BY(m_block_storage_mutex) = false;
 
     //! Check whether the block associated with this index entry is pruned or not.
-    bool IsBlockPruned(const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_block_storage_mutex);
+    bool IsBlockPruned(const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
 
     //! Create or update a prune lock identified by its name
     void UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
@@ -517,10 +581,10 @@ public:
 
     /** Functions for disk access for blocks */
     bool ReadBlock(CBlock& block, const FlatFilePos& pos, const std::optional<uint256>& expected_hash) const;
-    bool ReadBlock(CBlock& block, const CBlockIndex& index) const;
+    bool ReadBlock(CBlock& block, const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
     ReadRawBlockResult ReadRawBlock(const FlatFilePos& pos, std::optional<std::pair<size_t, size_t>> block_part = std::nullopt) const;
 
-    bool ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index) const;
+    bool ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);
 
     void CleanupBlockRevFiles() const;
 };

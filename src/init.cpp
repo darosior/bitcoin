@@ -1898,7 +1898,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     g_zmq_notification_interface = CZMQNotificationInterface::Create(
         [&chainman = node.chainman](std::vector<std::byte>& block, const CBlockIndex& index) {
             assert(chainman);
-            if (auto ret{chainman->m_blockman.ReadRawBlock(WITH_LOCK(cs_main, return chainman->m_blockman.GetBlockPos(index)))}) {
+            if (auto ret{chainman->m_blockman.ReadRawBlock(chainman->m_blockman.GetBlockPos(index))}) {
                 block = std::move(*ret);
                 return true;
             }
@@ -2194,7 +2194,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     {
         LOCK(chainman.GetMutex());
         const auto& tip{*Assert(chainman.ActiveTip())};
-        LogInfo("block tree size = %u", chainman.BlockIndex().size());
+        LogInfo("block tree size = %u", chainman.m_blockman.BlockIndexSize());
         chain_active_height = tip.nHeight;
         best_block_time = tip.GetBlockTime();
         if (tip_info) {
@@ -2202,9 +2202,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             tip_info->block_time = best_block_time;
             tip_info->verification_progress = chainman.GuessVerificationProgress(&tip);
         }
-        if (tip_info && chainman.m_best_header) {
-            tip_info->header_height = chainman.m_best_header->nHeight;
-            tip_info->header_time = chainman.m_best_header->GetBlockTime();
+        const CBlockIndex* best_header{chainman.m_blockman.GetBestHeader()};
+        if (tip_info && best_header) {
+            tip_info->header_height = best_header->nHeight;
+            tip_info->header_time = best_header->GetBlockTime();
         }
     }
     LogInfo("nBestHeight = %d", chain_active_height);

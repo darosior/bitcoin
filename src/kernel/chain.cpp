@@ -23,9 +23,9 @@ interfaces::BlockInfo MakeBlockInfo(const node::BlockManager& blockman, const CB
         info.prev_hash = index->pprev ? index->pprev->phashBlock : nullptr;
         info.height = index->nHeight;
         info.chain_time_max = index->GetBlockTimeMax();
-        LOCK(::cs_main);
-        info.file_number = blockman.GetFileNum(*index);
-        info.data_pos = blockman.GetDataOffset(*index);
+        LOCK(blockman.m_block_storage_mutex);
+        info.file_number = blockman.GetFileNumLocked(*index);
+        info.data_pos = blockman.GetDataOffsetLocked(*index);
     }
     info.data = data;
     return info;

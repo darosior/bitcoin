@@ -211,7 +211,7 @@ UniValue blockheaderToJSON(const BlockManager& blockman, const CBlockIndex& tip,
     result.pushKV("target", GetTarget(blockindex, pow_limit).GetHex());
     result.pushKV("difficulty", GetDifficulty(blockindex));
     result.pushKV("chainwork", blockindex.nChainWork.GetHex());
-    result.pushKV("nTx", WITH_LOCK(::cs_main, return blockman.GetNumTx(blockindex)));
+    result.pushKV("nTx", blockman.GetNumTx(blockindex));
 
     if (blockindex.pprev)
         result.pushKV("previousblockhash", blockindex.pprev->GetBlockHash().GetHex());
@@ -262,8 +262,8 @@ UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIn
         case TxVerbosity::SHOW_DETAILS:
         case TxVerbosity::SHOW_DETAILS_AND_PREVOUT:
             CBlockUndo blockUndo;
-            const bool is_not_pruned{WITH_LOCK(::cs_main, return !blockman.IsBlockPruned(blockindex))};
-            bool have_undo{is_not_pruned && WITH_LOCK(::cs_main, return blockman.GetStatus(blockindex) & BLOCK_HAVE_UNDO)};
+            const bool is_not_pruned{!blockman.IsBlockPruned(blockindex)};
+            bool have_undo{is_not_pruned && blockman.GetStatus(blockindex) & BLOCK_HAVE_UNDO};
             if (have_undo && !blockman.ReadBlockUndo(blockUndo, blockindex)) {
                 throw JSONRPCError(RPC_INTERNAL_ERROR, "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event.");
             }
@@ -580,7 +580,7 @@ static RPCMethod getblockfrompeer()
     const uint256& block_hash{ParseHashV(request.params[0], "blockhash")};
     const NodeId peer_id{request.params[1].getInt<int64_t>()};
 
-    const CBlockIndex* const index = WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(block_hash););
+    const CBlockIndex* const index = chainman.m_blockman.LookupBlockIndex(block_hash);
 
     if (!index) {
         throw JSONRPCError(RPC_MISC_ERROR, "Block header missing");
@@ -592,7 +592,7 @@ static RPCMethod getblockfrompeer()
         throw JSONRPCError(RPC_MISC_ERROR, "In prune mode, only blocks that the node has already synced previously can be fetched from a peer");
     }
 
-    const bool block_has_data = WITH_LOCK(::cs_main, return chainman.m_blockman.GetStatus(*index) & BLOCK_HAVE_DATA);
+    const bool block_has_data = chainman.m_blockman.GetStatus(*index) & BLOCK_HAVE_DATA;
     if (block_has_data) {
         throw JSONRPCError(RPC_MISC_ERROR, "Block already downloaded");
     }
@@ -1032,7 +1032,7 @@ static std::optional<kernel::CCoinsStats> GetUTXOStats(const CCoinsViewDB& view,
         if (pindex) {
             return g_coin_stats_index->LookUpStats(*pindex);
         } else {
-            CBlockIndex& block_index = *CHECK_NONFATAL(WITH_LOCK(::cs_main, return blockman.LookupBlockIndex(view.GetBestBlock())));
+            CBlockIndex& block_index = *CHECK_NONFATAL(blockman.LookupBlockIndex(view.GetBestBlock()));
             return g_coin_stats_index->LookUpStats(block_index);
         }
     }
@@ -1164,7 +1164,7 @@ static RPCMethod gettxoutsetinfo()
         } else {
             CCoinsStats prev_stats{};
             if (stats.nHeight > 0) {
-                const CBlockIndex& block_index = *CHECK_NONFATAL(WITH_LOCK(::cs_main, return blockman.LookupBlockIndex(stats.hashBlock)));
+                const CBlockIndex& block_index = *CHECK_NONFATAL(blockman.LookupBlockIndex(stats.hashBlock));
                 const std::optional<CCoinsStats> maybe_prev_stats = GetUTXOStats(coins_view, blockman, hash_type, node.rpc_interruption_point, block_index.pprev, index_requested);
                 if (!maybe_prev_stats) {
                     throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
@@ -1454,7 +1454,8 @@ RPCMethod getblockchaininfo()
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
     obj.pushKV("blocks", height);
-    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    const CBlockIndex* best_header{chainman.m_blockman.GetBestHeader()};
+    obj.pushKV("headers", best_header ? best_header->nHeight : -1);
     obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -1651,10 +1652,10 @@ static RPCMethod getchaintips()
     std::set<const CBlockIndex*> setOrphans;
     std::set<const CBlockIndex*> setPrevs;
 
-    for (const auto& [_, block_index] : chainman.BlockIndex()) {
-        if (!active_chain.Contains(block_index)) {
-            setOrphans.insert(&block_index);
-            setPrevs.insert(block_index.pprev);
+    for (const CBlockIndex* block_index : chainman.m_blockman.GetAllBlockIndices()) {
+        if (!active_chain.Contains(*block_index)) {
+            setOrphans.insert(block_index);
+            setPrevs.insert(block_index->pprev);
         }
     }
 
@@ -1806,8 +1807,8 @@ void ReconsiderBlock(ChainstateManager& chainman, uint256 block_hash) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
 
+        // Also recalculates the best header, in the same critical section.
         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
-        chainman.RecalculateBestHeader();
     }
 
     BlockValidationState state;
@@ -2725,7 +2726,7 @@ static RPCMethod scanblocks()
                     if (filter.GetFilter().MatchAny(needle_set)) {
                         if (filter_false_positives) {
                             // Double check the filter matches by scanning the block
-                            const CBlockIndex& blockindex = *CHECK_NONFATAL(WITH_LOCK(cs_main, return chainman.m_blockman.LookupBlockIndex(filter.GetBlockHash())));
+                            const CBlockIndex& blockindex = *CHECK_NONFATAL(chainman.m_blockman.LookupBlockIndex(filter.GetBlockHash()));
 
                             if (!CheckBlockFilterMatches(chainman.m_blockman, blockindex, needle_set)) {
                                 continue;
@@ -3655,7 +3656,8 @@ return RPCMethod{
         return data;
     };
 
-    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    const CBlockIndex* best_header{chainman.m_blockman.GetBestHeader()};
+    obj.pushKV("headers", best_header ? best_header->nHeight : -1);
     UniValue obj_chainstates{UniValue::VARR};
     if (const Chainstate * cs{chainman.HistoricalChainstate()}) {
         obj_chainstates.push_back(make_chain_data(*cs));

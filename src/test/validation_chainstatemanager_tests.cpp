@@ -677,7 +677,6 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
     {
         LOCK(chainman.GetMutex());
         chainstate.ResetBlockFailureFlags(block99);
-        chainman.RecalculateBestHeader();
     }
     chainstate.ActivateBestChain(state);
     BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.ActiveChain().Tip()) == block100);
@@ -709,7 +708,6 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
     {
         LOCK(chainman.GetMutex());
         chainstate.ResetBlockFailureFlags(block99);
-        chainman.RecalculateBestHeader();
     }
     chainstate.ActivateBestChain(state);
     {

@@ -649,14 +649,18 @@ public:
      * The base of the snapshot this chainstate was created from.
      *
      * nullptr if this chainstate was not created from a snapshot.
+     *
+     * The first call looks up the block index, which takes the block storage mutex, so this
+     * must not be called with that mutex held.
      */
-    const CBlockIndex* SnapshotBase() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    const CBlockIndex* SnapshotBase() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_block_storage_mutex);
 
     //! Return target block which chainstate tip is expected to reach, if this
     //! is a historic chainstate being used to validate a snapshot, or null if
     //! chainstate targets the most-work block. Requires the block index to be
     //! loaded, so prefer TargetBlockHash() when the block itself is not needed.
-    const CBlockIndex* TargetBlock() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Like SnapshotBase(), must not be called with the block storage mutex held.
+    const CBlockIndex* TargetBlock() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_block_storage_mutex);
     //! Return hash of the target block, or nullopt if chainstate targets the
     //! most-work block. Unlike TargetBlock(), does not require the block index
     //! to be loaded.
@@ -674,7 +678,7 @@ public:
     void SetTargetBlockHash(uint256 block_hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Return true if chainstate reached target block.
-    bool ReachedTarget() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    bool ReachedTarget() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_block_storage_mutex)
     {
         const CBlockIndex* target_block{TargetBlock()};
         assert(!target_block || target_block->GetAncestor(m_chain.Height()) == m_chain.Tip());
@@ -807,10 +811,10 @@ public:
         LOCKS_EXCLUDED(::cs_main);
 
     /** Set invalidity status to all descendants of a block */
-    void SetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void SetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_blockman.m_block_storage_mutex);
 
-    /** Remove invalidity status from a block, its descendants and ancestors and reconsider them for activation */
-    void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Remove invalidity status from a block, its descendants and ancestors and reconsider them for activation. Also recalculates the best header. */
+    void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_blockman.m_block_storage_mutex);
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();
@@ -857,7 +861,7 @@ public:
     //! Return the [start, end] (inclusive) of block heights we can prune.
     //!
     //! start > end is possible, meaning no blocks can be pruned.
-    std::pair<int, int> GetPruneRange(int last_height_can_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::pair<int, int> GetPruneRange(int last_height_can_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_block_storage_mutex);
 
 protected:
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex& index_most_work, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, std::vector<ConnectedBlock>& connected_blocks) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
@@ -874,7 +878,8 @@ protected:
     bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void CheckForkWarningConditions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    void InvalidChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Mark the descendants of pindexNew invalid, and pindexNew itself if mark_invalid is set, then update the best header. */
+    void InvalidChainFound(CBlockIndex* pindexNew, bool mark_invalid = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**
      * Make mempool consistent after a reorg, by re-adding or recursively erasing
@@ -978,7 +983,7 @@ private:
         const CBlockHeader& block,
         BlockValidationState& state,
         CBlockIndex** ppindex,
-        bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_blockman.m_block_storage_mutex);
     friend Chainstate;
 
     /** Most recent headers presync progress update, for rate-limiting. */
@@ -1026,7 +1031,7 @@ public:
      *
      * By default this only executes fully when using the Regtest chain; see: m_options.check_block_index.
      */
-    void CheckBlockIndex() const;
+    void CheckBlockIndex() const EXCLUSIVE_LOCKS_REQUIRED(!m_blockman.m_block_storage_mutex);
 
     /**
      * Alias for ::cs_main.
@@ -1080,12 +1085,6 @@ public:
         nBlockReverseSequenceId = -1;
     }
 
-
-    /** Best header we've seen so far for which the block is not known to be invalid
-        (used, among others, for getheaders queries' starting points).
-        In case of multiple best headers with the same work, it could point to any
-        because CBlockIndexWorkComparator tiebreaker rules are not applied. */
-    CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
 
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
@@ -1192,12 +1191,6 @@ public:
      * `ImportBlocks()` finishes).
      */
     void UpdateIBDStatus() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-
-    node::BlockMap& BlockIndex() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
-    {
-        AssertLockHeld(::cs_main);
-        return m_blockman.m_block_index;
-    }
 
     /**
      * Track versionbit status
@@ -1372,11 +1365,6 @@ public:
 
     //! Call ActivateBestChain() on every chainstate.
     util::Result<void> ActivateBestChains() LOCKS_EXCLUDED(::cs_main);
-
-    //! If, due to invalidation / reconsideration of blocks, the previous
-    //! best header is no longer valid / guaranteed to be the most-work
-    //! header in our block-index not known to be invalid, recalculate it.
-    void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Returns how many blocks the best header is ahead of the current tip,
     //! or nullopt if the best header does not extend the tip.

@@ -301,8 +301,7 @@ public:
     size_t getMempoolMaxUsage() override { return m_context->mempool ? m_context->mempool->m_opts.max_size_bytes : 0; }
     bool getHeaderTip(int& height, int64_t& block_time) override
     {
-        LOCK(::cs_main);
-        auto best_header = chainman().m_best_header;
+        auto best_header = chainman().m_blockman.GetBestHeader();
         if (best_header) {
             height = best_header->nHeight;
             block_time = best_header->GetBlockTime();
@@ -590,7 +589,7 @@ public:
         if (!block_filter_index) return std::nullopt;
 
         BlockFilter filter;
-        const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman().m_blockman.LookupBlockIndex(block_hash))};
+        const CBlockIndex* index{chainman().m_blockman.LookupBlockIndex(block_hash)};
         if (index == nullptr || !block_filter_index->LookupFilter(index, filter)) return std::nullopt;
         return filter.GetFilter().MatchAny(filter_set);
     }

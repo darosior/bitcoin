@@ -63,7 +63,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 CBlockIndex* prev_block = PickValue(fuzzed_data_provider, blocks);
                 if (!(blockman.GetStatus(*prev_block) & BLOCK_FAILED_VALID)) {
                     CBlockHeader header = ConsumeBlockHeader(fuzzed_data_provider, prev_block->GetBlockHash(), nonce_counter);
-                    CBlockIndex* index = blockman.AddToBlockIndex(header, chainman.m_best_header);
+                    CBlockIndex* index = blockman.AddToBlockIndex(header);
                     assert(blockman.GetStatus(*index) & BLOCK_VALID_TREE);
                     assert(index->pprev == prev_block);
                     blocks.push_back(index);
@@ -203,7 +203,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
     {
         LOCK(cs_main);
         blockman.ModifyIndex(*genesis, [](auto& f) { f.nStatus |= BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO; });
-        chainman.m_best_header = genesis;
+        chainman.m_blockman.SetBestHeader(genesis);
         chainman.ResetBestInvalid();
         chainman.nBlockSequenceId = 2;
         chainman.ActiveChain().SetTip(*genesis);
@@ -214,15 +214,18 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
         blockman.CleanupForFuzzing();
         // Delete all blocks but Genesis from block index
         uint256 genesis_hash = genesis->GetBlockHash();
-        for (auto it = blockman.m_block_index.begin(); it != blockman.m_block_index.end();) {
-            if (it->first != genesis_hash) {
-                it = blockman.m_block_index.erase(it);
-            } else {
-                ++it;
+        {
+            LOCK(blockman.m_block_storage_mutex);
+            for (auto it = blockman.m_block_index.begin(); it != blockman.m_block_index.end();) {
+                if (it->first != genesis_hash) {
+                    it = blockman.m_block_index.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
         chainman.ActiveChainstate().TryAddBlockIndexCandidate(genesis);
-        assert(blockman.m_block_index.size() == 1);
+        assert(blockman.BlockIndexSize() == 1);
         assert(chainman.ActiveChainstate().setBlockIndexCandidates.size() == 1);
         assert(chainman.ActiveChain().Height() == 0);
     }
