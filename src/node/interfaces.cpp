@@ -462,8 +462,8 @@ bool FillBlock(const CBlockIndex* index, const FoundBlock& block, UniqueLock<Rec
 class NotificationsProxy : public CValidationInterface
 {
 public:
-    explicit NotificationsProxy(std::shared_ptr<Chain::Notifications> notifications)
-        : m_notifications(std::move(notifications)) {}
+    explicit NotificationsProxy(const node::BlockManager& blockman, std::shared_ptr<Chain::Notifications> notifications)
+        : m_blockman(blockman), m_notifications(std::move(notifications)) {}
     virtual ~NotificationsProxy() = default;
     void TransactionAddedToMempool(const NewMempoolTransactionInfo& tx, uint64_t mempool_sequence) override
     {
@@ -475,11 +475,11 @@ public:
     }
     void BlockConnected(const ChainstateRole& role, const std::shared_ptr<const CBlock>& block, const CBlockIndex* index) override
     {
-        m_notifications->blockConnected(role, kernel::MakeBlockInfo(index, block.get()));
+        m_notifications->blockConnected(role, kernel::MakeBlockInfo(m_blockman, index, block.get()));
     }
     void BlockDisconnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* index) override
     {
-        m_notifications->blockDisconnected(kernel::MakeBlockInfo(index, block.get()));
+        m_notifications->blockDisconnected(kernel::MakeBlockInfo(m_blockman, index, block.get()));
     }
     void UpdatedBlockTip(const CBlockIndex* index, const CBlockIndex* fork_index, bool is_ibd) override
     {
@@ -489,14 +489,15 @@ public:
     {
         m_notifications->chainStateFlushed(role, locator);
     }
+    const node::BlockManager& m_blockman;
     std::shared_ptr<Chain::Notifications> m_notifications;
 };
 
 class NotificationsHandlerImpl : public Handler
 {
 public:
-    explicit NotificationsHandlerImpl(ValidationSignals& signals, std::shared_ptr<Chain::Notifications> notifications)
-        : m_signals{signals}, m_proxy{std::make_shared<NotificationsProxy>(std::move(notifications))}
+    explicit NotificationsHandlerImpl(ValidationSignals& signals, const node::BlockManager& blockman, std::shared_ptr<Chain::Notifications> notifications)
+        : m_signals{signals}, m_proxy{std::make_shared<NotificationsProxy>(blockman, std::move(notifications))}
     {
         m_signals.RegisterSharedValidationInterface(m_proxy);
     }
@@ -569,7 +570,7 @@ public:
     {
         LOCK(::cs_main);
         const CBlockIndex* block{chainman().ActiveChain()[height]};
-        return block && ((block->nStatus & BLOCK_HAVE_DATA) != 0) && block->nTx > 0;
+        return block && ((chainman().m_blockman.GetStatus(*block) & BLOCK_HAVE_DATA) != 0) && chainman().m_blockman.GetNumTx(*block) > 0;
     }
     std::optional<int> findLocatorFork(const CBlockLocator& locator) override
     {
@@ -655,7 +656,7 @@ public:
         LOCK(::cs_main);
         if (const CBlockIndex* block = chainman().m_blockman.LookupBlockIndex(block_hash)) {
             if (max_height && block->nHeight >= *max_height) block = block->GetAncestor(*max_height);
-            for (; block->nStatus & BLOCK_HAVE_DATA; block = block->pprev) {
+            for (; chainman().m_blockman.GetStatus(*block) & BLOCK_HAVE_DATA; block = block->pprev) {
                 // Check pprev to not segfault if min_height is too low
                 if (block->nHeight <= min_height || !block->pprev) return true;
             }
@@ -788,7 +789,7 @@ public:
     }
     std::unique_ptr<Handler> handleNotifications(std::shared_ptr<Notifications> notifications) override
     {
-        return std::make_unique<NotificationsHandlerImpl>(validation_signals(), std::move(notifications));
+        return std::make_unique<NotificationsHandlerImpl>(validation_signals(), chainman().m_blockman, std::move(notifications));
     }
     void waitForNotificationsIfTipChanged(const uint256& old_tip) override
     {

@@ -14,6 +14,10 @@ class CBlockIndex;
 class CBlockUndo;
 class uint256;
 
+namespace node {
+class BlockManager;
+} // namespace node
+
 namespace interfaces {
 //! Block data sent with blockConnected, blockDisconnected notifications.
 struct BlockInfo {
@@ -35,7 +39,7 @@ struct BlockInfo {
 namespace kernel {
 struct ChainstateRole;
 //! Return data from block index.
-interfaces::BlockInfo MakeBlockInfo(const CBlockIndex* block_index, const CBlock* data = nullptr);
+interfaces::BlockInfo MakeBlockInfo(const node::BlockManager& blockman, const CBlockIndex* block_index, const CBlock* data = nullptr);
 std::ostream& operator<<(std::ostream& os, const ChainstateRole& role);
 } // namespace kernel
 

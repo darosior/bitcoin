@@ -772,9 +772,9 @@ static RPCMethod getblocktemplate()
             LOCK(cs_main);
             const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(hash);
             if (pindex) {
-                if (pindex->IsValid(BLOCK_VALID_SCRIPTS))
+                if (chainman.m_blockman.IsValid(*pindex, BLOCK_VALID_SCRIPTS))
                     return "duplicate";
-                if (pindex->nStatus & BLOCK_FAILED_VALID)
+                if (chainman.m_blockman.GetStatus(*pindex) & BLOCK_FAILED_VALID)
                     return "duplicate-invalid";
                 return "duplicate-inconclusive";
             }

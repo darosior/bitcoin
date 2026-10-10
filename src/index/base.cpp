@@ -174,7 +174,7 @@ static const CBlockIndex* NextSyncBlock(const CBlockIndex* const pindex_prev, CC
 
 bool BaseIndex::ProcessBlock(const CBlockIndex* pindex, const CBlock* block_data)
 {
-    interfaces::BlockInfo block_info = kernel::MakeBlockInfo(pindex, block_data);
+    interfaces::BlockInfo block_info = kernel::MakeBlockInfo(m_chainstate->m_blockman, pindex, block_data);
 
     CBlock block;
     if (!block_data) { // disk lookup if block data wasn't provided
@@ -311,7 +311,7 @@ bool BaseIndex::Rewind(const CBlockIndex* current_tip, const CBlockIndex* new_ti
     CBlockUndo block_undo;
 
     for (const CBlockIndex* iter_tip = current_tip; iter_tip != new_tip; iter_tip = iter_tip->pprev) {
-        interfaces::BlockInfo block_info = kernel::MakeBlockInfo(iter_tip);
+        interfaces::BlockInfo block_info = kernel::MakeBlockInfo(m_chainstate->m_blockman, iter_tip);
         if (CustomOptions().disconnect_data) {
             if (!m_chainstate->m_blockman.ReadBlock(block, *iter_tip)) {
                 LogError("Failed to read block %s from disk",

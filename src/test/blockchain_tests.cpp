@@ -80,14 +80,14 @@ BOOST_AUTO_TEST_CASE(get_difficulty_for_very_high_target)
 
 //! Prune chain from height down to genesis block and check that
 //! GetPruneHeight returns the correct value
-static void CheckGetPruneHeight(const node::BlockManager& blockman, const CChain& chain, int height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+static void CheckGetPruneHeight(node::BlockManager& blockman, const CChain& chain, int height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
 
     // Emulate pruning all blocks from `height` down to the genesis block
     // by unsetting the `BLOCK_HAVE_DATA` flag from `nStatus`
     for (CBlockIndex* it{chain[height]}; it != nullptr && it->nHeight > 0; it = it->pprev) {
-        it->nStatus &= ~BLOCK_HAVE_DATA;
+        blockman.ModifyIndex(*it, [](auto& f) { f.nStatus &= ~BLOCK_HAVE_DATA; });
     }
 
     const auto prune_height{GetPruneHeight(blockman, chain)};
@@ -99,7 +99,7 @@ BOOST_FIXTURE_TEST_CASE(get_prune_height, TestChain100Setup)
 {
     LOCK(::cs_main);
     const auto& chain = m_node.chainman->ActiveChain();
-    const auto& blockman = m_node.chainman->m_blockman;
+    auto& blockman = m_node.chainman->m_blockman;
 
     // Fresh chain of 100 blocks without any pruned blocks, so std::nullopt should be returned
     BOOST_CHECK(!GetPruneHeight(blockman, chain).has_value());
@@ -130,20 +130,20 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block, TestChain100Setup)
     m_node.chainman->ActiveChainstate().InvalidateBlock(state, tip_to_invalidate);
 
     // tip_to_invalidate just got invalidated, so it's BLOCK_FAILED_VALID
-    WITH_LOCK(::cs_main, assert(tip_to_invalidate->nStatus & BLOCK_FAILED_VALID));
+    WITH_LOCK(::cs_main, assert(m_node.chainman->m_blockman.GetStatus(*tip_to_invalidate) & BLOCK_FAILED_VALID));
 
     // check all ancestors of the invalidated block are validated up to BLOCK_VALID_TRANSACTIONS and are not invalid
     auto pindex = tip_to_invalidate->pprev;
     while (pindex) {
-        WITH_LOCK(::cs_main, assert(pindex->IsValid(BLOCK_VALID_TRANSACTIONS)));
-        WITH_LOCK(::cs_main, assert((pindex->nStatus & BLOCK_FAILED_VALID) == 0));
+        WITH_LOCK(::cs_main, assert(m_node.chainman->m_blockman.IsValid(*pindex, BLOCK_VALID_TRANSACTIONS)));
+        WITH_LOCK(::cs_main, assert((m_node.chainman->m_blockman.GetStatus(*pindex) & BLOCK_FAILED_VALID) == 0));
         pindex = pindex->pprev;
     }
 
     // check all descendants of the invalidated block are BLOCK_FAILED_VALID
     pindex = orig_tip;
     while (pindex && pindex != tip_to_invalidate) {
-        WITH_LOCK(::cs_main, assert(pindex->nStatus & BLOCK_FAILED_VALID));
+        WITH_LOCK(::cs_main, assert(m_node.chainman->m_blockman.GetStatus(*pindex) & BLOCK_FAILED_VALID));
         pindex = pindex->pprev;
     }
 }

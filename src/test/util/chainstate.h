@@ -99,9 +99,11 @@ CreateAndActivateUTXOSnapshot(
                 // ids that are set when blocks are received, to make test setup
                 // more realistic and satisfy consistency checks in
                 // CheckBlockIndex().
-                assert(pindex->IsValid(BlockStatus::BLOCK_VALID_TREE));
-                pindex->nStatus = BlockStatus::BLOCK_VALID_TREE;
-                pindex->nTx = 0;
+                assert(chain.m_blockman.IsValid(*pindex, BlockStatus::BLOCK_VALID_TREE));
+                chain.m_blockman.ModifyIndex(*pindex, [](auto& f) {
+                    f.nStatus = BlockStatus::BLOCK_VALID_TREE;
+                    f.nTx = 0;
+                });
                 pindex->m_chain_tx_count = 0;
                 pindex->nSequenceId = 0;
                 pindex = pindex->pprev;

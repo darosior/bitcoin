@@ -173,12 +173,12 @@ static RPCMethod verifytxoutproof()
             LOCK(cs_main);
 
             const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(merkleBlock.header.GetHash());
-            if (!pindex || !chainman.ActiveChain().Contains(*pindex) || pindex->nTx == 0) {
+            if (!pindex || !chainman.ActiveChain().Contains(*pindex) || chainman.m_blockman.GetNumTx(*pindex) == 0) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found in chain");
             }
 
             // Check if proof is valid, only add results if so
-            if (pindex->nTx == merkleBlock.txn.GetNumTransactions()) {
+            if (chainman.m_blockman.GetNumTx(*pindex) == merkleBlock.txn.GetNumTransactions()) {
                 for (const auto& txid : vMatch) {
                     res.push_back(txid.GetHex());
                 }

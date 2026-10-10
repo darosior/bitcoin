@@ -286,7 +286,7 @@ static bool rest_headers(const std::any& context,
     case RESTResponseFormat::JSON: {
         UniValue jsonHeaders(UniValue::VARR);
         for (const CBlockIndex *pindex : headers) {
-            jsonHeaders.push_back(blockheaderToJSON(*tip, *pindex, chainman.GetConsensus().powLimit));
+            jsonHeaders.push_back(blockheaderToJSON(chainman.m_blockman, *tip, *pindex, chainman.GetConsensus().powLimit));
         }
         std::string strJSON = jsonHeaders.write() + "\n";
         req->WriteHeader("Cache-Control", REST_CACHE_NO_STORE);
@@ -447,13 +447,13 @@ static bool rest_block(const std::any& context,
         if (!pblockindex) {
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
         }
-        if (!(pblockindex->nStatus & BLOCK_HAVE_DATA)) {
+        if (!(chainman.m_blockman.GetStatus(*pblockindex) & BLOCK_HAVE_DATA)) {
             if (chainman.m_blockman.IsBlockPruned(*pblockindex)) {
                 return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (pruned data)");
             }
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (not fully downloaded)");
         }
-        pos = pblockindex->GetBlockPos();
+        pos = chainman.m_blockman.GetBlockPos(*pblockindex);
     }
 
     const auto block_data{chainman.m_blockman.ReadRawBlock(pos, block_part)};
@@ -697,7 +697,7 @@ static bool rest_block_filter(const std::any& context, HTTPRequest* req, const s
         if (!block_index) {
             return RESTERR(req, HTTP_NOT_FOUND, uri_parts[1] + " not found");
         }
-        block_was_connected = block_index->IsValid(BLOCK_VALID_SCRIPTS);
+        block_was_connected = chainman.m_blockman.IsValid(*block_index, BLOCK_VALID_SCRIPTS);
     }
 
     bool index_ready = index->BlockUntilSyncedToCurrentChain();

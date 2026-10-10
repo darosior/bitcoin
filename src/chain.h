@@ -85,6 +85,13 @@ enum BlockStatus : uint32_t {
                                       //!< ancestors before they were validated, and unset when they were validated.
 };
 
+namespace kernel {
+class BlockTreeDB;
+} // namespace kernel
+namespace node {
+class BlockManager;
+} // namespace node
+
 /** The block chain is a tree shaped structure starting with the
  * genesis block at the root, with each block potentially having multiple
  * candidates to be the next block. A blockindex may have multiple pprev pointing
@@ -105,36 +112,14 @@ public:
     //! height of the entry in the chain. The genesis block has height 0
     int nHeight{0};
 
-    //! Which # file this block is stored in (blk?????.dat)
-    int nFile GUARDED_BY(::cs_main){0};
-
-    //! Byte offset within blk?????.dat where this block's data is stored
-    unsigned int nDataPos GUARDED_BY(::cs_main){0};
-
-    //! Byte offset within rev?????.dat where this block's undo data is stored
-    unsigned int nUndoPos GUARDED_BY(::cs_main){0};
-
     //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
     arith_uint256 nChainWork{};
-
-    //! Number of transactions in this block. This will be nonzero if the block
-    //! reached the VALID_TRANSACTIONS level, and zero otherwise.
-    //! Note: in a potential headers-first mode, this number cannot be relied upon
-    unsigned int nTx{0};
 
     //! (memory only) Number of transactions in the chain up to and including this block.
     //! This value will be non-zero if this block and all previous blocks back
     //! to the genesis block or an assumeutxo snapshot block have reached the
     //! VALID_TRANSACTIONS level.
     uint64_t m_chain_tx_count GUARDED_BY(::cs_main){0};
-
-    //! Verification status of this block. See enum BlockStatus
-    //!
-    //! Note: this value is modified to show BLOCK_OPT_WITNESS during UTXO snapshot
-    //! load to avoid a spurious startup failure requiring -reindex.
-    //! @sa NeedsRedownload
-    //! @sa ActivateSnapshot
-    uint32_t nStatus GUARDED_BY(::cs_main){0};
 
     //! block header
     int32_t nVersion{0};
@@ -158,28 +143,6 @@ public:
           nBits{block.nBits},
           nNonce{block.nNonce}
     {
-    }
-
-    FlatFilePos GetBlockPos() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
-    {
-        AssertLockHeld(::cs_main);
-        FlatFilePos ret;
-        if (nStatus & BLOCK_HAVE_DATA) {
-            ret.nFile = nFile;
-            ret.nPos = nDataPos;
-        }
-        return ret;
-    }
-
-    FlatFilePos GetUndoPos() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
-    {
-        AssertLockHeld(::cs_main);
-        FlatFilePos ret;
-        if (nStatus & BLOCK_HAVE_UNDO) {
-            ret.nFile = nFile;
-            ret.nPos = nUndoPos;
-        }
-        return ret;
     }
 
     CBlockHeader GetBlockHeader() const
@@ -246,32 +209,6 @@ public:
 
     std::string ToString() const;
 
-    //! Check whether this block index entry is valid up to the passed validity level.
-    bool IsValid(enum BlockStatus nUpTo) const
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
-    {
-        AssertLockHeld(::cs_main);
-        assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
-        if (nStatus & BLOCK_FAILED_VALID)
-            return false;
-        return ((nStatus & BLOCK_VALID_MASK) >= nUpTo);
-    }
-
-    //! Raise the validity level of this block index entry.
-    //! Returns true if the validity was changed.
-    bool RaiseValidity(enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
-    {
-        AssertLockHeld(::cs_main);
-        assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
-        if (nStatus & BLOCK_FAILED_VALID) return false;
-
-        if ((nStatus & BLOCK_VALID_MASK) < nUpTo) {
-            nStatus = (nStatus & ~BLOCK_VALID_MASK) | nUpTo;
-            return true;
-        }
-        return false;
-    }
-
     //! Build the skiplist pointer for this entry.
     void BuildSkip();
 
@@ -283,6 +220,34 @@ public:
     ~CBlockIndex() = default;
 
 protected:
+    // Fields that change after the entry is added to the block index. They are only accessed
+    // through node::BlockManager, which owns the rule for how they are guarded.
+    friend class node::BlockManager;
+    // The on-disk index loader fills in the stored fields directly.
+    friend class kernel::BlockTreeDB;
+
+    //! Which # file this block is stored in (blk?????.dat)
+    int nFile{0};
+
+    //! Byte offset within blk?????.dat where this block's data is stored
+    unsigned int nDataPos{0};
+
+    //! Byte offset within rev?????.dat where this block's undo data is stored
+    unsigned int nUndoPos{0};
+
+    //! Number of transactions in this block. This will be nonzero if the block
+    //! reached the VALID_TRANSACTIONS level, and zero otherwise.
+    //! Note: in a potential headers-first mode, this number cannot be relied upon
+    unsigned int nTx{0};
+
+    //! Verification status of this block. See enum BlockStatus
+    //!
+    //! Note: this value is modified to show BLOCK_OPT_WITNESS during UTXO snapshot
+    //! load to avoid a spurious startup failure requiring -reindex.
+    //! @sa NeedsRedownload
+    //! @sa ActivateSnapshot
+    uint32_t nStatus{0};
+
     //! CBlockIndex should not allow public copy construction because equality
     //! comparison via pointer is very common throughout the codebase, making
     //! use of copy a footgun. Also, use of copies do not have the benefit

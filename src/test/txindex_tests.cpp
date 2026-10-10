@@ -79,7 +79,7 @@ FlatFilePos BlockFilePos(const ChainstateManager& chainman, uint32_t height)
     LOCK(cs_main);
     const CBlockIndex* block_index{chainman.ActiveChain()[height]};
     BOOST_REQUIRE(block_index);
-    return {block_index->nFile, block_index->nDataPos};
+    return {chainman.m_blockman.GetFileNum(*block_index), chainman.m_blockman.GetDataOffset(*block_index)};
 }
 
 uint256 LookupTx(const TxIndex& txindex, const Txid& txid)
