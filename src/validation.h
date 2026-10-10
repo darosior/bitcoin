@@ -956,9 +956,9 @@ class ChainstateManager
 private:
 
     /** The last header for which a headerTip notification was issued. */
-    CBlockIndex* m_last_notified_header GUARDED_BY(GetMutex()){nullptr};
+    CBlockIndex* m_last_notified_header GUARDED_BY(m_blockman.m_block_storage_mutex){nullptr};
 
-    bool NotifyHeaderTip() LOCKS_EXCLUDED(GetMutex());
+    bool NotifyHeaderTip() EXCLUSIVE_LOCKS_REQUIRED(!m_blockman.m_block_storage_mutex);
 
     //! Internal helper for ActivateSnapshot().
     //!
@@ -983,7 +983,7 @@ private:
         const CBlockHeader& block,
         BlockValidationState& state,
         CBlockIndex** ppindex,
-        bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_blockman.m_block_storage_mutex);
+        bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(!m_blockman.m_block_storage_mutex);
     friend Chainstate;
 
     /** Most recent headers presync progress update, for rate-limiting. */

@@ -346,7 +346,8 @@ public:
      * nUndoPos, nTx), the best header, the set of dirty block index entries, the block
      * index database handle, the blockfile cursors, the block file info, the set of dirty
      * block files, the flag requesting a pruning check, the snapshot height used to segment
-     * block files, the prune locks, and whether block files have ever been pruned.
+     * block files, the prune locks, whether block files have ever been pruned, and the blocks
+     * being invalidated. ChainstateManager::m_last_notified_header is also guarded by this mutex.
      *
      * The chain selection fields (CBlockIndex::m_chain_tx_count and nSequenceId) and
      * m_blocks_unlinked are guarded by cs_main instead, since they change together with the
@@ -558,6 +559,15 @@ public:
 
     /** True if any block files have ever been pruned. */
     bool m_have_pruned GUARDED_BY(m_block_storage_mutex) = false;
+
+    /**
+     * Blocks that Chainstate::InvalidateBlock() is invalidating. It marks them and their
+     * descendants invalid one disconnected block at a time, releasing the locks in between, so
+     * ChainstateManager::AcceptBlockHeader() rejects headers building on them until it is done.
+     * Otherwise such a header could be added on top of a block that is about to be marked
+     * invalid, and be left unmarked while that block is.
+     */
+    std::vector<const CBlockIndex*> m_blocks_being_invalidated GUARDED_BY(m_block_storage_mutex);
 
     //! Check whether the block associated with this index entry is pruned or not.
     bool IsBlockPruned(const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(!m_block_storage_mutex);

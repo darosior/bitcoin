@@ -9,6 +9,7 @@
 #include <consensus/validation.h>
 #include <node/blockstorage.h>
 #include <node/kernel_notifications.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -171,6 +172,71 @@ BOOST_FIXTURE_TEST_CASE(chainstate_update_tip, TestChain100Setup)
     // validation chain.
     BOOST_CHECK(block_added);
     BOOST_CHECK_EQUAL(curr_tip, get_notify_tip());
+}
+
+//! Mine a header on top of `prev`.
+static CBlockHeader MineHeader(const ChainstateManager& chainman, const CBlockIndex& prev)
+{
+    CBlockHeader header;
+    header.nVersion = prev.nVersion;
+    header.hashPrevBlock = prev.GetBlockHash();
+    header.hashMerkleRoot = uint256::ONE;
+    header.nTime = prev.nTime + 1;
+    header.nBits = GetNextWorkRequired(&prev, &header, chainman.GetConsensus());
+    while (!CheckProofOfWork(header.GetHash(), header.nBits, chainman.GetConsensus())) ++header.nNonce;
+    return header;
+}
+
+//! A header built on an invalidated block is rejected, and the best header does not descend from the invalid block.
+BOOST_FIXTURE_TEST_CASE(header_child_of_invalidated_block, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const CBlock block{CreateBlock({}, CScript{} << OP_TRUE)};
+    const CBlockHeader& header{block};
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state));
+    CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+    BOOST_REQUIRE(pindex);
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(state, pindex));
+    BOOST_CHECK(WITH_LOCK(chainman.m_blockman.m_block_storage_mutex, return chainman.m_blockman.m_blocks_being_invalidated.empty()));
+
+    const CBlockHeader child{MineHeader(chainman, *pindex)};
+    BlockValidationState child_state;
+    BOOST_CHECK(!chainman.ProcessNewBlockHeaders({&child, 1}, /*min_pow_checked=*/true, child_state));
+    BOOST_CHECK_EQUAL(child_state.GetRejectReason(), "bad-prevblk");
+
+    BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(child.GetHash()));
+    const CBlockIndex* best{chainman.m_blockman.GetBestHeader()};
+    BOOST_REQUIRE(best);
+    BOOST_CHECK(best->GetAncestor(pindex->nHeight) != pindex);
+}
+
+//! While a block is being invalidated, headers building on it or on its descendants are rejected,
+//! since they would not be marked invalid with it. Headers building elsewhere are accepted.
+BOOST_FIXTURE_TEST_CASE(header_on_block_being_invalidated, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& blockman{chainman.m_blockman};
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    const CBlockIndex* invalidating{tip->pprev};
+
+    // The state InvalidateBlock() leaves between two disconnections.
+    WITH_LOCK(blockman.m_block_storage_mutex, blockman.m_blocks_being_invalidated.push_back(invalidating));
+
+    for (const CBlockIndex* prev : {invalidating, tip}) {
+        const CBlockHeader header{MineHeader(chainman, *prev)};
+        BlockValidationState state;
+        BOOST_CHECK(!chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-prevblk");
+        BOOST_CHECK(!blockman.LookupBlockIndex(header.GetHash()));
+    }
+
+    const CBlockHeader fork{MineHeader(chainman, *invalidating->pprev)};
+    BlockValidationState state;
+    BOOST_CHECK(chainman.ProcessNewBlockHeaders({&fork, 1}, /*min_pow_checked=*/true, state));
+    BOOST_CHECK(blockman.LookupBlockIndex(fork.GetHash()));
+
+    WITH_LOCK(blockman.m_block_storage_mutex, blockman.m_blocks_being_invalidated.clear());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

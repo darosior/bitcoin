@@ -3322,20 +3322,19 @@ void ChainstateManager::UpdateIBDStatus()
 bool ChainstateManager::NotifyHeaderTip()
 {
     bool fNotify = false;
-    bool fInitialBlockDownload = false;
     CBlockIndex* pindexHeader = nullptr;
     {
-        LOCK(GetMutex());
-        pindexHeader = m_blockman.GetBestHeader();
+        LOCK(m_blockman.m_block_storage_mutex);
+        pindexHeader = m_blockman.GetBestHeaderLocked();
 
         if (pindexHeader != m_last_notified_header) {
             fNotify = true;
-            fInitialBlockDownload = IsInitialBlockDownload();
             m_last_notified_header = pindexHeader;
         }
     }
     // Send block tip changed notifications without the lock held
     if (fNotify) {
+        const bool fInitialBlockDownload{IsInitialBlockDownload()};
         GetNotifications().headerTip(GetSynchronizationState(fInitialBlockDownload, m_blockman.m_blockfiles_indexed), pindexHeader->nHeight, pindexHeader->nTime, false);
     }
     return fNotify;
@@ -3573,6 +3572,9 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
     {
         LOCK(cs_main);
         LOCK(m_blockman.m_block_storage_mutex);
+        // Headers no longer build on pindex or its descendants from here on, so the map below
+        // and the active chain hold every descendant that has to be marked invalid.
+        m_blockman.m_blocks_being_invalidated.push_back(pindex);
         for (CBlockIndex* candidate : m_blockman.GetAllBlockIndicesLocked()) {
             // We don't need to put anything in our active chain into the
             // multimap, because those candidates will be found and considered
@@ -3586,6 +3588,17 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
             }
         }
     }
+    // Accept such headers again once this function returns, whether pindex was marked invalid or not.
+    struct EndInvalidation {
+        node::BlockManager& blockman;
+        const CBlockIndex* block;
+        ~EndInvalidation()
+        {
+            LOCK(blockman.m_block_storage_mutex);
+            auto& invalidating{blockman.m_blocks_being_invalidated};
+            invalidating.erase(std::ranges::find(invalidating, block));
+        }
+    } end_invalidation{m_blockman, pindex};
 
     CBlockIndex* to_mark_failed = pindex;
     bool pindex_was_in_chain = false;
@@ -4126,9 +4139,8 @@ arith_uint256 CalculateClaimedHeadersWork(std::span<const CBlockHeader> headers)
  *  v0.12 and v0.15 (when no additional protection was in place) whereby an attacker could unboundedly
  *  grow our in-memory block index. See https://bitcoincore.org/en/2024/07/03/disclose-header-spam.
  */
-static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const ChainstateManager& chainman, const CBlockIndex* pindexPrev) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const ChainstateManager& chainman, const CBlockIndex* pindexPrev)
 {
-    AssertLockHeld(::cs_main);
     assert(pindexPrev != nullptr);
     const int nHeight = pindexPrev->nHeight + 1;
 
@@ -4234,18 +4246,19 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
 {
-    AssertLockHeld(cs_main);
-
-    // Check for duplicate
+    // The duplicate check, the checks on the previous block and the insertion are one critical section.
+    // Otherwise a concurrent invalidation of the previous block could land in between, and the header
+    // would be added on top of an invalid chain. ContextualCheckBlockHeader() only reads immutable fields.
     uint256 hash = block.GetHash();
-    CBlockIndex* pindexSelf{m_blockman.LookupBlockIndex(hash)};
+    LOCK(m_blockman.m_block_storage_mutex);
+    CBlockIndex* pindexSelf{m_blockman.LookupBlockIndexLocked(hash)};
     if (hash != GetConsensus().hashGenesisBlock) {
         if (pindexSelf) {
             // Block header is already known.
             CBlockIndex* pindex = pindexSelf;
             if (ppindex)
                 *ppindex = pindex;
-            if (m_blockman.GetStatus(*pindex) & BLOCK_FAILED_VALID) {
+            if (m_blockman.GetStatusLocked(*pindex) & BLOCK_FAILED_VALID) {
                 LogDebug(BCLog::VALIDATION, "%s: block %s is marked invalid\n", __func__, hash.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid",
                                      strprintf("block %s was previously marked invalid", hash.ToString()));
@@ -4259,14 +4272,20 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         }
 
         // Get prev block index
-        CBlockIndex* pindexPrev{m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+        CBlockIndex* pindexPrev{m_blockman.LookupBlockIndexLocked(block.hashPrevBlock)};
         if (!pindexPrev) {
             LogDebug(BCLog::VALIDATION, "header %s has prev block not found: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
             return state.Invalid(BlockValidationResult::BLOCK_MISSING_PREV, "prev-blk-not-found");
         }
-        if (m_blockman.GetStatus(*pindexPrev) & BLOCK_FAILED_VALID) {
+        if (m_blockman.GetStatusLocked(*pindexPrev) & BLOCK_FAILED_VALID) {
             LogDebug(BCLog::VALIDATION, "header %s has prev block invalid: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
+        }
+        for (const CBlockIndex* invalidating : m_blockman.m_blocks_being_invalidated) {
+            if (pindexPrev->GetAncestor(invalidating->nHeight) == invalidating) {
+                LogDebug(BCLog::VALIDATION, "header %s has prev block being invalidated: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
+            }
         }
         if (!ContextualCheckBlockHeader(block, state, *this, pindexPrev)) {
             LogDebug(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
@@ -4277,7 +4296,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         LogDebug(BCLog::VALIDATION, "%s: not adding new block header %s, missing anti-dos proof-of-work validation\n", __func__, hash.ToString());
         return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "too-little-chainwork");
     }
-    CBlockIndex* pindex{m_blockman.AddToBlockIndex(block)};
+    CBlockIndex* pindex{m_blockman.AddToBlockIndexLocked(block)};
 
     if (ppindex)
         *ppindex = pindex;
@@ -4289,19 +4308,16 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex)
 {
     AssertLockNotHeld(cs_main);
-    {
-        LOCK(cs_main);
-        for (const CBlockHeader& header : headers) {
-            CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
-            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
-            CheckBlockIndex();
+    for (const CBlockHeader& header : headers) {
+        CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
+        bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
+        CheckBlockIndex();
 
-            if (!accepted) {
-                return false;
-            }
-            if (ppindex) {
-                *ppindex = pindex;
-            }
+        if (!accepted) {
+            return false;
+        }
+        if (ppindex) {
+            *ppindex = pindex;
         }
     }
     if (NotifyHeaderTip()) {
