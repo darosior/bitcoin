@@ -126,7 +126,7 @@ public:
     //! This value will be non-zero if this block and all previous blocks back
     //! to the genesis block or an assumeutxo snapshot block have reached the
     //! VALID_TRANSACTIONS level.
-    uint64_t m_chain_tx_count{0};
+    uint64_t m_chain_tx_count GUARDED_BY(::cs_main){0};
 
     //! Verification status of this block. See enum BlockStatus
     //!
@@ -146,7 +146,7 @@ public:
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     //! Initialized to SEQ_ID_INIT_FROM_DISK{1} when loading blocks from disk, except for blocks
     //! belonging to the best chain which overwrite it to SEQ_ID_BEST_CHAIN_FROM_DISK{0}.
-    int32_t nSequenceId{SEQ_ID_INIT_FROM_DISK};
+    int32_t nSequenceId GUARDED_BY(::cs_main){SEQ_ID_INIT_FROM_DISK};
 
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
@@ -211,7 +211,7 @@ public:
      * Note that this will be true for the snapshot base block, if one is loaded, since its m_chain_tx_count value will have
      * been set manually based on the related AssumeutxoData entry.
      */
-    bool HaveNumChainTxs() const { return m_chain_tx_count != 0; }
+    bool HaveNumChainTxs() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return m_chain_tx_count != 0; }
 
     NodeSeconds Time() const
     {
