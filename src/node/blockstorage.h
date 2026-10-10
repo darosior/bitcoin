@@ -136,7 +136,7 @@ inline constexpr uint32_t UNDO_DATA_DISK_OVERHEAD{STORAGE_HEADER_BYTES + uint256
 using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
 
 struct CBlockIndexWorkComparator {
-    bool operator()(const CBlockIndex* pa, const CBlockIndex* pb) const;
+    bool operator()(const CBlockIndex* pa, const CBlockIndex* pb) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     using is_transparent = void;
 };
 
@@ -351,7 +351,8 @@ public:
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.
      */
-    std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked;
+    //! Unlinked blocks feed the candidates for chain selection, so this is guarded by cs_main.
+    std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked GUARDED_BY(::cs_main);
     void AddUnlinkedBlock(CBlockIndex* block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
