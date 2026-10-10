@@ -1477,7 +1477,7 @@ RPCMethod getblockchaininfo()
         obj.pushKV("backgroundvalidation", std::move(background_validation));
     }
     obj.pushKV("chainwork", tip.nChainWork.GetHex());
-    obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
+    obj.pushKV("size_on_disk", WITH_LOCK(chainman.m_blockman.m_block_storage_mutex, return chainman.m_blockman.CalculateCurrentUsage()));
     obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
     if (chainman.m_blockman.IsPruneMode()) {
         const auto prune_height{GetPruneHeight(chainman.m_blockman, active_chainstate.m_chain)};

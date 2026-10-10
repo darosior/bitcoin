@@ -2715,44 +2715,47 @@ bool Chainstate::FlushStateToDisk(
         bool fFlushForPrune = false;
 
         CoinsCacheSizeState cache_state = GetCoinsCacheSizeState();
-        if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && m_chainman.m_blockman.m_blockfiles_indexed) {
-            // make sure we don't prune above any of the prune locks bestblocks
-            // pruning is height-based
-            int last_prune{m_chain.Height()}; // last height we can prune
-            std::optional<std::string> limiting_lock; // prune lock that actually was the limiting factor, only used for logging
+        {
+            LOCK(m_blockman.m_block_storage_mutex);
+            if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && m_chainman.m_blockman.m_blockfiles_indexed) {
+                // make sure we don't prune above any of the prune locks bestblocks
+                // pruning is height-based
+                int last_prune{m_chain.Height()}; // last height we can prune
+                std::optional<std::string> limiting_lock; // prune lock that actually was the limiting factor, only used for logging
 
-            for (const auto& prune_lock : m_blockman.m_prune_locks) {
-                if (prune_lock.second.height_first == std::numeric_limits<int>::max()) continue;
-                // Remove the buffer and one additional block here to get actual height that is outside of the buffer
-                const int lock_height{prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
-                last_prune = std::max(1, std::min(last_prune, lock_height));
-                if (last_prune == lock_height) {
-                    limiting_lock = prune_lock.first;
+                for (const auto& prune_lock : m_blockman.m_prune_locks) {
+                    if (prune_lock.second.height_first == std::numeric_limits<int>::max()) continue;
+                    // Remove the buffer and one additional block here to get actual height that is outside of the buffer
+                    const int lock_height{prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
+                    last_prune = std::max(1, std::min(last_prune, lock_height));
+                    if (last_prune == lock_height) {
+                        limiting_lock = prune_lock.first;
+                    }
                 }
-            }
 
-            if (limiting_lock) {
-                LogDebug(BCLog::PRUNE, "%s limited pruning to height %d\n", limiting_lock.value(), last_prune);
-            }
+                if (limiting_lock) {
+                    LogDebug(BCLog::PRUNE, "%s limited pruning to height %d\n", limiting_lock.value(), last_prune);
+                }
 
-            if (nManualPruneHeight > 0) {
-                LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);
+                if (nManualPruneHeight > 0) {
+                    LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);
 
-                m_blockman.FindFilesToPruneManual(
-                    setFilesToPrune,
-                    std::min(last_prune, nManualPruneHeight),
-                    *this);
-            } else {
-                LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCH);
+                    m_blockman.FindFilesToPruneManual(
+                        setFilesToPrune,
+                        std::min(last_prune, nManualPruneHeight),
+                        *this);
+                } else {
+                    LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCH);
 
-                m_blockman.FindFilesToPrune(setFilesToPrune, last_prune, *this, m_chainman);
-                m_blockman.m_check_for_pruning = false;
-            }
-            if (!setFilesToPrune.empty()) {
-                fFlushForPrune = true;
-                if (!m_blockman.m_have_pruned) {
-                    m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
-                    m_blockman.m_have_pruned = true;
+                    m_blockman.FindFilesToPrune(setFilesToPrune, last_prune, *this, m_chainman);
+                    m_blockman.m_check_for_pruning = false;
+                }
+                if (!setFilesToPrune.empty()) {
+                    fFlushForPrune = true;
+                    if (!m_blockman.m_have_pruned) {
+                        m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
+                        m_blockman.m_have_pruned = true;
+                    }
                 }
             }
         }
@@ -2856,7 +2859,7 @@ void Chainstate::ForceFlushStateToDisk(bool wipe_cache)
 void Chainstate::PruneAndFlush()
 {
     BlockValidationState state;
-    m_blockman.m_check_for_pruning = true;
+    WITH_LOCK(m_blockman.m_block_storage_mutex, m_blockman.m_check_for_pruning = true);
     if (!this->FlushStateToDisk(state, FlushStateMode::NONE)) {
         LogWarning("Failed to flush state (%s)", state.ToString());
     }
@@ -2965,6 +2968,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     {
         // Prune locks that began at or after the tip should be moved backward so they get a chance to reorg
         const int max_height_first{pindexDelete->nHeight - 1};
+        LOCK(m_blockman.m_block_storage_mutex);
         for (auto& prune_lock : m_blockman.m_prune_locks) {
             if (prune_lock.second.height_first <= max_height_first) continue;
 
@@ -5156,6 +5160,7 @@ void ChainstateManager::CheckBlockIndex() const
     }
 
     LOCK(cs_main);
+    LOCK(m_blockman.m_block_storage_mutex);
 
     // During a reindex, we read the genesis block and call CheckBlockIndex before ActivateBestChain,
     // so we have the genesis block in m_blockman.m_block_index but no active chain. (A few of the
@@ -5733,7 +5738,8 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     }
 
     Chainstate& chainstate{AddChainstate(std::move(snapshot_chainstate))};
-    m_blockman.m_snapshot_height = Assert(chainstate.SnapshotBase())->nHeight;
+    const int snapshot_height{Assert(chainstate.SnapshotBase())->nHeight};
+    WITH_LOCK(m_blockman.m_block_storage_mutex, m_blockman.m_snapshot_height = snapshot_height);
 
     chainstate.PopulateBlockIndexCandidates();
 

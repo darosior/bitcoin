@@ -107,7 +107,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                     CBlockIndex* it = chain.Tip();
                     while (it && it->nHeight != fork->nHeight) {
                         if (!(it->nStatus & BLOCK_HAVE_UNDO)) {
-                            assert(blockman.m_have_pruned);
+                            assert(WITH_LOCK(blockman.m_block_storage_mutex, return blockman.m_have_pruned));
                             abort_run = true;
                             return;
                         }
@@ -159,7 +159,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 int prune_height = fuzzed_data_provider.ConsumeIntegralInRange<int>(0, chain.Height());
                 CBlockIndex* prune_block{chain[prune_height]};
                 if (prune_block != chain.Tip() && (prune_block->nStatus & BLOCK_HAVE_DATA)) {
-                    blockman.m_have_pruned = true;
+                    WITH_LOCK(blockman.m_block_storage_mutex, blockman.m_have_pruned = true);
                     prune_block->nStatus &= ~BLOCK_HAVE_DATA;
                     prune_block->nStatus &= ~BLOCK_HAVE_UNDO;
                     prune_block->nFile = 0;
@@ -209,7 +209,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
         chainman.ActiveChainstate().setBlockIndexCandidates.clear();
         chainman.m_cached_is_ibd = true;
         blockman.m_blocks_unlinked.clear();
-        blockman.m_have_pruned = false;
+        WITH_LOCK(blockman.m_block_storage_mutex, blockman.m_have_pruned = false);
         blockman.CleanupForFuzzing();
         // Delete all blocks but Genesis from block index
         uint256 genesis_hash = genesis->GetBlockHash();

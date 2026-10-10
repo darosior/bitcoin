@@ -766,7 +766,7 @@ public:
     bool havePruned() override
     {
         LOCK(::cs_main);
-        return chainman().m_blockman.m_have_pruned;
+        return WITH_LOCK(chainman().m_blockman.m_block_storage_mutex, return chainman().m_blockman.m_have_pruned);
     }
     std::optional<int> getPruneHeight() override
     {
