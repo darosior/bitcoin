@@ -1911,18 +1911,20 @@ static RPCMethod getchaintxstats()
     const CBlockIndex& past_block{*CHECK_NONFATAL(pindex->GetAncestor(pindex->nHeight - blockcount))};
     const int64_t nTimeDiff{pindex->GetMedianTimePast() - past_block.GetMedianTimePast()};
 
+    const auto [tx_count, past_tx_count]{WITH_LOCK(::cs_main, return std::make_pair(pindex->m_chain_tx_count, past_block.m_chain_tx_count))};
+
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("time", pindex->nTime);
-    if (pindex->m_chain_tx_count) {
-        ret.pushKV("txcount", pindex->m_chain_tx_count);
+    if (tx_count) {
+        ret.pushKV("txcount", tx_count);
     }
     ret.pushKV("window_final_block_hash", pindex->GetBlockHash().GetHex());
     ret.pushKV("window_final_block_height", pindex->nHeight);
     ret.pushKV("window_block_count", blockcount);
     if (blockcount > 0) {
         ret.pushKV("window_interval", nTimeDiff);
-        if (pindex->m_chain_tx_count != 0 && past_block.m_chain_tx_count != 0) {
-            const auto window_tx_count = pindex->m_chain_tx_count - past_block.m_chain_tx_count;
+        if (tx_count != 0 && past_tx_count != 0) {
+            const auto window_tx_count = tx_count - past_tx_count;
             ret.pushKV("window_tx_count", window_tx_count);
             if (nTimeDiff > 0) {
                 ret.pushKV("txrate", double(window_tx_count) / nTimeDiff);
@@ -3490,7 +3492,7 @@ UniValue WriteUTXOSnapshot(
     result.pushKV("base_height", tip->nHeight);
     result.pushKV("path", path.utf8string());
     result.pushKV("txoutset_hash", maybe_stats->hashSerialized.ToString());
-    result.pushKV("nchaintx", tip->m_chain_tx_count);
+    result.pushKV("nchaintx", WITH_LOCK(::cs_main, return tip->m_chain_tx_count));
     return result;
 }
 

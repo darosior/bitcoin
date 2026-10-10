@@ -821,7 +821,7 @@ public:
     /** Add a block to the candidate set if it has as much work as the current tip. */
     void TryAddBlockIndexCandidate(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    void PruneBlockIndexCandidates();
+    void PruneBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
