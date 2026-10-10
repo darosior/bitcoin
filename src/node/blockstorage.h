@@ -348,6 +348,38 @@ public:
 
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** The mutable fields of a block index entry, passed to ModifyIndex(). */
+    struct IndexFields {
+        uint32_t& nStatus;
+        int& nFile;
+        unsigned int& nDataPos;
+        unsigned int& nUndoPos;
+        unsigned int& nTx;
+    };
+
+    /** Read access to the mutable state of a block index entry. */
+    uint32_t GetStatus(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    unsigned int GetNumTx(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Raw file and offset fields, which are only meaningful if the matching status flag is set.
+    int GetFileNum(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    unsigned int GetDataOffset(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    unsigned int GetUndoOffset(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    FlatFilePos GetBlockPos(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    FlatFilePos GetUndoPos(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Check whether this block index entry is valid up to the passed validity level.
+    bool IsValid(const CBlockIndex& index, enum BlockStatus nUpTo) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Raise the validity level of this block index entry. Returns true if the validity was changed.
+    bool RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Change the mutable state of a block index entry. `modify` must not call back into BlockManager. */
+    template <typename F>
+    void ModifyIndex(CBlockIndex& index, F&& modify) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        IndexFields fields{index.nStatus, index.nFile, index.nDataPos, index.nUndoPos, index.nTx};
+        std::forward<F>(modify)(fields);
+    }
+
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.
      */

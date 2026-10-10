@@ -61,10 +61,10 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 // Receive a header building on an existing valid one. This assumes headers are valid, so PoW is not relevant here.
                 LOCK(cs_main);
                 CBlockIndex* prev_block = PickValue(fuzzed_data_provider, blocks);
-                if (!(prev_block->nStatus & BLOCK_FAILED_VALID)) {
+                if (!(blockman.GetStatus(*prev_block) & BLOCK_FAILED_VALID)) {
                     CBlockHeader header = ConsumeBlockHeader(fuzzed_data_provider, prev_block->GetBlockHash(), nonce_counter);
                     CBlockIndex* index = blockman.AddToBlockIndex(header, chainman.m_best_header);
-                    assert(index->nStatus & BLOCK_VALID_TREE);
+                    assert(blockman.GetStatus(*index) & BLOCK_VALID_TREE);
                     assert(index->pprev == prev_block);
                     blocks.push_back(index);
                 }
@@ -74,7 +74,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 LOCK(cs_main);
                 CBlockIndex* index = PickValue(fuzzed_data_provider, blocks);
                 // Must be new to us and not known to be invalid (e.g. because of an invalid ancestor).
-                if (index->nTx == 0 && !(index->nStatus & BLOCK_FAILED_VALID)) {
+                if (blockman.GetNumTx(*index) == 0 && !(blockman.GetStatus(*index) & BLOCK_FAILED_VALID)) {
                     if (fuzzed_data_provider.ConsumeBool()) { // Invalid
                         BlockValidationState state;
                         state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "consensus-invalid");
@@ -85,8 +85,8 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                         block.vtx = std::vector<CTransactionRef>(nTx);
                         FlatFilePos pos(0, fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 1000));
                         chainman.ReceivedBlockTransactions(block, index, pos);
-                        assert(index->nStatus & BLOCK_VALID_TRANSACTIONS);
-                        assert(index->nStatus & BLOCK_HAVE_DATA);
+                        assert(blockman.GetStatus(*index) & BLOCK_VALID_TRANSACTIONS);
+                        assert(blockman.GetStatus(*index) & BLOCK_HAVE_DATA);
                     }
                 }
             },
@@ -106,7 +106,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                     // This is very unlikely to happen due to the minimum pruning threshold of 550MiB.
                     CBlockIndex* it = chain.Tip();
                     while (it && it->nHeight != fork->nHeight) {
-                        if (!(it->nStatus & BLOCK_HAVE_UNDO)) {
+                        if (!(blockman.GetStatus(*it) & BLOCK_HAVE_UNDO)) {
                             assert(blockman.m_have_pruned);
                             abort_run = true;
                             return;
@@ -124,9 +124,9 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                     }
                     // Connect blocks, possibly fail
                     for (CBlockIndex* block : to_connect | std::views::reverse) {
-                        assert(!(block->nStatus & BLOCK_FAILED_VALID));
-                        assert(block->nStatus & BLOCK_HAVE_DATA);
-                        if (!block->IsValid(BLOCK_VALID_SCRIPTS)) {
+                        assert(!(blockman.GetStatus(*block) & BLOCK_FAILED_VALID));
+                        assert(blockman.GetStatus(*block) & BLOCK_HAVE_DATA);
+                        if (!blockman.IsValid(*block, BLOCK_VALID_SCRIPTS)) {
                             if (fuzzed_data_provider.ConsumeBool()) { // Invalid
                                 BlockValidationState state;
                                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "consensus-invalid");
@@ -135,8 +135,8 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                                 chainman.InvalidChainFound(to_connect.front());
                                 break;
                             } else {
-                                block->RaiseValidity(BLOCK_VALID_SCRIPTS);
-                                block->nStatus |= BLOCK_HAVE_UNDO;
+                                blockman.RaiseValidity(*block, BLOCK_VALID_SCRIPTS);
+                                blockman.ModifyIndex(*block, [&](auto& f) { f.nStatus |= BLOCK_HAVE_UNDO; });
                             }
                         }
                         chain.SetTip(*block);
@@ -158,13 +158,15 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 auto& chain = chainman.ActiveChain();
                 int prune_height = fuzzed_data_provider.ConsumeIntegralInRange<int>(0, chain.Height());
                 CBlockIndex* prune_block{chain[prune_height]};
-                if (prune_block != chain.Tip() && (prune_block->nStatus & BLOCK_HAVE_DATA)) {
+                if (prune_block != chain.Tip() && (blockman.GetStatus(*prune_block) & BLOCK_HAVE_DATA)) {
                     blockman.m_have_pruned = true;
-                    prune_block->nStatus &= ~BLOCK_HAVE_DATA;
-                    prune_block->nStatus &= ~BLOCK_HAVE_UNDO;
-                    prune_block->nFile = 0;
-                    prune_block->nDataPos = 0;
-                    prune_block->nUndoPos = 0;
+                    blockman.ModifyIndex(*prune_block, [](auto& f) {
+                        f.nStatus &= ~BLOCK_HAVE_DATA;
+                        f.nStatus &= ~BLOCK_HAVE_UNDO;
+                        f.nFile = 0;
+                        f.nDataPos = 0;
+                        f.nUndoPos = 0;
+                    });
                     auto range = blockman.m_blocks_unlinked.equal_range(prune_block->pprev);
                     while (range.first != range.second) {
                         std::multimap<CBlockIndex*, CBlockIndex*>::iterator _it = range.first;
@@ -183,13 +185,13 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 if (num_pruned == 0) return;
                 size_t i = fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, num_pruned - 1);
                 CBlockIndex* index = pruned_blocks[i];
-                assert(!(index->nStatus & BLOCK_HAVE_DATA));
+                assert(!(blockman.GetStatus(*index) & BLOCK_HAVE_DATA));
                 CBlock block;
-                block.vtx = std::vector<CTransactionRef>(index->nTx); // Set the number of tx to the prior value.
+                block.vtx = std::vector<CTransactionRef>(blockman.GetNumTx(*index)); // Set the number of tx to the prior value.
                 FlatFilePos pos(0, fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 1000));
                 chainman.ReceivedBlockTransactions(block, index, pos);
-                assert(index->nStatus & BLOCK_VALID_TRANSACTIONS);
-                assert(index->nStatus & BLOCK_HAVE_DATA);
+                assert(blockman.GetStatus(*index) & BLOCK_VALID_TRANSACTIONS);
+                assert(blockman.GetStatus(*index) & BLOCK_HAVE_DATA);
                 pruned_blocks.erase(pruned_blocks.begin() + i);
             });
     }
@@ -200,8 +202,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
     // clean up global state changed by last iteration and prepare for next iteration
     {
         LOCK(cs_main);
-        genesis->nStatus |= BLOCK_HAVE_DATA;
-        genesis->nStatus |= BLOCK_HAVE_UNDO;
+        blockman.ModifyIndex(*genesis, [](auto& f) { f.nStatus |= BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO; });
         chainman.m_best_header = genesis;
         chainman.ResetBestInvalid();
         chainman.nBlockSequenceId = 2;

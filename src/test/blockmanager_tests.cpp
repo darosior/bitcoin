@@ -66,14 +66,14 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain
     auto& chainman{*Assert(m_node.chainman)};
     auto& blockman{chainman.m_blockman};
     const CBlockIndex* old_tip{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip())};
-    WITH_LOCK(chainman.GetMutex(), blockman.GetBlockFileInfo(old_tip->GetBlockPos().nFile)->nSize = MAX_BLOCKFILE_SIZE);
+    const int old_tip_file{WITH_LOCK(chainman.GetMutex(), return blockman.GetBlockPos(*old_tip).nFile)};
+    WITH_LOCK(chainman.GetMutex(), blockman.GetBlockFileInfo(old_tip_file)->nSize = MAX_BLOCKFILE_SIZE);
     CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
 
     // Prune the older block file, but don't unlink it
-    int file_number;
+    const int file_number{WITH_LOCK(chainman.GetMutex(), return blockman.GetBlockPos(*old_tip).nFile)};
     {
         LOCK(chainman.GetMutex());
-        file_number = old_tip->GetBlockPos().nFile;
         blockman.PruneOneBlockFile(file_number);
     }
 
@@ -96,7 +96,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain
     // Check that the new tip file has not been removed
     const CBlockIndex* new_tip{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip())};
     BOOST_CHECK_NE(old_tip, new_tip);
-    const int new_file_number{WITH_LOCK(chainman.GetMutex(), return new_tip->GetBlockPos().nFile)};
+    const int new_file_number{WITH_LOCK(chainman.GetMutex(), return blockman.GetBlockPos(*new_tip).nFile)};
     const FlatFilePos new_pos(new_file_number, 0);
     BOOST_CHECK(!blockman.OpenBlockFile(new_pos, true).IsNull());
 }
@@ -114,8 +114,8 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
     {
         LOCK(::cs_main);
         CBlockIndex* it = last_pruned_block;
-        while (it != nullptr && it->nStatus & BLOCK_HAVE_DATA) {
-            it->nStatus &= ~BLOCK_HAVE_DATA;
+        while (it != nullptr && blockman.GetStatus(*it) & BLOCK_HAVE_DATA) {
+            blockman.ModifyIndex(*it, [](auto& f) { f.nStatus &= ~BLOCK_HAVE_DATA; });
             it = it->pprev;
         }
     };
@@ -133,7 +133,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
     CBlockIndex* genesis = chainman->ActiveChain()[0];
     BOOST_CHECK(blockman.CheckBlockDataAvailability(*upper_block, *genesis, BlockStatus{BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO}));
     // Ensure we detect absence of undo data in the first block
-    chainman->ActiveChain()[1]->nStatus &= ~BLOCK_HAVE_UNDO;
+    blockman.ModifyIndex(*chainman->ActiveChain()[1], [](auto& f) { f.nStatus &= ~BLOCK_HAVE_UNDO; });
     BOOST_CHECK(!blockman.CheckBlockDataAvailability(tip, *genesis, BlockStatus{BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO}));
 
     // Prune half of the blocks
@@ -149,7 +149,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
 
     // Simulate that the first available block is missing undo data and
     // detect this by using a status mask.
-    first_available_block->nStatus &= ~BLOCK_HAVE_UNDO;
+    blockman.ModifyIndex(*first_available_block, [](auto& f) { f.nStatus &= ~BLOCK_HAVE_UNDO; });
     BOOST_CHECK(!blockman.CheckBlockDataAvailability(tip, *first_available_block, BlockStatus{BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO}));
     BOOST_CHECK(blockman.CheckBlockDataAvailability(tip, *first_available_block, BlockStatus{BLOCK_HAVE_DATA}));
 }
@@ -160,7 +160,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_part, TestChain100Setup)
     auto& chainman{m_node.chainman};
     auto& blockman{chainman->m_blockman};
     const CBlockIndex& tip{*chainman->ActiveTip()};
-    const FlatFilePos tip_block_pos{tip.GetBlockPos()};
+    const FlatFilePos tip_block_pos{blockman.GetBlockPos(tip)};
 
     auto block{blockman.ReadRawBlock(tip_block_pos)};
     BOOST_REQUIRE(block);
@@ -188,7 +188,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_part_error, TestChain100Setup)
     auto& chainman{m_node.chainman};
     auto& blockman{chainman->m_blockman};
     const CBlockIndex& tip{*chainman->ActiveTip()};
-    const FlatFilePos tip_block_pos{tip.GetBlockPos()};
+    const FlatFilePos tip_block_pos{blockman.GetBlockPos(tip)};
 
     auto block{blockman.ReadRawBlock(tip_block_pos)};
     BOOST_REQUIRE(block);
@@ -221,9 +221,11 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_readblock_hash_mismatch, TestingSetup)
     CBlockIndex index;
     {
         LOCK(cs_main);
+        auto& blockman{m_node.chainman->m_blockman};
         const auto tip{m_node.chainman->ActiveTip()};
-        index.nStatus = tip->nStatus;
-        index.nDataPos = tip->nDataPos;
+        const uint32_t status{blockman.GetStatus(*tip)};
+        const unsigned int data_pos{blockman.GetDataOffset(*tip)};
+        blockman.ModifyIndex(index, [&](auto& f) { f.nStatus = status; f.nDataPos = data_pos; });
         index.phashBlock = &uint256::ONE; // mismatched block hash
     }
 

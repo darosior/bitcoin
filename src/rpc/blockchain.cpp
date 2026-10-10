@@ -190,7 +190,7 @@ static const CBlockIndex* ParseHashOrHeight(const UniValue& param, ChainstateMan
     }
 }
 
-UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex, const uint256 pow_limit)
+UniValue blockheaderToJSON(const BlockManager& blockman, const CBlockIndex& tip, const CBlockIndex& blockindex, const uint256 pow_limit)
 {
     // Serialize passed information without accessing chain state of the active chain!
     AssertLockNotHeld(cs_main); // For performance reasons
@@ -211,7 +211,7 @@ UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex
     result.pushKV("target", GetTarget(blockindex, pow_limit).GetHex());
     result.pushKV("difficulty", GetDifficulty(blockindex));
     result.pushKV("chainwork", blockindex.nChainWork.GetHex());
-    result.pushKV("nTx", blockindex.nTx);
+    result.pushKV("nTx", WITH_LOCK(::cs_main, return blockman.GetNumTx(blockindex)));
 
     if (blockindex.pprev)
         result.pushKV("previousblockhash", blockindex.pprev->GetBlockHash().GetHex());
@@ -240,7 +240,7 @@ UniValue coinbaseTxToJSON(const CTransaction& coinbase_tx)
 
 UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIndex& tip, const CBlockIndex& blockindex, TxVerbosity verbosity, const uint256 pow_limit)
 {
-    UniValue result = blockheaderToJSON(tip, blockindex, pow_limit);
+    UniValue result = blockheaderToJSON(blockman, tip, blockindex, pow_limit);
 
     result.pushKV("strippedsize", ::GetSerializeSize(TX_NO_WITNESS(block)));
     result.pushKV("size", ::GetSerializeSize(TX_WITH_WITNESS(block)));
@@ -263,7 +263,7 @@ UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIn
         case TxVerbosity::SHOW_DETAILS_AND_PREVOUT:
             CBlockUndo blockUndo;
             const bool is_not_pruned{WITH_LOCK(::cs_main, return !blockman.IsBlockPruned(blockindex))};
-            bool have_undo{is_not_pruned && WITH_LOCK(::cs_main, return blockindex.nStatus & BLOCK_HAVE_UNDO)};
+            bool have_undo{is_not_pruned && WITH_LOCK(::cs_main, return blockman.GetStatus(blockindex) & BLOCK_HAVE_UNDO)};
             if (have_undo && !blockman.ReadBlockUndo(blockUndo, blockindex)) {
                 throw JSONRPCError(RPC_INTERNAL_ERROR, "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event.");
             }
@@ -592,7 +592,7 @@ static RPCMethod getblockfrompeer()
         throw JSONRPCError(RPC_MISC_ERROR, "In prune mode, only blocks that the node has already synced previously can be fetched from a peer");
     }
 
-    const bool block_has_data = WITH_LOCK(::cs_main, return index->nStatus & BLOCK_HAVE_DATA);
+    const bool block_has_data = WITH_LOCK(::cs_main, return chainman.m_blockman.GetStatus(*index) & BLOCK_HAVE_DATA);
     if (block_has_data) {
         throw JSONRPCError(RPC_MISC_ERROR, "Block already downloaded");
     }
@@ -702,7 +702,7 @@ static RPCMethod getblockheader()
         return strHex;
     }
 
-    return blockheaderToJSON(*tip, *pblockindex, chainman.GetConsensus().powLimit);
+    return blockheaderToJSON(chainman.m_blockman, *tip, *pblockindex, chainman.GetConsensus().powLimit);
 },
     };
 }
@@ -711,7 +711,7 @@ void CheckBlockDataAvailability(BlockManager& blockman, const CBlockIndex& block
 {
     AssertLockHeld(cs_main);
     uint32_t flag = check_for_undo ? BLOCK_HAVE_UNDO : BLOCK_HAVE_DATA;
-    if (!(blockindex.nStatus & flag)) {
+    if (!(blockman.GetStatus(blockindex) & flag)) {
         if (blockman.IsBlockPruned(blockindex)) {
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("%s not available (pruned data)", check_for_undo ? "Undo data" : "Block"));
         }
@@ -745,7 +745,7 @@ static std::vector<std::byte> GetRawBlockChecked(BlockManager& blockman, const C
     {
         LOCK(cs_main);
         CheckBlockDataAvailability(blockman, blockindex, /*check_for_undo=*/false);
-        pos = blockindex.GetBlockPos();
+        pos = blockman.GetBlockPos(blockindex);
     }
 
     if (auto data{blockman.ReadRawBlock(pos)}) return std::move(*data);
@@ -932,7 +932,7 @@ std::optional<int> GetPruneHeight(const BlockManager& blockman, const CChain& ch
     if (!first_block || !chain_tip) return std::nullopt;
 
     // If the chain tip is pruned, everything is pruned.
-    if ((chain_tip->nStatus & BLOCK_HAVE_MASK) != BLOCK_HAVE_MASK) return chain_tip->nHeight;
+    if ((blockman.GetStatus(*chain_tip) & BLOCK_HAVE_MASK) != BLOCK_HAVE_MASK) return chain_tip->nHeight;
 
     const auto& first_unpruned{blockman.GetFirstBlock(*chain_tip, /*status_mask=*/BLOCK_HAVE_MASK, first_block)};
     if (&first_unpruned == first_block) {
@@ -1682,16 +1682,16 @@ static RPCMethod getchaintips()
         if (active_chain.Contains(*block)) {
             // This block is part of the currently active chain.
             status = "active";
-        } else if (block->nStatus & BLOCK_FAILED_VALID) {
+        } else if (chainman.m_blockman.GetStatus(*block) & BLOCK_FAILED_VALID) {
             // This block or one of its ancestors is invalid.
             status = "invalid";
         } else if (!block->HaveNumChainTxs()) {
             // This block cannot be connected because full block data for it or one of its parents is missing.
             status = "headers-only";
-        } else if (block->IsValid(BLOCK_VALID_SCRIPTS)) {
+        } else if (chainman.m_blockman.IsValid(*block, BLOCK_VALID_SCRIPTS)) {
             // This block is fully validated, but no longer part of the active chain. It was probably the active block once, but was reorganized.
             status = "valid-fork";
-        } else if (block->IsValid(BLOCK_VALID_TREE)) {
+        } else if (chainman.m_blockman.IsValid(*block, BLOCK_VALID_TREE)) {
             // The headers for this block are valid, but it has not been validated. It was probably never part of the most-work chain.
             status = "valid-headers";
         } else {
@@ -3041,7 +3041,7 @@ static RPCMethod getblockfilter()
         if (!block_index) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
-        block_was_connected = block_index->IsValid(BLOCK_VALID_SCRIPTS);
+        block_was_connected = chainman.m_blockman.IsValid(*block_index, BLOCK_VALID_SCRIPTS);
     }
 
     bool index_ready = index->BlockUntilSyncedToCurrentChain();

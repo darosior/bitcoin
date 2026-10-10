@@ -196,6 +196,80 @@ bool CBlockIndexHeightOnlyComparator::operator()(const CBlockIndex* pa, const CB
     return pa->nHeight < pb->nHeight;
 }
 
+uint32_t BlockManager::GetStatus(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    return index.nStatus;
+}
+
+unsigned int BlockManager::GetNumTx(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    return index.nTx;
+}
+
+int BlockManager::GetFileNum(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    return index.nFile;
+}
+
+unsigned int BlockManager::GetDataOffset(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    return index.nDataPos;
+}
+
+unsigned int BlockManager::GetUndoOffset(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    return index.nUndoPos;
+}
+
+FlatFilePos BlockManager::GetBlockPos(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    FlatFilePos ret;
+    if (index.nStatus & BLOCK_HAVE_DATA) {
+        ret.nFile = index.nFile;
+        ret.nPos = index.nDataPos;
+    }
+    return ret;
+}
+
+FlatFilePos BlockManager::GetUndoPos(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    FlatFilePos ret;
+    if (index.nStatus & BLOCK_HAVE_UNDO) {
+        ret.nFile = index.nFile;
+        ret.nPos = index.nUndoPos;
+    }
+    return ret;
+}
+
+bool BlockManager::IsValid(const CBlockIndex& index, enum BlockStatus nUpTo) const
+{
+    AssertLockHeld(::cs_main);
+    assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
+    if (index.nStatus & BLOCK_FAILED_VALID)
+        return false;
+    return ((index.nStatus & BLOCK_VALID_MASK) >= nUpTo);
+}
+
+bool BlockManager::RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo)
+{
+    AssertLockHeld(::cs_main);
+    assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
+    if (index.nStatus & BLOCK_FAILED_VALID) return false;
+
+    if ((index.nStatus & BLOCK_VALID_MASK) < nUpTo) {
+        index.nStatus = (index.nStatus & ~BLOCK_VALID_MASK) | nUpTo;
+        return true;
+    }
+    return false;
+}
+
 std::vector<CBlockIndex*> BlockManager::GetAllBlockIndices()
 {
     AssertLockHeld(cs_main);
@@ -244,7 +318,7 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
-    pindexNew->RaiseValidity(BLOCK_VALID_TREE);
+    RaiseValidity(*pindexNew, BLOCK_VALID_TREE);
     if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
         best_header = pindexNew;
     }
@@ -658,7 +732,7 @@ bool BlockManager::CheckBlockDataAvailability(const CBlockIndex& upper_block, co
         // This might indicate missing data, or it could simply reflect the expected absence of undo data for the genesis block.
         // To distinguish between the two, check if all required block data *except* undo is available up to the genesis block.
         BlockStatus flags{block_status & ~BLOCK_HAVE_UNDO};
-        return first_block.pprev && first_block.pprev->nStatus & flags;
+        return first_block.pprev && GetStatus(*first_block.pprev) & flags;
     }
     return &first_block == &lower_block;
 }
@@ -713,7 +787,7 @@ CBlockFileInfo* BlockManager::GetBlockFileInfo(size_t n)
 
 bool BlockManager::ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index) const
 {
-    const FlatFilePos pos{WITH_LOCK(::cs_main, return index.GetUndoPos())};
+    const FlatFilePos pos{WITH_LOCK(::cs_main, return GetUndoPos(index))};
 
     // Open history file to read
     AutoFile file{OpenUndoFile(pos, true)};
@@ -984,7 +1058,7 @@ bool BlockManager::WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationSt
     auto& cursor = *Assert(m_blockfile_cursors[type]);
 
     // Write undo information to disk
-    if (block.GetUndoPos().IsNull()) {
+    if (GetUndoPos(block).IsNull()) {
         FlatFilePos pos;
         const auto blockundo_size{static_cast<uint32_t>(GetSerializeSize(blockundo))};
         if (!FindUndoPos(state, block.nFile, pos, blockundo_size + UNDO_DATA_DISK_OVERHEAD)) {
@@ -1089,7 +1163,7 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
 
 bool BlockManager::ReadBlock(CBlock& block, const CBlockIndex& index) const
 {
-    const FlatFilePos block_pos{WITH_LOCK(cs_main, return index.GetBlockPos())};
+    const FlatFilePos block_pos{WITH_LOCK(cs_main, return GetBlockPos(index))};
     return ReadBlock(block, block_pos, index.GetBlockHash());
 }
 

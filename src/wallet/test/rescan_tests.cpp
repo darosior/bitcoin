@@ -40,7 +40,8 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
 {
     // Cap last block file size, and mine new block in a new block file.
     CBlockIndex* oldTip = WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain().Tip());
-    WITH_LOCK(::cs_main, m_node.chainman->m_blockman.GetBlockFileInfo(oldTip->GetBlockPos().nFile)->nSize = MAX_BLOCKFILE_SIZE);
+    const int oldTip_file{WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.GetBlockPos(*oldTip).nFile)};
+    WITH_LOCK(::cs_main, m_node.chainman->m_blockman.GetBlockFileInfo(oldTip_file)->nSize = MAX_BLOCKFILE_SIZE);
     CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
     CBlockIndex* newTip = WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain().Tip());
 
@@ -106,7 +107,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
     int file_number;
     {
         LOCK(cs_main);
-        file_number = oldTip->GetBlockPos().nFile;
+        file_number = m_node.chainman->m_blockman.GetBlockPos(*oldTip).nFile;
         Assert(m_node.chainman)->m_blockman.PruneOneBlockFile(file_number);
     }
     m_node.chainman->m_blockman.UnlinkPrunedFiles({file_number});
@@ -135,7 +136,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
     // Prune the remaining block file.
     {
         LOCK(cs_main);
-        file_number = newTip->GetBlockPos().nFile;
+        file_number = m_node.chainman->m_blockman.GetBlockPos(*newTip).nFile;
         Assert(m_node.chainman)->m_blockman.PruneOneBlockFile(file_number);
     }
     m_node.chainman->m_blockman.UnlinkPrunedFiles({file_number});
@@ -233,7 +234,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions_reorged_block, TestChain100
     int file_number;
     {
         LOCK(cs_main);
-        file_number = stale_block->GetBlockPos().nFile;
+        file_number = m_node.chainman->m_blockman.GetBlockPos(*stale_block).nFile;
         Assert(m_node.chainman)->m_blockman.PruneOneBlockFile(file_number);
     }
     m_node.chainman->m_blockman.UnlinkPrunedFiles({file_number});
@@ -459,7 +460,8 @@ BOOST_FIXTURE_TEST_CASE(rescan_from_time, TestChain100Setup)
 {
     // Cap last block file size, and mine new block in a new block file.
     CBlockIndex* old_tip = WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain().Tip());
-    WITH_LOCK(::cs_main, m_node.chainman->m_blockman.GetBlockFileInfo(old_tip->GetBlockPos().nFile)->nSize = MAX_BLOCKFILE_SIZE);
+    const int old_tip_file{WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.GetBlockPos(*old_tip).nFile)};
+    WITH_LOCK(::cs_main, m_node.chainman->m_blockman.GetBlockFileInfo(old_tip_file)->nSize = MAX_BLOCKFILE_SIZE);
     CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
     CBlockIndex* new_tip = WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain().Tip());
 
@@ -467,7 +469,7 @@ BOOST_FIXTURE_TEST_CASE(rescan_from_time, TestChain100Setup)
     int file_number;
     {
         LOCK(cs_main);
-        file_number = old_tip->GetBlockPos().nFile;
+        file_number = m_node.chainman->m_blockman.GetBlockPos(*old_tip).nFile;
         Assert(m_node.chainman)->m_blockman.PruneOneBlockFile(file_number);
     }
     m_node.chainman->m_blockman.UnlinkPrunedFiles({file_number});
