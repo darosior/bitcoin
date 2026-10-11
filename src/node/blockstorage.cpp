@@ -231,10 +231,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     }
     CBlockIndex* pindexNew = &(*mi).second;
 
-    // We assign the sequence id to blocks only when the full data is available,
-    // to avoid miners withholding blocks but broadcasting headers, to get a
-    // competitive advantage.
-    pindexNew->nSequenceId = SEQ_ID_INIT_FROM_DISK;
+    // Note we don't assign the sequence id (set to 1 by default) yet. We only
+    // assign it once the full data is available, to avoid miners withholding
+    // blocks but broadcasting headers, to get a competitive advantage.
 
     pindexNew->phashBlock = &((*mi).first);
     BlockMap::iterator miPrev = m_block_index.find(block.hashPrevBlock);
