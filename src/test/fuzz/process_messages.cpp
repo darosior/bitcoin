@@ -106,6 +106,8 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
     // it to call at most once.
     bool jump_out_of_ibd{false};
     LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 30) {
+        // What validation notified since the last iteration is processed first, as the message handler thread does.
+        node.peerman->ProcessPendingEvents();
         if (!jump_out_of_ibd) jump_out_of_ibd = fuzzed_data_provider.ConsumeBool();
         if (jump_out_of_ibd && chainman.IsInitialBlockDownload()) chainman.JumpOutOfIbd();
         const std::string random_message_type{fuzzed_data_provider.ConsumeBytesAsString(CMessageHeader::MESSAGE_TYPE_SIZE).c_str()};
@@ -133,6 +135,7 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
         }
     }
     node.validation_signals->SyncWithValidationInterfaceQueue();
+    node.peerman->ProcessPendingEvents();
     node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     node.connman->StopNodes();
     const auto end_sequence{WITH_LOCK(node.mempool->cs, return node.mempool->GetSequence())};
