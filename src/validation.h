@@ -951,7 +951,7 @@ class ChainstateManager
 {
 private:
 
-    bool NotifyHeaderTip() LOCKS_EXCLUDED(GetMutex());
+    bool NotifyHeaderTip() EXCLUSIVE_LOCKS_REQUIRED(!m_blockman.m_tree_mutex);
 
     //! Internal helper for ActivateSnapshot().
     //!
@@ -971,12 +971,15 @@ private:
      * Caller must set min_pow_checked=true in order to add a new header to the
      * block index (permanent memory storage), indicating that the header is
      * known to be part of a sufficiently high-work chain (anti-dos check).
+     *
+     * This does not need cs_main: the checks and the insertion are done while
+     * holding the tree lock.
      */
     bool AcceptBlockHeader(
         const CBlockHeader& block,
         BlockValidationState& state,
         CBlockIndex** ppindex,
-        bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(!m_blockman.m_tree_mutex);
     friend Chainstate;
 
     /** Most recent headers presync progress update, for rate-limiting. */
@@ -1264,6 +1267,10 @@ public:
      *
      * May not be called in a
      * validationinterface callback.
+     *
+     * This does not take cs_main, and does not wait for it: the headers are
+     * added to the block index under the tree lock. (CheckBlockIndex(), if it
+     * is enabled with -checkblockindex, still takes cs_main after each header.)
      *
      * @param[in]  headers The block headers themselves
      * @param[in]  min_pow_checked  True if proof-of-work anti-DoS checks have been done by caller for headers chain
