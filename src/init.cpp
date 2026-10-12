@@ -1504,7 +1504,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     auto [status, error] = catch_exceptions([&] { return LoadChainstate(chainman, cache_sizes, options); });
     if (status == node::ChainstateLoadStatus::SUCCESS) {
         uiInterface.InitMessage(_("Verifying blocks…"));
-        if (chainman.m_blockman.m_have_pruned && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
+        if (WITH_LOCK(chainman.m_blockman.m_store_mutex, return chainman.m_blockman.m_have_pruned) && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
             LogWarning("pruned datadir may not have more than %d blocks; only checking available blocks\n",
                        MIN_BLOCKS_TO_KEEP);
         }
@@ -2194,7 +2194,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     {
         LOCK(chainman.GetMutex());
         const auto& tip{*Assert(chainman.ActiveTip())};
-        LogInfo("block tree size = %u", chainman.BlockIndex().size());
+        LogInfo("block tree size = %u", chainman.m_blockman.BlockIndexSize());
         chain_active_height = tip.nHeight;
         best_block_time = tip.GetBlockTime();
         if (tip_info) {

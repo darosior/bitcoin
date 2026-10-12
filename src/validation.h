@@ -649,14 +649,18 @@ public:
      * The base of the snapshot this chainstate was created from.
      *
      * nullptr if this chainstate was not created from a snapshot.
+     *
+     * The first call looks up the block index, which takes the tree lock, so this must not be called with
+     * that lock held.
      */
-    const CBlockIndex* SnapshotBase() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    const CBlockIndex* SnapshotBase() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_tree_mutex);
 
     //! Return target block which chainstate tip is expected to reach, if this
     //! is a historic chainstate being used to validate a snapshot, or null if
     //! chainstate targets the most-work block. Requires the block index to be
     //! loaded, so prefer TargetBlockHash() when the block itself is not needed.
-    const CBlockIndex* TargetBlock() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Like SnapshotBase(), must not be called with the tree lock held.
+    const CBlockIndex* TargetBlock() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_tree_mutex);
     //! Return hash of the target block, or nullopt if chainstate targets the
     //! most-work block. Unlike TargetBlock(), does not require the block index
     //! to be loaded.
@@ -674,7 +678,7 @@ public:
     void SetTargetBlockHash(uint256 block_hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Return true if chainstate reached target block.
-    bool ReachedTarget() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    bool ReachedTarget() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_tree_mutex)
     {
         const CBlockIndex* target_block{TargetBlock()};
         assert(!target_block || target_block->GetAncestor(m_chain.Height()) == m_chain.Tip());
@@ -854,7 +858,7 @@ public:
     //! Return the [start, end] (inclusive) of block heights we can prune.
     //!
     //! start > end is possible, meaning no blocks can be pruned.
-    std::pair<int, int> GetPruneRange(int last_height_can_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::pair<int, int> GetPruneRange(int last_height_can_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_blockman.m_tree_mutex);
 
 protected:
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex& index_most_work, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, std::vector<ConnectedBlock>& connected_blocks) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
@@ -1020,7 +1024,7 @@ public:
      *
      * By default this only executes fully when using the Regtest chain; see: m_options.check_block_index.
      */
-    void CheckBlockIndex() const;
+    void CheckBlockIndex() const EXCLUSIVE_LOCKS_REQUIRED(!m_blockman.m_tree_mutex, !m_blockman.m_store_mutex);
 
     /**
      * Alias for ::cs_main.
@@ -1180,12 +1184,6 @@ public:
      * `ImportBlocks()` finishes).
      */
     void UpdateIBDStatus() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-
-    node::BlockMap& BlockIndex() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
-    {
-        AssertLockHeld(::cs_main);
-        return m_blockman.m_block_index;
-    }
 
     /**
      * Track versionbit status

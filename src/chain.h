@@ -315,7 +315,6 @@ public:
 
     SERIALIZE_METHODS(CDiskBlockIndex, obj)
     {
-        LOCK(::cs_main);
         int _nVersion = DUMMY_VERSION;
         READWRITE(VARINT_MODE(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
 

@@ -69,13 +69,14 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain
     auto& blockman{chainman.m_blockman};
     const CBlockIndex* old_tip{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip())};
     const int old_tip_file{WITH_LOCK(chainman.GetMutex(), return blockman.GetBlockPos(*old_tip).nFile)};
-    WITH_LOCK(chainman.GetMutex(), blockman.GetBlockFileInfo(old_tip_file)->nSize = MAX_BLOCKFILE_SIZE);
+    WITH_LOCK(blockman.m_store_mutex, blockman.GetBlockFileInfo(old_tip_file)->nSize = MAX_BLOCKFILE_SIZE);
     CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
 
     // Prune the older block file, but don't unlink it
     const int file_number{WITH_LOCK(chainman.GetMutex(), return blockman.GetBlockPos(*old_tip).nFile)};
     {
         LOCK(chainman.GetMutex());
+        LOCK2(blockman.m_tree_mutex, blockman.m_store_mutex);
         blockman.PruneOneBlockFile(file_number);
     }
 
@@ -88,7 +89,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain
 
     // Check that the file is unlinked after ScanAndUnlinkAlreadyPrunedFiles
     // once m_have_pruned is set
-    blockman.m_have_pruned = true;
+    WITH_LOCK(blockman.m_store_mutex, blockman.m_have_pruned = true);
     WITH_LOCK(chainman.GetMutex(), blockman.ScanAndUnlinkAlreadyPrunedFiles());
     BOOST_CHECK(blockman.OpenBlockFile(pos, true).IsNull());
 
@@ -302,7 +303,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
 
     // Blockstore is empty
     LOCK(::cs_main);
-    BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), 0);
+    BOOST_CHECK_EQUAL(WITH_LOCK(blockman.m_store_mutex, return blockman.CalculateCurrentUsage()), 0);
 
     // Write the first block to a new location.
     FlatFilePos pos1{blockman.WriteBlock(block1, /*nHeight=*/1)};
@@ -311,7 +312,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     FlatFilePos pos2{blockman.WriteBlock(block2, /*nHeight=*/2)};
 
     // Two blocks in the file
-    BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), (TEST_BLOCK_SIZE + STORAGE_HEADER_BYTES) * 2);
+    BOOST_CHECK_EQUAL(WITH_LOCK(blockman.m_store_mutex, return blockman.CalculateCurrentUsage()), (TEST_BLOCK_SIZE + STORAGE_HEADER_BYTES) * 2);
 
     // First two blocks are written as expected
     // Errors are expected because block data is junk, thrown AFTER successful read
@@ -332,13 +333,13 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     // UpdateBlockInfo will, however, update the blockfile metadata.
     // Verify this behavior by attempting (and failing) to write block 3 data
     // to block 2 location.
-    CBlockFileInfo* block_data = blockman.GetBlockFileInfo(0);
+    CBlockFileInfo* block_data = WITH_LOCK(blockman.m_store_mutex, return blockman.GetBlockFileInfo(0));
     BOOST_CHECK_EQUAL(block_data->nBlocks, 2);
     blockman.UpdateBlockInfo(block3, /*nHeight=*/3, /*pos=*/pos2);
     // Metadata is updated...
     BOOST_CHECK_EQUAL(block_data->nBlocks, 3);
     // ...but there are still only two blocks in the file
-    BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), (TEST_BLOCK_SIZE + STORAGE_HEADER_BYTES) * 2);
+    BOOST_CHECK_EQUAL(WITH_LOCK(blockman.m_store_mutex, return blockman.CalculateCurrentUsage()), (TEST_BLOCK_SIZE + STORAGE_HEADER_BYTES) * 2);
 
     // Block 2 was not overwritten:
     BOOST_CHECK(!blockman.ReadBlock(read_block, pos2, {}));
@@ -347,7 +348,6 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
 
 BOOST_FIXTURE_TEST_CASE(prune_lock_update_and_delete, TestingSetup)
 {
-    LOCK(::cs_main);
     auto& chainman{*Assert(m_node.chainman)};
     auto& blockman{chainman.m_blockman};
 

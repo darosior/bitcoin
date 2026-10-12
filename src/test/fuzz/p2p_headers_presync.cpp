@@ -175,7 +175,7 @@ FUZZ_TARGET(p2p_headers_presync, .init = initialize)
     g_testing_setup->ResetAndInitialize();
 
     // The chain is just a single block, so this is equal to 1
-    size_t original_index_size{WITH_LOCK(cs_main, return chainman.m_blockman.m_block_index.size())};
+    size_t original_index_size{chainman.m_blockman.BlockIndexSize()};
     arith_uint256 total_work{WITH_LOCK(cs_main, return chainman.m_blockman.GetBestHeader()->nChainWork)};
 
     std::vector<CBlockHeader> all_headers;
@@ -237,5 +237,5 @@ FUZZ_TARGET(p2p_headers_presync, .init = initialize)
     // The headers/blocks sent in this test should never be stored, as the chains don't have the work required
     // to meet the anti-DoS work threshold. So, if at any point the block index grew in size, then there's a bug
     // in the headers pre-sync logic.
-    assert(WITH_LOCK(cs_main, return chainman.m_blockman.m_block_index.size()) == original_index_size);
+    assert(chainman.m_blockman.BlockIndexSize() == original_index_size);
 }

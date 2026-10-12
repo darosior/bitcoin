@@ -1477,7 +1477,7 @@ RPCMethod getblockchaininfo()
         obj.pushKV("backgroundvalidation", std::move(background_validation));
     }
     obj.pushKV("chainwork", tip.nChainWork.GetHex());
-    obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
+    obj.pushKV("size_on_disk", WITH_LOCK(chainman.m_blockman.m_store_mutex, return chainman.m_blockman.CalculateCurrentUsage()));
     obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
     if (chainman.m_blockman.IsPruneMode()) {
         const auto prune_height{GetPruneHeight(chainman.m_blockman, active_chainstate.m_chain)};
@@ -1643,7 +1643,7 @@ static RPCMethod getchaintips()
     /*
      * Idea: The set of chain tips is the active chain tip, plus orphan blocks which do not have another orphan building off of them.
      * Algorithm:
-     *  - Make one pass through BlockIndex(), picking out the orphan blocks, and also storing a set of the orphan block's pprev pointers.
+     *  - Make one pass through the block index, picking out the orphan blocks, and also storing a set of the orphan block's pprev pointers.
      *  - Iterate through the orphan blocks. If the block isn't pointed to by another orphan, it is a chain tip.
      *  - Add the active chain tip
      */
@@ -1651,10 +1651,13 @@ static RPCMethod getchaintips()
     std::set<const CBlockIndex*> setOrphans;
     std::set<const CBlockIndex*> setPrevs;
 
-    for (const auto& [_, block_index] : chainman.BlockIndex()) {
-        if (!active_chain.Contains(block_index)) {
-            setOrphans.insert(&block_index);
-            setPrevs.insert(block_index.pprev);
+    {
+        LOCK(chainman.m_blockman.m_tree_mutex);
+        for (const auto& [_, block_index] : chainman.m_blockman.m_block_index) {
+            if (!active_chain.Contains(block_index)) {
+                setOrphans.insert(&block_index);
+                setPrevs.insert(block_index.pprev);
+            }
         }
     }
 
@@ -3085,13 +3088,11 @@ class TemporaryPruneLock
 public:
     TemporaryPruneLock(BlockManager& blockman, int height) : m_blockman(blockman)
     {
-        LOCK(::cs_main);
         m_blockman.UpdatePruneLock(LOCK_NAME, {height});
         LogDebug(BCLog::PRUNE, "dumptxoutset: registered prune lock at height %d", height);
     }
     ~TemporaryPruneLock()
     {
-        LOCK(::cs_main);
         m_blockman.DeletePruneLock(LOCK_NAME);
         LogDebug(BCLog::PRUNE, "dumptxoutset: released prune lock");
     }

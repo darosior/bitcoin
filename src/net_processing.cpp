@@ -5038,13 +5038,12 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // compact blocks with less work than our tip, it is safe to treat
             // reconstructed compact blocks as having been requested.
             ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
-            LOCK(cs_main); // hold cs_main for CBlockIndex::IsValid()
             if (m_chainman.m_blockman.IsValid(*pindex, BLOCK_VALID_TRANSACTIONS)) {
                 // Clear download state for this block, which is in
                 // process from some other peer.  We do this after calling
                 // ProcessNewBlock so that a malleated cmpctblock announcement
                 // can't be used to interfere with block relay.
-                RemoveBlockRequest(pblock->GetHash(), std::nullopt);
+                WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), std::nullopt));
             }
         }
         return;

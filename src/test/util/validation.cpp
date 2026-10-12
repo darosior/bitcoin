@@ -33,7 +33,9 @@ using kernel::ChainstateRole;
 
 void TestBlockManager::CleanupForFuzzing()
 {
-    m_dirty_blockindex.clear();
+    WITH_LOCK(m_tree_mutex, m_dirty_tree_index.clear());
+    LOCK(m_store_mutex);
+    m_dirty_store_index.clear();
     m_dirty_fileinfo.clear();
     m_blockfile_info.resize(1);
 }

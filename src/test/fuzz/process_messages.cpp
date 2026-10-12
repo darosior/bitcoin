@@ -64,7 +64,7 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
     auto& connman{static_cast<ConnmanTestMsg&>(*node.connman)};
     connman.Reset();
     auto& chainman{static_cast<TestChainstateManager&>(*node.chainman)};
-    const auto block_index_size{WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size())};
+    const auto block_index_size{chainman.m_blockman.BlockIndexSize()};
     const auto initial_sequence{WITH_LOCK(node.mempool->cs, return node.mempool->GetSequence())};
     FakeNodeClock node_clock{1610000000s}; // 2021-01-07, arbitrary
     FakeSteadyClock steady_clock;
@@ -136,7 +136,7 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
     node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     node.connman->StopNodes();
     const auto end_sequence{WITH_LOCK(node.mempool->cs, return node.mempool->GetSequence())};
-    if (block_index_size != WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size()) || initial_sequence != end_sequence) {
+    if (block_index_size != chainman.m_blockman.BlockIndexSize() || initial_sequence != end_sequence) {
         // Reuse the global chainman and mempool, but reset them when dirty.
         MakeRandDeterministicDANGEROUS(uint256::ZERO);
         ResetChainmanAndMempool(*g_setup, node_clock, {.init_block_filter_basic = true});

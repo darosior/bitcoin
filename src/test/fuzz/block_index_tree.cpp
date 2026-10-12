@@ -107,7 +107,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                     CBlockIndex* it = chain.Tip();
                     while (it && it->nHeight != fork->nHeight) {
                         if (!(blockman.GetStorageStatus(*it) & BLOCK_HAVE_UNDO)) {
-                            assert(blockman.m_have_pruned);
+                            assert(WITH_LOCK(blockman.m_store_mutex, return blockman.m_have_pruned));
                             abort_run = true;
                             return;
                         }
@@ -159,7 +159,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 int prune_height = fuzzed_data_provider.ConsumeIntegralInRange<int>(0, chain.Height());
                 CBlockIndex* prune_block{chain[prune_height]};
                 if (prune_block != chain.Tip() && (blockman.GetStorageStatus(*prune_block) & BLOCK_HAVE_DATA)) {
-                    blockman.m_have_pruned = true;
+                    WITH_LOCK(blockman.m_store_mutex, blockman.m_have_pruned = true);
                     blockman.ModifyIndex(*prune_block, [](auto& f) {
                         f.nStorageStatus &= ~BLOCK_HAVE_DATA;
                         f.nStorageStatus &= ~BLOCK_HAVE_UNDO;
@@ -210,19 +210,22 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
         chainman.ActiveChainstate().setBlockIndexCandidates.clear();
         chainman.m_cached_is_ibd = true;
         blockman.m_blocks_unlinked.clear();
-        blockman.m_have_pruned = false;
+        WITH_LOCK(blockman.m_store_mutex, blockman.m_have_pruned = false);
         blockman.CleanupForFuzzing();
         // Delete all blocks but Genesis from block index
         uint256 genesis_hash = genesis->GetBlockHash();
-        for (auto it = blockman.m_block_index.begin(); it != blockman.m_block_index.end();) {
-            if (it->first != genesis_hash) {
-                it = blockman.m_block_index.erase(it);
-            } else {
-                ++it;
+        {
+            LOCK(blockman.m_tree_mutex);
+            for (auto it = blockman.m_block_index.begin(); it != blockman.m_block_index.end();) {
+                if (it->first != genesis_hash) {
+                    it = blockman.m_block_index.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
         chainman.ActiveChainstate().TryAddBlockIndexCandidate(genesis);
-        assert(blockman.m_block_index.size() == 1);
+        assert(blockman.BlockIndexSize() == 1);
         assert(chainman.ActiveChainstate().setBlockIndexCandidates.size() == 1);
         assert(chainman.ActiveChain().Height() == 0);
     }
