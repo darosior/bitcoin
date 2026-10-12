@@ -131,6 +131,7 @@ FUZZ_TARGET(process_message, .init = initialize_process_message)
         node.peerman->SendMessages(p2p_node);
     }
     node.validation_signals->SyncWithValidationInterfaceQueue();
+    node.peerman->ProcessPendingEvents();
     node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     node.connman->StopNodes();
     const auto end_sequence{WITH_LOCK(node.mempool->cs, return node.mempool->GetSequence())};

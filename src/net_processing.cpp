@@ -59,6 +59,7 @@
 #include <util/check.h>
 #include <util/hasher.h>
 #include <util/strencodings.h>
+#include <util/overloaded.h>
 #include <util/time.h>
 #include <util/tokenbucket.h>
 #include <util/trace.h>
@@ -89,6 +90,7 @@
 #include <typeinfo>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 using kernel::ChainstateRole;
 using namespace util::hex_literals;
@@ -574,21 +576,26 @@ public:
                     BanMan* banman, ChainstateManager& chainman,
                     CTxMemPool& pool, node::Warnings& warnings, Options opts);
 
-    /** Overridden from CValidationInterface. */
+    /** Overridden from CValidationInterface.
+     * ActiveTipChange, UpdatedBlockTip and BlockChecked only queue an event, which is processed by the message
+     * handler thread, see ProcessPendingEvents(). NewPoWValidBlock, BlockConnected and BlockDisconnected do their
+     * work right away, see the comment of BlockConnected(). */
     void ActiveTipChange(const CBlockIndex& new_tip, bool) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
     void BlockConnected(const ChainstateRole& role, const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void BlockDisconnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex* pindex) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
     void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
     void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex);
 
     /** Implement NetEventsInterface */
+    void ProcessPendingEvents() override
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex);
     void InitializeNode(const CNode& node, ServiceFlags our_services) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_tx_download_mutex);
     void FinalizeNode(const CNode& node) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, !m_tx_download_mutex);
     bool HasAllDesirableServiceFlags(ServiceFlags services) const override;
@@ -1069,6 +1076,42 @@ private:
 
     /** Process a new block. Perform any post-processing housekeeping */
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked);
+    //! What validation tells us, queued by the callbacks of CValidationInterface and processed in the order they came
+    //! in by the message handler thread, in ProcessPendingEvents(). They hold the arguments of the callbacks: the
+    //! block index entries are never removed, so the pointers to them stay valid.
+    //!
+    //! Events must stay small, and must not hold a block. While validation runs on the message handler thread, as
+    //! it does for now, a single ActivateBestChain() can connect hundreds of blocks before the thread gets to drain
+    //! the queue, and nothing limits the queue: LimitValidationInterfaceQueue() only limits the scheduler's.
+    struct ActiveTipChangeEvent {
+        const CBlockIndex* new_tip;
+        bool is_ibd;
+    };
+    struct UpdatedBlockTipEvent {
+        const CBlockIndex* new_tip;
+        const CBlockIndex* fork;
+        bool is_ibd;
+    };
+    struct BlockCheckedEvent {
+        uint256 block_hash;
+        BlockValidationState state;
+    };
+    using ValidationEvent = std::variant<ActiveTipChangeEvent, UpdatedBlockTipEvent, BlockCheckedEvent>;
+
+    //! Events that were not processed when the PeerManager is destroyed are dropped with it. Nothing is done with
+    //! them then, and they are not dereferenced; the PeerManager is unregistered from the validation interface
+    //! before that, so none is added anymore.
+    Mutex m_validation_events_mutex;
+    std::deque<ValidationEvent> m_validation_events GUARDED_BY(m_validation_events_mutex);
+
+    /** Queue an event, and wake up the message handler thread, which processes it. Called from any thread. */
+    void QueueValidationEvent(ValidationEvent event) EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
+
+    /** Processing of the events. They are what the callbacks of CValidationInterface used to do on the spot. */
+    void OnActiveTipChange(const CBlockIndex& new_tip, bool is_ibd) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
+    void OnUpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    void OnBlockChecked(const uint256& hash, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+
     /** What is done once a block was processed, whether or not it was accepted. It is called with no lock held. */
     void OnBlockProcessed(const ValidationJobs::BlockAccepted& processed) LOCKS_EXCLUDED(::cs_main);
 
@@ -2196,7 +2239,56 @@ void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
     }
 }
 
+void PeerManagerImpl::QueueValidationEvent(ValidationEvent event)
+{
+    {
+        LOCK(m_validation_events_mutex);
+        m_validation_events.push_back(std::move(event));
+    }
+    m_connman.WakeMessageHandler();
+}
+
 void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
+{
+    QueueValidationEvent(ActiveTipChangeEvent{&new_tip, is_ibd});
+}
+
+void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload)
+{
+    QueueValidationEvent(UpdatedBlockTipEvent{pindexNew, pindexFork, fInitialDownload});
+}
+
+void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state)
+{
+    QueueValidationEvent(BlockCheckedEvent{block->GetHash(), state});
+}
+
+void PeerManagerImpl::ProcessPendingEvents()
+{
+    AssertLockHeld(g_msgproc_mutex);
+    // The handlers of the events can take most of the locks of this class, so none of them is held while they run.
+    AssertLockNotHeld(m_validation_events_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
+    AssertLockNotHeld(m_peer_mutex);
+
+    while (true) {
+        std::deque<ValidationEvent> events;
+        {
+            LOCK(m_validation_events_mutex);
+            events.swap(m_validation_events);
+        }
+        if (events.empty()) return;
+        for (const ValidationEvent& event : events) {
+            std::visit(util::Overloaded{
+                [&](const ActiveTipChangeEvent& e) { OnActiveTipChange(*e.new_tip, e.is_ibd); },
+                [&](const UpdatedBlockTipEvent& e) { OnUpdatedBlockTip(e.new_tip, e.fork, e.is_ibd); },
+                [&](const BlockCheckedEvent& e) { OnBlockChecked(e.block_hash, e.state); },
+            }, event);
+        }
+    }
+}
+
+void PeerManagerImpl::OnActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
 {
     // Ensure mempool mutex was released, otherwise deadlock may occur if another thread holding
     // m_tx_download_mutex waits on the mempool mutex.
@@ -2217,6 +2309,11 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
  * block, remember the recently confirmed transactions, and delete tracked
  * announcements for them. Also save the time of the last tip update and
  * possibly reduce dynamic block stalling timeout.
+ *
+ * Unlike the other notifications from validation, this one and BlockDisconnected() are not queued as events for the
+ * message handler thread: they need the block, and holding blocks in the event queue is not bounded while validation
+ * runs on that thread (see ValidationEvent). Running them here, on the scheduler thread, is what was done before;
+ * they take no lock but m_tx_download_mutex.
  */
 void PeerManagerImpl::BlockConnected(
     const ChainstateRole& role,
@@ -2311,7 +2408,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
  * Update our best height and announce any block hashes which weren't previously
  * in m_chainman.ActiveChain() to our peers.
  */
-void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
+void PeerManagerImpl::OnUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
 {
     SetBestBlock(pindexNew->nHeight, std::chrono::seconds{pindexNew->GetBlockTime()});
 
@@ -2349,11 +2446,10 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
  * Handle invalid block rejection and consequent peer discouragement, maintain which
  * peers announce compact blocks.
  */
-void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state)
+void PeerManagerImpl::OnBlockChecked(const uint256& hash, const BlockValidationState& state)
 {
     LOCK(cs_main);
 
-    const uint256 hash(block->GetHash());
     std::map<uint256, std::pair<NodeId, bool>>::iterator it = mapBlockSource.find(hash);
 
     // If the block failed validation, we know where it came from and we're still connected
@@ -2622,7 +2718,8 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     if (need_activate_chain) {
         // The rest of this function runs right after, since the job is run inline. Once it is not, it has to
         // wait for the result: the block is not served before the chain is activated.
-        m_validation.ActivateBestChain(a_recent_block, [](const ValidationJobs::ChainActivated& activated) {
+        m_validation.ActivateBestChain(a_recent_block, [this](const ValidationJobs::ChainActivated& activated) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+            ProcessPendingEvents();
             if (!activated.success) {
                 LogDebug(BCLog::NET, "failed to activate chain (%s)\n", activated.state.ToString());
             }
@@ -3765,12 +3862,18 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
 {
     // First accept and store the block, then activate the best chain, as ProcessNewBlock() does. What is done
     // with the outcome comes last, after the activation, or right after the block was rejected.
-    m_validation.AcceptBlock(node.GetId(), block, force_processing, min_pow_checked, [this](const ValidationJobs::BlockAccepted& accepted) {
+    //
+    // The events that validation produced while it worked (BlockChecked, which punishes the peer that sent an invalid
+    // block, ActiveTipChange, which resets the filters of rejected transactions, and the others) are processed first
+    // by each continuation, so that they take effect before the outcome is handled and before the next message is.
+    m_validation.AcceptBlock(node.GetId(), block, force_processing, min_pow_checked, [this](const ValidationJobs::BlockAccepted& accepted) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        ProcessPendingEvents();
         if (!accepted.accepted) {
             OnBlockProcessed(accepted);
             return;
         }
-        m_validation.ActivateBlock(accepted.from, accepted.block, [this, accepted](const ValidationJobs::BlockActivated&) {
+        m_validation.ActivateBlock(accepted.from, accepted.block, [this, accepted](const ValidationJobs::BlockActivated&) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+            ProcessPendingEvents();
             OnBlockProcessed(accepted);
         });
     });
@@ -4617,7 +4720,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 a_recent_block = m_most_recent_block;
             }
             // As in ProcessGetBlockData(), what follows has to wait for the result once jobs are not inline.
-            m_validation.ActivateBestChain(a_recent_block, [](const ValidationJobs::ChainActivated& activated) {
+            m_validation.ActivateBestChain(a_recent_block, [this](const ValidationJobs::ChainActivated& activated) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+                ProcessPendingEvents();
                 if (!activated.success) {
                     LogDebug(BCLog::NET, "failed to activate chain (%s)\n", activated.state.ToString());
                 }

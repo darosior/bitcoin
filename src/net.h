@@ -1073,6 +1073,11 @@ public:
      */
     virtual bool SendMessages(CNode& node) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
 
+    /**
+     * Process what validation has told us since the last time this was called, in the order it happened.
+     * The message handler thread calls it at the start of each of its passes, before it processes any peer.
+     */
+    virtual void ProcessPendingEvents() EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
 
 protected:
     /**

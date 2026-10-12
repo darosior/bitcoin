@@ -28,7 +28,7 @@ BOOST_FIXTURE_TEST_SUITE(peerman_tests, RegTestingSetup)
 /** Window, in blocks, for connecting to NODE_NETWORK_LIMITED peers */
 static constexpr int64_t NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS = 144;
 
-static void mineBlock(node::NodeContext& node, FakeNodeClock& clock, std::chrono::seconds block_time)
+static void mineBlock(node::NodeContext& node, PeerManager& peerman, FakeNodeClock& clock, std::chrono::seconds block_time)
 {
     auto curr_time = GetTime<std::chrono::seconds>();
     clock.set(block_time); // update time so the block is created with it
@@ -41,6 +41,9 @@ static void mineBlock(node::NodeContext& node, FakeNodeClock& clock, std::chrono
     clock.set(curr_time); // process block at current time
     Assert(node.chainman->ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/true, /*min_pow_checked=*/true, nullptr));
     node.validation_signals->SyncWithValidationInterfaceQueue(); // drain events queue
+    // The notifications reach peerman as events, which the message handler thread processes.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    peerman.ProcessPendingEvents();
 }
 
 // Verifying when network-limited peer connections are desirable based on the node's proximity to the tip
@@ -77,11 +80,11 @@ BOOST_AUTO_TEST_CASE(connections_desirable_service_flags)
 
     // First, verify a block in the past doesn't enable limited peers connections
     // At this point, our time is (NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS + 1) * 10 minutes ahead the tip's time.
-    mineBlock(m_node, clock, /*block_time=*/std::chrono::seconds{tip_block_time + 1});
+    mineBlock(m_node, *peerman, clock, /*block_time=*/std::chrono::seconds{tip_block_time + 1});
     BOOST_CHECK(peerman->GetDesirableServiceFlags(peer_flags) == ServiceFlags(NODE_NETWORK | NODE_WITNESS));
 
     // Verify a block close to the tip enables limited peers connections
-    mineBlock(m_node, clock, /*block_time=*/GetTime<std::chrono::seconds>());
+    mineBlock(m_node, *peerman, clock, /*block_time=*/GetTime<std::chrono::seconds>());
     BOOST_CHECK(peerman->GetDesirableServiceFlags(peer_flags) == ServiceFlags(NODE_NETWORK_LIMITED | NODE_WITNESS));
 
     // Lastly, verify the stale tip checks can disallow limited peers connections after not receiving blocks for a prolonged period.
