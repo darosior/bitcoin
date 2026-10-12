@@ -806,10 +806,7 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
-    /** Set invalidity status to all descendants of a block */
-    void SetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-
-    /** Remove invalidity status from a block, its descendants and ancestors and reconsider them for activation */
+    /** Remove invalidity status from a block, its descendants and ancestors and reconsider them for activation. Also recalculates the best header. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Replay blocks that aren't fully applied to the database. */
@@ -1368,11 +1365,6 @@ public:
 
     //! Call ActivateBestChain() on every chainstate.
     util::Result<void> ActivateBestChains() LOCKS_EXCLUDED(::cs_main);
-
-    //! If, due to invalidation / reconsideration of blocks, the previous
-    //! best header is no longer valid / guaranteed to be the most-work
-    //! header in our block-index not known to be invalid, recalculate it.
-    void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Returns how many blocks the best header is ahead of the current tip,
     //! or nullopt if the best header does not extend the tip.

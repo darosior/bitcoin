@@ -272,9 +272,65 @@ bool BlockManager::RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo)
 
     if ((index.nValidityStatus & BLOCK_VALID_MASK) < nUpTo) {
         index.nValidityStatus = (index.nValidityStatus & ~BLOCK_VALID_MASK) | nUpTo;
+        m_dirty_blockindex.insert(&index);
         return true;
     }
     return false;
+}
+
+void BlockManager::RecalculateBestHeader(CBlockIndex* active_tip)
+{
+    AssertLockHeld(::cs_main);
+    m_best_header = active_tip;
+    for (auto& [_, block_index] : m_block_index) {
+        if (!(block_index.nValidityStatus & BLOCK_FAILED_VALID) && m_best_header->nChainWork < block_index.nChainWork) {
+            m_best_header = &block_index;
+        }
+    }
+}
+
+void BlockManager::SetFailed(CBlockIndex& block)
+{
+    AssertLockHeld(::cs_main);
+    block.nValidityStatus |= BLOCK_FAILED_VALID;
+    m_dirty_blockindex.insert(&block);
+}
+
+void BlockManager::MarkFailed(CBlockIndex& block, CBlockIndex* active_tip)
+{
+    AssertLockHeld(::cs_main);
+    SetFailed(block);
+    for (auto& [_, block_index] : m_block_index) {
+        if (&block != &block_index && block_index.GetAncestor(block.nHeight) == &block) {
+            SetFailed(block_index);
+        }
+    }
+    if (m_best_header != nullptr && m_best_header->GetAncestor(block.nHeight) == &block) {
+        RecalculateBestHeader(active_tip);
+    }
+}
+
+std::vector<CBlockIndex*> BlockManager::ResetFailed(CBlockIndex& block, CBlockIndex* active_tip)
+{
+    AssertLockHeld(::cs_main);
+    std::vector<CBlockIndex*> cleared;
+    // Remove the invalidity flag from this block and all its descendants and ancestors.
+    for (auto& [_, block_index] : m_block_index) {
+        if ((block_index.nValidityStatus & BLOCK_FAILED_VALID) && (block_index.GetAncestor(block.nHeight) == &block || block.GetAncestor(block_index.nHeight) == &block_index)) {
+            block_index.nValidityStatus &= ~BLOCK_FAILED_VALID;
+            m_dirty_blockindex.insert(&block_index);
+            cleared.push_back(&block_index);
+        }
+    }
+    RecalculateBestHeader(active_tip);
+    return cleared;
+}
+
+void BlockManager::SetOptWitness(CBlockIndex& block)
+{
+    AssertLockHeld(::cs_main);
+    block.nStorageStatus |= BLOCK_OPT_WITNESS;
+    m_dirty_blockindex.insert(&block);
 }
 
 void BlockManager::RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness)
@@ -333,17 +389,6 @@ void BlockManager::SetBestHeaderIfUnset(CBlockIndex* index)
 {
     AssertLockHeld(::cs_main);
     if (m_best_header == nullptr) m_best_header = index;
-}
-
-void BlockManager::RecalculateBestHeader(CBlockIndex* active_tip)
-{
-    AssertLockHeld(::cs_main);
-    m_best_header = active_tip;
-    for (auto& [_, block_index] : m_block_index) {
-        if (!(GetValidityStatus(block_index) & BLOCK_FAILED_VALID) && m_best_header->nChainWork < block_index.nChainWork) {
-            m_best_header = &block_index;
-        }
-    }
 }
 
 CBlockIndex* BlockManager::UpdateLastNotifiedHeader()

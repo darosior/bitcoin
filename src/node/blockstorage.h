@@ -307,6 +307,9 @@ private:
     //! See GetBestHeader().
     CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
 
+    //! Set the best header to the most-work entry that is not known to be invalid, or to `active_tip` if it has more work.
+    void RecalculateBestHeader(CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     //! The last header for which a headerTip notification was issued.
     CBlockIndex* m_last_notified_header GUARDED_BY(::cs_main){nullptr};
 
@@ -364,8 +367,6 @@ public:
     void SetBestHeader(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Set the best header to `index`, unless one is already set.
     void SetBestHeaderIfUnset(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    //! Recalculate the best header: the most-work entry that is not known to be invalid, or `active_tip` if it has more work.
-    void RecalculateBestHeader(CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Return the best header and remember it as the last one that was notified, unless it already was.
     //! Returns nullptr if the last notified header is the best header.
     CBlockIndex* UpdateLastNotifiedHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -394,8 +395,29 @@ public:
     FlatFilePos GetUndoPos(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Check whether this block index entry is valid up to the passed validity level.
     bool IsValid(const CBlockIndex& index, enum BlockStatus nUpTo) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    //! Raise the validity level of this block index entry. Returns true if the validity was changed.
+    //! Raise the validity level of this block index entry, and flag it for writing if it changed. Returns true if the validity was changed.
     bool RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Mark a block as failed (BLOCK_FAILED_VALID), and flag it for writing. Its descendants and the best header are left alone. */
+    void SetFailed(CBlockIndex& block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Mark a block and all its descendants as failed, and flag them for writing. If the best header was on the
+     * failed branch, recalculate it, with `active_tip` as the fallback. The block, its descendants and the best
+     * header are updated as a whole, so nobody sees the best header on a failed chain.
+     *
+     * The descendants are found by walking the whole block index, which is what has always been done.
+     */
+    void MarkFailed(CBlockIndex& block, CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Remove the failure flag from a block, its descendants and its ancestors, flag them for writing, and
+     * recalculate the best header, with `active_tip` as the fallback. Returns the entries that were failed.
+     */
+    std::vector<CBlockIndex*> ResetFailed(CBlockIndex& block, CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Set BLOCK_OPT_WITNESS on a block, and flag it for writing. */
+    void SetOptWitness(CBlockIndex& block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * Record that the full data of a block was written at `pos`: its position, its number of transactions and
