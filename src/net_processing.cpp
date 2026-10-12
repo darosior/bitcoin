@@ -1604,7 +1604,7 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 return;
             }
 
-            if (m_chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA || (activeChain && activeChain->Contains(*pindex))) {
+            if (m_chainman.m_blockman.GetStorageStatus(*pindex) & BLOCK_HAVE_DATA || (activeChain && activeChain->Contains(*pindex))) {
                 if (activeChain && pindex->HaveNumChainTxs()) {
                     state->pindexLastCommonBlock = pindex;
                 }
@@ -2639,7 +2639,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         }
         // Pruned nodes may have deleted the block, so check whether
         // it's available before trying to send.
-        if (!(m_chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA)) {
+        if (!(m_chainman.m_blockman.GetStorageStatus(*pindex) & BLOCK_HAVE_DATA)) {
             return;
         }
         can_direct_fetch = CanDirectFetch();
@@ -3108,7 +3108,7 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         const CBlockIndex* pindexWalk{&last_header};
         // Calculate all the blocks we'd need to switch to last_header, up to a limit.
         while (pindexWalk && !m_chainman.ActiveChain().Contains(*pindexWalk) && vToFetch.size() <= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
-            if (!(m_chainman.m_blockman.GetStatus(*pindexWalk) & BLOCK_HAVE_DATA) &&
+            if (!(m_chainman.m_blockman.GetStorageStatus(*pindexWalk) & BLOCK_HAVE_DATA) &&
                     !IsBlockRequested(pindexWalk->GetBlockHash()) &&
                     (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) || CanServeWitnesses(peer))) {
                 // We don't have this block, and it's not yet in flight.
@@ -4542,7 +4542,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // If pruning, don't inv blocks unless we have on disk and are likely to still have
             // for some reasonable time window (1 hour) that block relay might require.
             const int nPrunedBlocksLikelyToHave = MIN_BLOCKS_TO_KEEP - 3600 / m_chainparams.GetConsensus().nPowTargetSpacing;
-            if (m_chainman.m_blockman.IsPruneMode() && (!(m_chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA) || pindex->nHeight <= m_chainman.ActiveChain().Tip()->nHeight - nPrunedBlocksLikelyToHave)) {
+            if (m_chainman.m_blockman.IsPruneMode() && (!(m_chainman.m_blockman.GetStorageStatus(*pindex) & BLOCK_HAVE_DATA) || pindex->nHeight <= m_chainman.ActiveChain().Tip()->nHeight - nPrunedBlocksLikelyToHave)) {
                 LogDebug(BCLog::NET, " getblocks stopping, pruned or too old block at %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
                 break;
             }
@@ -4592,7 +4592,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             LOCK(cs_main);
 
             const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(req.blockhash);
-            if (!pindex || !(m_chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA)) {
+            if (!pindex || !(m_chainman.m_blockman.GetStorageStatus(*pindex) & BLOCK_HAVE_DATA)) {
                 LogDebug(BCLog::NET, "Peer %d sent us a getblocktxn for a block we don't have\n", pfrom.GetId());
                 return;
             }
@@ -4867,7 +4867,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             nodestate->m_last_block_announcement = NodeClock::now();
         }
 
-        if (m_chainman.m_blockman.GetStatus(*pindex) & BLOCK_HAVE_DATA) // Nothing to do here
+        if (m_chainman.m_blockman.GetStorageStatus(*pindex) & BLOCK_HAVE_DATA) // Nothing to do here
             return;
 
         auto range_flight = mapBlocksInFlight.equal_range(pindex->GetBlockHash());

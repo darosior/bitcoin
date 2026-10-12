@@ -570,7 +570,7 @@ public:
     {
         LOCK(::cs_main);
         const CBlockIndex* block{chainman().ActiveChain()[height]};
-        return block && ((chainman().m_blockman.GetStatus(*block) & BLOCK_HAVE_DATA) != 0) && chainman().m_blockman.GetNumTx(*block) > 0;
+        return block && ((chainman().m_blockman.GetStorageStatus(*block) & BLOCK_HAVE_DATA) != 0) && chainman().m_blockman.GetNumTx(*block) > 0;
     }
     std::optional<int> findLocatorFork(const CBlockLocator& locator) override
     {
@@ -656,7 +656,7 @@ public:
         LOCK(::cs_main);
         if (const CBlockIndex* block = chainman().m_blockman.LookupBlockIndex(block_hash)) {
             if (max_height && block->nHeight >= *max_height) block = block->GetAncestor(*max_height);
-            for (; chainman().m_blockman.GetStatus(*block) & BLOCK_HAVE_DATA; block = block->pprev) {
+            for (; chainman().m_blockman.GetStorageStatus(*block) & BLOCK_HAVE_DATA; block = block->pprev) {
                 // Check pprev to not segfault if min_height is too low
                 if (block->nHeight <= min_height || !block->pprev) return true;
             }

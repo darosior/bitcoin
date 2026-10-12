@@ -83,6 +83,11 @@ enum BlockStatus : uint32_t {
 
     BLOCK_STATUS_RESERVED    =   256, //!< Unused flag that was previously set on assumeutxo snapshot blocks and their
                                       //!< ancestors before they were validated, and unset when they were validated.
+
+    //! Status bits that describe the block's data on disk. They belong to the block store.
+    //! All other bits (the validity levels and the failure flags) belong to the block tree.
+    //! The two halves are kept apart in memory, and only combined in the block index database.
+    BLOCK_STORAGE_MASK       =   BLOCK_HAVE_MASK | BLOCK_OPT_WITNESS,
 };
 
 namespace kernel {
@@ -240,13 +245,19 @@ protected:
     //! Note: in a potential headers-first mode, this number cannot be relied upon
     unsigned int nTx{0};
 
-    //! Verification status of this block. See enum BlockStatus
+    //! Validity part of the status of this block: the BLOCK_VALID_* levels, the failure flags and
+    //! every other bit that is not in BLOCK_STORAGE_MASK. See enum BlockStatus.
+    //! Owned by the block tree.
+    uint32_t nValidityStatus{0};
+
+    //! Storage part of the status of this block: the bits in BLOCK_STORAGE_MASK. See enum BlockStatus.
+    //! Owned by the block store.
     //!
     //! Note: this value is modified to show BLOCK_OPT_WITNESS during UTXO snapshot
     //! load to avoid a spurious startup failure requiring -reindex.
     //! @sa NeedsRedownload
     //! @sa ActivateSnapshot
-    uint32_t nStatus{0};
+    uint32_t nStorageStatus{0};
 
     //! CBlockIndex should not allow public copy construction because equality
     //! comparison via pointer is very common throughout the codebase, making
@@ -309,11 +320,15 @@ public:
         READWRITE(VARINT_MODE(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
 
         READWRITE(VARINT_MODE(obj.nHeight, VarIntMode::NONNEGATIVE_SIGNED));
-        READWRITE(VARINT(obj.nStatus));
+        // The database holds a single status word. Combine the two parts when writing, and split them when reading.
+        uint32_t status{};
+        SER_WRITE(obj, status = obj.nValidityStatus | obj.nStorageStatus);
+        READWRITE(VARINT(status));
+        SER_READ(obj, obj.nValidityStatus = status & ~BLOCK_STORAGE_MASK; obj.nStorageStatus = status & BLOCK_STORAGE_MASK);
         READWRITE(VARINT(obj.nTx));
-        if (obj.nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) READWRITE(VARINT_MODE(obj.nFile, VarIntMode::NONNEGATIVE_SIGNED));
-        if (obj.nStatus & BLOCK_HAVE_DATA) READWRITE(VARINT(obj.nDataPos));
-        if (obj.nStatus & BLOCK_HAVE_UNDO) READWRITE(VARINT(obj.nUndoPos));
+        if (status & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) READWRITE(VARINT_MODE(obj.nFile, VarIntMode::NONNEGATIVE_SIGNED));
+        if (status & BLOCK_HAVE_DATA) READWRITE(VARINT(obj.nDataPos));
+        if (status & BLOCK_HAVE_UNDO) READWRITE(VARINT(obj.nUndoPos));
 
         // block header
         READWRITE(obj.nVersion);

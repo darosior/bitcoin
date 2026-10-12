@@ -101,7 +101,8 @@ CreateAndActivateUTXOSnapshot(
                 // CheckBlockIndex().
                 assert(chain.m_blockman.IsValid(*pindex, BlockStatus::BLOCK_VALID_TREE));
                 chain.m_blockman.ModifyIndex(*pindex, [](auto& f) {
-                    f.nStatus = BlockStatus::BLOCK_VALID_TREE;
+                    f.nValidityStatus = BlockStatus::BLOCK_VALID_TREE;
+                    f.nStorageStatus = 0;
                     f.nTx = 0;
                 });
                 pindex->m_chain_tx_count = 0;

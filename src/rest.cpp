@@ -447,7 +447,7 @@ static bool rest_block(const std::any& context,
         if (!pblockindex) {
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
         }
-        if (!(chainman.m_blockman.GetStatus(*pblockindex) & BLOCK_HAVE_DATA)) {
+        if (!(chainman.m_blockman.GetStorageStatus(*pblockindex) & BLOCK_HAVE_DATA)) {
             if (chainman.m_blockman.IsBlockPruned(*pblockindex)) {
                 return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (pruned data)");
             }

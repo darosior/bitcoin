@@ -142,7 +142,8 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
-                pindexNew->nStatus        = diskindex.nStatus;
+                pindexNew->nValidityStatus = diskindex.nValidityStatus;
+                pindexNew->nStorageStatus = diskindex.nStorageStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
                 if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams)) {
@@ -196,10 +197,16 @@ bool CBlockIndexHeightOnlyComparator::operator()(const CBlockIndex* pa, const CB
     return pa->nHeight < pb->nHeight;
 }
 
-uint32_t BlockManager::GetStatus(const CBlockIndex& index) const
+uint32_t BlockManager::GetValidityStatus(const CBlockIndex& index) const
 {
     AssertLockHeld(::cs_main);
-    return index.nStatus;
+    return index.nValidityStatus;
+}
+
+uint32_t BlockManager::GetStorageStatus(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    return index.nStorageStatus;
 }
 
 unsigned int BlockManager::GetNumTx(const CBlockIndex& index) const
@@ -230,7 +237,7 @@ FlatFilePos BlockManager::GetBlockPos(const CBlockIndex& index) const
 {
     AssertLockHeld(::cs_main);
     FlatFilePos ret;
-    if (index.nStatus & BLOCK_HAVE_DATA) {
+    if (index.nStorageStatus & BLOCK_HAVE_DATA) {
         ret.nFile = index.nFile;
         ret.nPos = index.nDataPos;
     }
@@ -241,7 +248,7 @@ FlatFilePos BlockManager::GetUndoPos(const CBlockIndex& index) const
 {
     AssertLockHeld(::cs_main);
     FlatFilePos ret;
-    if (index.nStatus & BLOCK_HAVE_UNDO) {
+    if (index.nStorageStatus & BLOCK_HAVE_UNDO) {
         ret.nFile = index.nFile;
         ret.nPos = index.nUndoPos;
     }
@@ -252,19 +259,19 @@ bool BlockManager::IsValid(const CBlockIndex& index, enum BlockStatus nUpTo) con
 {
     AssertLockHeld(::cs_main);
     assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
-    if (index.nStatus & BLOCK_FAILED_VALID)
+    if (index.nValidityStatus & BLOCK_FAILED_VALID)
         return false;
-    return ((index.nStatus & BLOCK_VALID_MASK) >= nUpTo);
+    return ((index.nValidityStatus & BLOCK_VALID_MASK) >= nUpTo);
 }
 
 bool BlockManager::RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo)
 {
     AssertLockHeld(::cs_main);
     assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
-    if (index.nStatus & BLOCK_FAILED_VALID) return false;
+    if (index.nValidityStatus & BLOCK_FAILED_VALID) return false;
 
-    if ((index.nStatus & BLOCK_VALID_MASK) < nUpTo) {
-        index.nStatus = (index.nStatus & ~BLOCK_VALID_MASK) | nUpTo;
+    if ((index.nValidityStatus & BLOCK_VALID_MASK) < nUpTo) {
+        index.nValidityStatus = (index.nValidityStatus & ~BLOCK_VALID_MASK) | nUpTo;
         return true;
     }
     return false;
@@ -332,7 +339,7 @@ void BlockManager::AddUnlinkedBlock(CBlockIndex* block)
 {
     AssertLockHeld(cs_main);
     Assume(block != nullptr);
-    Assume(block->nStatus & BLOCK_HAVE_DATA);
+    Assume(block->nStorageStatus & BLOCK_HAVE_DATA);
     auto range = m_blocks_unlinked.equal_range(block->pprev);
     for (auto it = range.first; it != range.second; ++it) {
         if (it->second == block) return;  // don't insert duplicates
@@ -347,8 +354,8 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
     for (auto& entry : m_block_index) {
         CBlockIndex* pindex = &entry.second;
         if (pindex->nFile == fileNumber) {
-            pindex->nStatus &= ~BLOCK_HAVE_DATA;
-            pindex->nStatus &= ~BLOCK_HAVE_UNDO;
+            pindex->nStorageStatus &= ~BLOCK_HAVE_DATA;
+            pindex->nStorageStatus &= ~BLOCK_HAVE_UNDO;
             pindex->nFile = 0;
             pindex->nDataPos = 0;
             pindex->nUndoPos = 0;
@@ -571,7 +578,7 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
                     pindex->m_chain_tx_count = pindex->pprev->m_chain_tx_count + pindex->nTx;
                 } else {
                     pindex->m_chain_tx_count = 0;
-                    if (pindex->nStatus & BLOCK_HAVE_DATA) {
+                    if (pindex->nStorageStatus & BLOCK_HAVE_DATA) {
                         AddUnlinkedBlock(pindex);
                     }
                 }
@@ -580,14 +587,14 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             }
         }
 
-        if (pindex->nStatus & BLOCK_FAILED_CHILD) {
+        if (pindex->nValidityStatus & BLOCK_FAILED_CHILD) {
             // BLOCK_FAILED_CHILD is deprecated, but may still exist on disk. Replace it with BLOCK_FAILED_VALID.
-            pindex->nStatus = (pindex->nStatus & ~BLOCK_FAILED_CHILD) | BLOCK_FAILED_VALID;
+            pindex->nValidityStatus = (pindex->nValidityStatus & ~BLOCK_FAILED_CHILD) | BLOCK_FAILED_VALID;
             m_dirty_blockindex.insert(pindex);
         }
-        if (!(pindex->nStatus & BLOCK_FAILED_VALID) && pindex->pprev && (pindex->pprev->nStatus & BLOCK_FAILED_VALID)) {
+        if (!(pindex->nValidityStatus & BLOCK_FAILED_VALID) && pindex->pprev && (pindex->pprev->nValidityStatus & BLOCK_FAILED_VALID)) {
             // All descendants of invalid blocks are invalid too.
-            pindex->nStatus |= BLOCK_FAILED_VALID;
+            pindex->nValidityStatus |= BLOCK_FAILED_VALID;
             m_dirty_blockindex.insert(pindex);
         }
 
@@ -647,7 +654,7 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     LogInfo("Checking all blk files are present...");
     std::set<int> setBlkDataFiles;
     for (const auto& [_, block_index] : m_block_index) {
-        if (block_index.nStatus & BLOCK_HAVE_DATA) {
+        if (block_index.nStorageStatus & BLOCK_HAVE_DATA) {
             setBlkDataFiles.insert(block_index.nFile);
         }
     }
@@ -701,15 +708,16 @@ void BlockManager::ScanAndUnlinkAlreadyPrunedFiles()
 bool BlockManager::IsBlockPruned(const CBlockIndex& block) const
 {
     AssertLockHeld(::cs_main);
-    return m_have_pruned && !(block.nStatus & BLOCK_HAVE_DATA) && (block.nTx > 0);
+    return m_have_pruned && !(block.nStorageStatus & BLOCK_HAVE_DATA) && (block.nTx > 0);
 }
 
 const CBlockIndex& BlockManager::GetFirstBlock(const CBlockIndex& upper_block, uint32_t status_mask, const CBlockIndex* lower_block) const
 {
     AssertLockHeld(::cs_main);
     const CBlockIndex* last_block = &upper_block;
-    assert((last_block->nStatus & status_mask) == status_mask); // 'upper_block' must satisfy the status mask
-    while (last_block->pprev && ((last_block->pprev->nStatus & status_mask) == status_mask)) {
+    assert(!(status_mask & ~BLOCK_STORAGE_MASK)); // only storage bits can be tested
+    assert((last_block->nStorageStatus & status_mask) == status_mask); // 'upper_block' must satisfy the status mask
+    while (last_block->pprev && ((last_block->pprev->nStorageStatus & status_mask) == status_mask)) {
         if (lower_block) {
             // Return if we reached the lower_block
             if (last_block == lower_block) return *lower_block;
@@ -725,14 +733,14 @@ const CBlockIndex& BlockManager::GetFirstBlock(const CBlockIndex& upper_block, u
 
 bool BlockManager::CheckBlockDataAvailability(const CBlockIndex& upper_block, const CBlockIndex& lower_block, BlockStatus block_status)
 {
-    if (!(upper_block.nStatus & block_status)) return false;
+    if (!(upper_block.nStorageStatus & block_status)) return false;
     const auto& first_block = GetFirstBlock(upper_block, block_status, &lower_block);
     // Special case: the genesis block has no undo data
     if (block_status & BLOCK_HAVE_UNDO && lower_block.nHeight == 0 && first_block.nHeight == 1) {
         // This might indicate missing data, or it could simply reflect the expected absence of undo data for the genesis block.
         // To distinguish between the two, check if all required block data *except* undo is available up to the genesis block.
         BlockStatus flags{block_status & ~BLOCK_HAVE_UNDO};
-        return first_block.pprev && GetStatus(*first_block.pprev) & flags;
+        return first_block.pprev && GetStorageStatus(*first_block.pprev) & flags;
     }
     return &first_block == &lower_block;
 }
@@ -1113,7 +1121,7 @@ bool BlockManager::WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationSt
         }
         // update nUndoPos in block index
         block.nUndoPos = pos.nPos;
-        block.nStatus |= BLOCK_HAVE_UNDO;
+        block.nStorageStatus |= BLOCK_HAVE_UNDO;
         m_dirty_blockindex.insert(&block);
     }
 

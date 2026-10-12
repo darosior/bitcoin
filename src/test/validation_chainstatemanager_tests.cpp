@@ -521,7 +521,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
     reload_all_block_indexes();
     BOOST_CHECK_EQUAL(cs1.setBlockIndexCandidates.size(), 1);
 
-    // Reset some region of the chain's nStatus, removing the HAVE_DATA flag.
+    // Reset some region of the chain's status, removing the HAVE_DATA flag.
     for (int i = 0; i <= cs1.m_chain.Height(); ++i) {
         LOCK(::cs_main);
         auto index = cs1.m_chain[i];
@@ -529,7 +529,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
         // Blocks with heights in range [91, 110] are marked as missing data.
         if (i < last_assumed_valid_idx && i >= assumed_valid_start_idx) {
             cs1.m_blockman.ModifyIndex(*index, [](auto& f) {
-                f.nStatus = BlockStatus::BLOCK_VALID_TREE;
+                f.nValidityStatus = BlockStatus::BLOCK_VALID_TREE;
+                f.nStorageStatus = 0;
                 f.nTx = 0;
             });
             index->m_chain_tx_count = 0;
@@ -621,17 +622,17 @@ BOOST_FIXTURE_TEST_CASE(loadblockindex_invalid_descendants, TestChain100Setup)
     auto* parent{child->pprev};
     auto* grand_parent{parent->pprev};
     auto& blockman{m_node.chainman->m_blockman};
-    blockman.ModifyIndex(*grand_parent, [](auto& f) { f.nStatus = (f.nStatus | BLOCK_FAILED_VALID); });
-    blockman.ModifyIndex(*parent, [](auto& f) { f.nStatus = (f.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD; });
-    blockman.ModifyIndex(*child, [](auto& f) { f.nStatus = (f.nStatus & ~BLOCK_FAILED_VALID); });
+    blockman.ModifyIndex(*grand_parent, [](auto& f) { f.nValidityStatus = (f.nValidityStatus | BLOCK_FAILED_VALID); });
+    blockman.ModifyIndex(*parent, [](auto& f) { f.nValidityStatus = (f.nValidityStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD; });
+    blockman.ModifyIndex(*child, [](auto& f) { f.nValidityStatus = (f.nValidityStatus & ~BLOCK_FAILED_VALID); });
 
     // Reload block index to recompute block status validity flags.
     m_node.chainman->LoadBlockIndex();
 
     // check grand_parent, parent, child is marked as BLOCK_FAILED_VALID after reloading the block index
-    BOOST_CHECK(m_node.chainman->m_blockman.GetStatus(*grand_parent) & BLOCK_FAILED_VALID);
-    BOOST_CHECK(m_node.chainman->m_blockman.GetStatus(*parent) & BLOCK_FAILED_VALID);
-    BOOST_CHECK(m_node.chainman->m_blockman.GetStatus(*child) & BLOCK_FAILED_VALID);
+    BOOST_CHECK(m_node.chainman->m_blockman.GetValidityStatus(*grand_parent) & BLOCK_FAILED_VALID);
+    BOOST_CHECK(m_node.chainman->m_blockman.GetValidityStatus(*parent) & BLOCK_FAILED_VALID);
+    BOOST_CHECK(m_node.chainman->m_blockman.GetValidityStatus(*child) & BLOCK_FAILED_VALID);
 }
 
 //! Verify that ReconsiderBlock clears failure flags for the target block, its ancestors, and descendants,
@@ -684,10 +685,10 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
 
     {
         LOCK(chainman.GetMutex());
-        BOOST_CHECK(!(chainman.m_blockman.GetStatus(*block100) & BLOCK_FAILED_VALID));
-        BOOST_CHECK(!(chainman.m_blockman.GetStatus(*block99) & BLOCK_FAILED_VALID));
-        BOOST_CHECK(!(chainman.m_blockman.GetStatus(*fork_block100) & BLOCK_FAILED_VALID));
-        BOOST_CHECK(!(chainman.m_blockman.GetStatus(*fork_block99) & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(chainman.m_blockman.GetValidityStatus(*block100) & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(chainman.m_blockman.GetValidityStatus(*block99) & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(chainman.m_blockman.GetValidityStatus(*fork_block100) & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(chainman.m_blockman.GetValidityStatus(*fork_block99) & BLOCK_FAILED_VALID));
     }
 
     // Invalidate block98
@@ -696,11 +697,11 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
     {
         LOCK(chainman.GetMutex());
         // block98 and all descendants of block98 are marked BLOCK_FAILED_VALID
-        BOOST_CHECK(chainman.m_blockman.GetStatus(*block98) & BLOCK_FAILED_VALID);
-        BOOST_CHECK(chainman.m_blockman.GetStatus(*block99) & BLOCK_FAILED_VALID);
-        BOOST_CHECK(chainman.m_blockman.GetStatus(*block100) & BLOCK_FAILED_VALID);
-        BOOST_CHECK(chainman.m_blockman.GetStatus(*fork_block99) & BLOCK_FAILED_VALID);
-        BOOST_CHECK(chainman.m_blockman.GetStatus(*fork_block100) & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainman.m_blockman.GetValidityStatus(*block98) & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainman.m_blockman.GetValidityStatus(*block99) & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainman.m_blockman.GetValidityStatus(*block100) & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainman.m_blockman.GetValidityStatus(*fork_block99) & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainman.m_blockman.GetValidityStatus(*fork_block100) & BLOCK_FAILED_VALID);
     }
 
     // Reconsider block99. ResetBlockFailureFlags clears BLOCK_FAILED_VALID from
@@ -714,11 +715,11 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
     chainstate.ActivateBestChain(state);
     {
         LOCK(chainman.GetMutex());
-        BOOST_CHECK(!(chainman.m_blockman.GetStatus(*block98) & BLOCK_FAILED_VALID));
-        BOOST_CHECK(!(chainman.m_blockman.GetStatus(*block99) & BLOCK_FAILED_VALID));
-        BOOST_CHECK(!(chainman.m_blockman.GetStatus(*block100) & BLOCK_FAILED_VALID));
-        BOOST_CHECK(chainman.m_blockman.GetStatus(*fork_block99) & BLOCK_FAILED_VALID);
-        BOOST_CHECK(chainman.m_blockman.GetStatus(*fork_block100) & BLOCK_FAILED_VALID);
+        BOOST_CHECK(!(chainman.m_blockman.GetValidityStatus(*block98) & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(chainman.m_blockman.GetValidityStatus(*block99) & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(chainman.m_blockman.GetValidityStatus(*block100) & BLOCK_FAILED_VALID));
+        BOOST_CHECK(chainman.m_blockman.GetValidityStatus(*fork_block99) & BLOCK_FAILED_VALID);
+        BOOST_CHECK(chainman.m_blockman.GetValidityStatus(*fork_block100) & BLOCK_FAILED_VALID);
     }
 }
 

@@ -200,7 +200,7 @@ private:
     const Consensus::Params& GetConsensus() const { return m_opts.chainparams.GetConsensus(); }
     /**
      * Load the blocktree off disk and into memory. Populate certain metadata
-     * per index entry (nStatus, nChainWork, nTimeMax, etc.) as well as peripheral
+     * per index entry (nValidityStatus, nStorageStatus, nChainWork, nTimeMax, etc.) as well as peripheral
      * collections like m_dirty_blockindex.
      */
     bool LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
@@ -350,7 +350,8 @@ public:
 
     /** The mutable fields of a block index entry, passed to ModifyIndex(). */
     struct IndexFields {
-        uint32_t& nStatus;
+        uint32_t& nValidityStatus;
+        uint32_t& nStorageStatus;
         int& nFile;
         unsigned int& nDataPos;
         unsigned int& nUndoPos;
@@ -358,7 +359,10 @@ public:
     };
 
     /** Read access to the mutable state of a block index entry. */
-    uint32_t GetStatus(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! The validity part of the status (BLOCK_VALID_* levels and failure flags) and the storage part (BLOCK_HAVE_*,
+    //! BLOCK_OPT_WITNESS), which are owned by the block tree and the block store respectively.
+    uint32_t GetValidityStatus(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    uint32_t GetStorageStatus(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     unsigned int GetNumTx(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Raw file and offset fields, which are only meaningful if the matching status flag is set.
     int GetFileNum(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -376,7 +380,7 @@ public:
     void ModifyIndex(CBlockIndex& index, F&& modify) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         AssertLockHeld(::cs_main);
-        IndexFields fields{index.nStatus, index.nFile, index.nDataPos, index.nUndoPos, index.nTx};
+        IndexFields fields{index.nValidityStatus, index.nStorageStatus, index.nFile, index.nDataPos, index.nUndoPos, index.nTx};
         std::forward<F>(modify)(fields);
     }
 

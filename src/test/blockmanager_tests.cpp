@@ -10,6 +10,8 @@
 #include <node/kernel_notifications.h>
 #include <script/solver.h>
 #include <primitives/block.h>
+#include <serialize.h>
+#include <streams.h>
 #include <util/chaintype.h>
 #include <validation.h>
 
@@ -114,8 +116,8 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
     {
         LOCK(::cs_main);
         CBlockIndex* it = last_pruned_block;
-        while (it != nullptr && blockman.GetStatus(*it) & BLOCK_HAVE_DATA) {
-            blockman.ModifyIndex(*it, [](auto& f) { f.nStatus &= ~BLOCK_HAVE_DATA; });
+        while (it != nullptr && blockman.GetStorageStatus(*it) & BLOCK_HAVE_DATA) {
+            blockman.ModifyIndex(*it, [](auto& f) { f.nStorageStatus &= ~BLOCK_HAVE_DATA; });
             it = it->pprev;
         }
     };
@@ -133,7 +135,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
     CBlockIndex* genesis = chainman->ActiveChain()[0];
     BOOST_CHECK(blockman.CheckBlockDataAvailability(*upper_block, *genesis, BlockStatus{BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO}));
     // Ensure we detect absence of undo data in the first block
-    blockman.ModifyIndex(*chainman->ActiveChain()[1], [](auto& f) { f.nStatus &= ~BLOCK_HAVE_UNDO; });
+    blockman.ModifyIndex(*chainman->ActiveChain()[1], [](auto& f) { f.nStorageStatus &= ~BLOCK_HAVE_UNDO; });
     BOOST_CHECK(!blockman.CheckBlockDataAvailability(tip, *genesis, BlockStatus{BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO}));
 
     // Prune half of the blocks
@@ -149,7 +151,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
 
     // Simulate that the first available block is missing undo data and
     // detect this by using a status mask.
-    blockman.ModifyIndex(*first_available_block, [](auto& f) { f.nStatus &= ~BLOCK_HAVE_UNDO; });
+    blockman.ModifyIndex(*first_available_block, [](auto& f) { f.nStorageStatus &= ~BLOCK_HAVE_UNDO; });
     BOOST_CHECK(!blockman.CheckBlockDataAvailability(tip, *first_available_block, BlockStatus{BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO}));
     BOOST_CHECK(blockman.CheckBlockDataAvailability(tip, *first_available_block, BlockStatus{BLOCK_HAVE_DATA}));
 }
@@ -216,6 +218,45 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_part_error, TestChain100Setup)
     expect_part_error(std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max());
 }
 
+//! In memory, the status of a block index entry is split into a validity part and a storage part. The database
+//! holds a single word: the two are combined when an entry is written, and split when it is read, including the
+//! bits that are not used anymore.
+BOOST_FIXTURE_TEST_CASE(disk_block_index_status_is_one_word, TestingSetup)
+{
+    auto& blockman{m_node.chainman->m_blockman};
+    constexpr uint32_t STATUS{BLOCK_VALID_SCRIPTS | BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD | BLOCK_STATUS_RESERVED |
+                              BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO | BLOCK_OPT_WITNESS};
+    CBlockIndex index;
+    {
+        LOCK(cs_main);
+        blockman.ModifyIndex(index, [&](auto& f) {
+            f.nValidityStatus = STATUS & ~BLOCK_STORAGE_MASK;
+            f.nStorageStatus = STATUS & BLOCK_STORAGE_MASK;
+            f.nFile = 3;
+            f.nDataPos = 1000;
+            f.nUndoPos = 2000;
+            f.nTx = 7;
+        });
+    }
+
+    // Writing combines the parts: the status word comes right after the version and the height.
+    DataStream written;
+    written << CDiskBlockIndex{&index};
+    int version, height;
+    uint32_t status;
+    DataStream header{written};
+    header >> VARINT_MODE(version, VarIntMode::NONNEGATIVE_SIGNED) >> VARINT_MODE(height, VarIntMode::NONNEGATIVE_SIGNED) >> VARINT(status);
+    BOOST_CHECK_EQUAL(status, STATUS);
+
+    // Reading splits them, so that writing what was read gives the same bytes back.
+    CDiskBlockIndex read;
+    DataStream to_read{written};
+    to_read >> read;
+    DataStream rewritten;
+    rewritten << read;
+    BOOST_CHECK(std::ranges::equal(written, rewritten));
+}
+
 BOOST_FIXTURE_TEST_CASE(blockmanager_readblock_hash_mismatch, TestingSetup)
 {
     CBlockIndex index;
@@ -223,9 +264,9 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_readblock_hash_mismatch, TestingSetup)
         LOCK(cs_main);
         auto& blockman{m_node.chainman->m_blockman};
         const auto tip{m_node.chainman->ActiveTip()};
-        const uint32_t status{blockman.GetStatus(*tip)};
+        const uint32_t status{blockman.GetStorageStatus(*tip)};
         const unsigned int data_pos{blockman.GetDataOffset(*tip)};
-        blockman.ModifyIndex(index, [&](auto& f) { f.nStatus = status; f.nDataPos = data_pos; });
+        blockman.ModifyIndex(index, [&](auto& f) { f.nStorageStatus = status; f.nDataPos = data_pos; });
         index.phashBlock = &uint256::ONE; // mismatched block hash
     }
 

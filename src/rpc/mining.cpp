@@ -774,7 +774,7 @@ static RPCMethod getblocktemplate()
             if (pindex) {
                 if (chainman.m_blockman.IsValid(*pindex, BLOCK_VALID_SCRIPTS))
                     return "duplicate";
-                if (chainman.m_blockman.GetStatus(*pindex) & BLOCK_FAILED_VALID)
+                if (chainman.m_blockman.GetValidityStatus(*pindex) & BLOCK_FAILED_VALID)
                     return "duplicate-invalid";
                 return "duplicate-inconclusive";
             }

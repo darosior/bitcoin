@@ -331,7 +331,7 @@ static RPCMethod getrawtransaction()
     if (!tx) {
         std::string errmsg;
         if (blockindex) {
-            const bool block_has_data = WITH_LOCK(::cs_main, return chainman.m_blockman.GetStatus(*blockindex) & BLOCK_HAVE_DATA);
+            const bool block_has_data = WITH_LOCK(::cs_main, return chainman.m_blockman.GetStorageStatus(*blockindex) & BLOCK_HAVE_DATA);
             if (!block_has_data) {
                 throw JSONRPCError(RPC_MISC_ERROR, "Block not available");
             }
@@ -377,7 +377,7 @@ static RPCMethod getrawtransaction()
     CBlockUndo blockUndo;
     CBlock block;
 
-    if (tx->IsCoinBase() || !blockindex || WITH_LOCK(::cs_main, return !(chainman.m_blockman.GetStatus(*blockindex) & BLOCK_HAVE_MASK))) {
+    if (tx->IsCoinBase() || !blockindex || WITH_LOCK(::cs_main, return !(chainman.m_blockman.GetStorageStatus(*blockindex) & BLOCK_HAVE_MASK))) {
         TxToJSON(*tx, hash_block, result, chainman.ActiveChainstate());
         return result;
     }
