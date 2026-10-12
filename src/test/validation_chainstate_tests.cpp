@@ -6,6 +6,7 @@
 #include <chainparams.h>
 #include <coins.h>
 #include <consensus/amount.h>
+#include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <node/blockstorage.h>
 #include <node/kernel_notifications.h>
@@ -23,6 +24,7 @@
 #include <uint256.h>
 #include <util/check.h>
 #include <validation.h>
+#include <validationinterface.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -32,7 +34,10 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 class CTxMemPool;
@@ -340,6 +345,92 @@ BOOST_FIXTURE_TEST_CASE(header_on_failed_block_is_rejected, TestChain100Setup)
     const CBlockIndex* best{chainman.m_blockman.GetBestHeader()};
     BOOST_REQUIRE(best);
     BOOST_CHECK(best->GetAncestor(pindex->nHeight) != pindex);
+}
+
+//! Records the BlockChecked notifications: the hash of the block, and "valid" or the rejection reason.
+struct BlockCheckedRecorder final : public CValidationInterface {
+    std::vector<std::pair<uint256, std::string>> m_checked;
+    void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state) override
+    {
+        m_checked.emplace_back(block->GetHash(), state.IsValid() ? "valid" : state.GetRejectReason());
+    }
+};
+
+//! Replace the coinbase of `block`, fix up its merkle root and solve it.
+static std::shared_ptr<const CBlock> ReplaceCoinbase(const ChainstateManager& chainman, CBlock block, const CScript& script_sig, const std::optional<uint256>& merkle_root = std::nullopt)
+{
+    CMutableTransaction coinbase{*block.vtx[0]};
+    coinbase.vin[0].scriptSig = script_sig;
+    block.vtx[0] = MakeTransactionRef(coinbase);
+    block.hashMerkleRoot = merkle_root ? *merkle_root : BlockMerkleRoot(block);
+    block.nNonce = 0;
+    while (!CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus())) ++block.nNonce;
+    return std::make_shared<const CBlock>(block);
+}
+
+//! AcceptNewBlock() followed by ActivateNewBlock() does what ProcessNewBlock() does: the same result, the same
+//! new_block, and the same BlockChecked notification, which is sent at the same point of the processing.
+BOOST_FIXTURE_TEST_CASE(accept_and_activate_block_like_process_new_block, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const auto recorder_ptr{std::make_shared<BlockCheckedRecorder>()};
+    BlockCheckedRecorder& recorder{*recorder_ptr};
+    m_node.validation_signals->RegisterSharedValidationInterface(recorder_ptr);
+    const int height{WITH_LOCK(::cs_main, return chainman.ActiveHeight())};
+
+    // A valid block. It is accepted and stored, and BlockChecked is only sent when it is connected.
+    const auto valid{std::make_shared<const CBlock>(CreateBlock({}, CScript{} << OP_TRUE))};
+    {
+        const auto accepted{chainman.AcceptNewBlock(valid, /*force_processing=*/true, /*min_pow_checked=*/true)};
+        BOOST_CHECK(accepted.accepted);
+        BOOST_CHECK(accepted.new_block);
+        BOOST_CHECK(recorder.m_checked.empty());
+        BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), height);
+        BOOST_CHECK(chainman.ActivateNewBlock(valid));
+        BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), height + 1);
+        BOOST_REQUIRE_EQUAL(recorder.m_checked.size(), 1U);
+        BOOST_CHECK(recorder.m_checked[0] == std::make_pair(valid->GetHash(), std::string{"valid"}));
+    }
+
+    // The same block again is accepted, but it is not new, and it is not checked again.
+    {
+        recorder.m_checked.clear();
+        const auto accepted{chainman.AcceptNewBlock(valid, /*force_processing=*/true, /*min_pow_checked=*/true)};
+        BOOST_CHECK(accepted.accepted);
+        BOOST_CHECK(!accepted.new_block);
+        BOOST_CHECK(chainman.ActivateNewBlock(valid));
+        BOOST_CHECK(recorder.m_checked.empty());
+        bool new_block{true};
+        BOOST_CHECK(chainman.ProcessNewBlock(valid, true, true, &new_block));
+        BOOST_CHECK(!new_block);
+        BOOST_CHECK(recorder.m_checked.empty());
+    }
+
+    // A block that fails CheckBlock() (here, its merkle root) is rejected by the first half, which reports it.
+    const CBlock template_block{CreateBlock({}, CScript{} << OP_TRUE)};
+    const auto bad_merkle_root{ReplaceCoinbase(chainman, template_block, template_block.vtx[0]->vin[0].scriptSig, uint256::ONE)};
+    // A block that fails AcceptBlock() (here, the height in its coinbase).
+    const auto bad_height{ReplaceCoinbase(chainman, template_block, CScript{} << 1 << OP_0)};
+    // The same two, as different blocks since a block that failed AcceptBlock() is known to be invalid afterwards.
+    const auto bad_merkle_root2{ReplaceCoinbase(chainman, template_block, template_block.vtx[0]->vin[0].scriptSig, uint256::ZERO)};
+    const auto bad_height2{ReplaceCoinbase(chainman, template_block, CScript{} << 2 << OP_0)};
+    for (const auto& [block, block2, reason] : {std::tuple{bad_merkle_root, bad_merkle_root2, "bad-txnmrklroot"}, std::tuple{bad_height, bad_height2, "bad-cb-height"}}) {
+        recorder.m_checked.clear();
+        const auto accepted{chainman.AcceptNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true)};
+        BOOST_CHECK(!accepted.accepted);
+        BOOST_CHECK(!accepted.new_block);
+        BOOST_REQUIRE_EQUAL(recorder.m_checked.size(), 1U);
+        BOOST_CHECK(recorder.m_checked[0] == std::make_pair(block->GetHash(), std::string{reason}));
+
+        // ProcessNewBlock() gives the same answer.
+        recorder.m_checked.clear();
+        bool new_block{true};
+        BOOST_CHECK(!chainman.ProcessNewBlock(block2, true, true, &new_block));
+        BOOST_CHECK(!new_block);
+        BOOST_REQUIRE_EQUAL(recorder.m_checked.size(), 1U);
+        BOOST_CHECK(recorder.m_checked[0] == std::make_pair(block2->GetHash(), std::string{reason}));
+    }
+    m_node.validation_signals->UnregisterSharedValidationInterface(recorder_ptr);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
