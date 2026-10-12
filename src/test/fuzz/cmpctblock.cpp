@@ -284,6 +284,8 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
     };
 
     LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 1000) {
+        // What validation notified since the last iteration is processed first, as the message handler thread does.
+        peerman->ProcessPendingEvents();
         CSerializedNetMsg net_msg;
         bool sent_net_msg = true;
         bool requested_hb = false;
@@ -461,6 +463,7 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
     }
 
     setup->m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    peerman->ProcessPendingEvents();
     setup->m_node.validation_signals->UnregisterAllValidationInterfaces();
     connman.StopNodes();
 

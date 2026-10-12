@@ -156,6 +156,8 @@ public:
 
     virtual bool SendMessages(CNode&) override { return m_fdp.ConsumeBool(); }
 
+    virtual void ProcessPendingEvents() override {}
+
 private:
     FuzzedDataProvider& m_fdp;
 };
