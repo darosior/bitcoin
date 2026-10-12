@@ -375,6 +375,17 @@ public:
     //! Raise the validity level of this block index entry. Returns true if the validity was changed.
     bool RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /**
+     * Record that the full data of a block was written at `pos`: its position, its number of transactions and
+     * BLOCK_HAVE_DATA (with BLOCK_OPT_WITNESS if `opt_witness`), and raise its validity to BLOCK_VALID_TRANSACTIONS. This
+     * is a single operation, so nobody sees a block that has transactions but no data, or the reverse. The undo
+     * position is reset: this is also how a pruned block that is downloaded again is recorded.
+     *
+     * This does not touch chain selection (sequence id, chain transaction count, unlinked blocks and candidates):
+     * that is up to ChainstateManager::ReceivedBlockTransactions().
+     */
+    void RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Change the mutable state of a block index entry. `modify` must not call back into BlockManager. */
     template <typename F>
     void ModifyIndex(CBlockIndex& index, F&& modify) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)

@@ -5,6 +5,7 @@
 
 #include <chain.h>
 #include <chainparams.h>
+#include <deploymentstatus.h>
 #include <flatfile.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -81,10 +82,9 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                         chainman.InvalidBlockFound(index, state);
                     } else {
                         size_t nTx = fuzzed_data_provider.ConsumeIntegralInRange<size_t>(1, 1000);
-                        CBlock block; // Dummy block, so that ReceivedBlockTransactions can infer a nTx value.
-                        block.vtx = std::vector<CTransactionRef>(nTx);
                         FlatFilePos pos(0, fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 1000));
-                        chainman.ReceivedBlockTransactions(block, index, pos);
+                        blockman.RecordBlockData(*index, nTx, pos, DeploymentActiveAt(*index, chainman, Consensus::DEPLOYMENT_SEGWIT));
+                        chainman.ReceivedBlockTransactions(index);
                         assert(blockman.GetValidityStatus(*index) & BLOCK_VALID_TRANSACTIONS);
                         assert(blockman.GetStorageStatus(*index) & BLOCK_HAVE_DATA);
                     }
@@ -186,10 +186,10 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 size_t i = fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, num_pruned - 1);
                 CBlockIndex* index = pruned_blocks[i];
                 assert(!(blockman.GetStorageStatus(*index) & BLOCK_HAVE_DATA));
-                CBlock block;
-                block.vtx = std::vector<CTransactionRef>(blockman.GetNumTx(*index)); // Set the number of tx to the prior value.
                 FlatFilePos pos(0, fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 1000));
-                chainman.ReceivedBlockTransactions(block, index, pos);
+                // Keep the number of tx at its prior value.
+                blockman.RecordBlockData(*index, blockman.GetNumTx(*index), pos, DeploymentActiveAt(*index, chainman, Consensus::DEPLOYMENT_SEGWIT));
+                chainman.ReceivedBlockTransactions(index);
                 assert(blockman.GetValidityStatus(*index) & BLOCK_VALID_TRANSACTIONS);
                 assert(blockman.GetStorageStatus(*index) & BLOCK_HAVE_DATA);
                 pruned_blocks.erase(pruned_blocks.begin() + i);

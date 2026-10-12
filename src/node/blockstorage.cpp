@@ -277,6 +277,21 @@ bool BlockManager::RaiseValidity(CBlockIndex& index, enum BlockStatus nUpTo)
     return false;
 }
 
+void BlockManager::RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness)
+{
+    AssertLockHeld(::cs_main);
+    ModifyIndex(index, [&](auto& f) {
+        f.nTx = num_tx;
+        f.nFile = pos.nFile;
+        f.nDataPos = pos.nPos;
+        f.nUndoPos = 0;
+        f.nStorageStatus |= BLOCK_HAVE_DATA;
+        if (opt_witness) f.nStorageStatus |= BLOCK_OPT_WITNESS;
+    });
+    RaiseValidity(index, BLOCK_VALID_TRANSACTIONS);
+    m_dirty_blockindex.insert(&index);
+}
+
 std::vector<CBlockIndex*> BlockManager::GetAllBlockIndices()
 {
     AssertLockHeld(cs_main);
