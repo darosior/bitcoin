@@ -4269,6 +4269,9 @@ bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> hea
     for (const CBlockHeader& header : headers) {
         CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
         bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
+        // TODO: CheckBlockIndex() takes cs_main, so the thread that receives the header waits for validation here once
+        // validation has a thread of its own. It should run on validation's side instead, which already calls it
+        // after it recorded a new block.
         CheckBlockIndex();
 
         if (!accepted) {
@@ -4327,6 +4330,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
 
     bool accepted_header{AcceptBlockHeader(block, state, &pindex, min_pow_checked)};
+    // TODO: As in ProcessNewBlockHeaders(): this takes cs_main from the receiving thread, and should run on
+    // validation's side.
     CheckBlockIndex();
 
     if (!accepted_header)
@@ -4420,9 +4425,19 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
 {
     AssertLockNotHeld(cs_main);
 
+    const BlockAcceptResult result{AcceptNewBlock(block, force_processing, min_pow_checked)};
+    if (new_block) *new_block = result.new_block;
+    if (!result.accepted) return false;
+    return ActivateNewBlock(block);
+}
+
+ChainstateManager::BlockAcceptResult ChainstateManager::AcceptNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
+{
+    AssertLockNotHeld(cs_main);
+
+    BlockAcceptResult result;
     {
         CBlockIndex *pindex = nullptr;
-        if (new_block) *new_block = false;
         BlockValidationState state;
 
         LOCK(cs_main);
@@ -4435,18 +4450,25 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         bool ret = CheckBlock(*block, state, GetConsensus());
         if (ret) {
             // Store to disk
-            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked);
+            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, &result.new_block, min_pow_checked);
         }
         if (!ret) {
             if (m_options.signals) {
                 m_options.signals->BlockChecked(block, state);
             }
             LogError("%s: AcceptBlock FAILED (%s)\n", __func__, state.ToString());
-            return false;
+            return result;
         }
     }
 
     NotifyHeaderTip();
+    result.accepted = true;
+    return result;
+}
+
+bool ChainstateManager::ActivateNewBlock(const std::shared_ptr<const CBlock>& block)
+{
+    AssertLockNotHeld(cs_main);
 
     BlockValidationState state; // Only used to report errors, not invalidity - ignore it
     if (!ActiveChainstate().ActivateBestChain(state, block)) {
@@ -4459,7 +4481,7 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
     if (bg_chain && !bg_chain->ActivateBestChain(bg_state, block)) {
         LogError("%s: [background] ActivateBestChain failed (%s)\n", __func__, bg_state.ToString());
         return false;
-     }
+    }
 
     return true;
 }
