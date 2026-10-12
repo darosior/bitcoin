@@ -63,6 +63,7 @@
 #include <util/tokenbucket.h>
 #include <util/trace.h>
 #include <validation.h>
+#include <validation_jobs.h>
 
 #include <algorithm>
 #include <array>
@@ -704,6 +705,19 @@ private:
     void ProcessValidTx(NodeId nodeid, const CTransactionRef& tx, const std::list<CTransactionRef>& replaced_transactions)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, m_tx_download_mutex, !m_inv_to_send_mutex);
 
+    /** Handle the result of the validation of a transaction a peer sent us: calls ProcessValidTx or ProcessInvalidTx,
+     * and validates the package that ProcessInvalidTx found for it, if any. */
+    void OnTxProcessed(const ValidationJobs::TxProcessed& processed)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, ::cs_main, m_tx_download_mutex, !m_inv_to_send_mutex);
+
+    /** Handle the result of the validation of an orphan transaction. Returns false if its inputs are still missing. */
+    bool OnOrphanProcessed(const ValidationJobs::TxProcessed& processed)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, ::cs_main, m_tx_download_mutex, !m_inv_to_send_mutex);
+
+    /** Validate a package, and handle the result with ProcessPackageResult. */
+    void ValidatePackage(NodeId from, const node::PackageToValidate& package_to_validate)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, ::cs_main, m_tx_download_mutex, !m_inv_to_send_mutex);
+
     /** Handle the results of package validation: calls ProcessValidTx and ProcessInvalidTx for
      * individual transactions, and caches rejection for the package as a group.
      */
@@ -854,6 +868,8 @@ private:
     BanMan* const m_banman;
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
+    //! The work net_processing asks validation to do. It is run inline for now, see ValidationJobs.
+    const ValidationJobs m_validation;
 
     /** Synchronizes tx download including TxRequestTracker, rejection filters, and TxOrphanage.
      * Lock invariants:
@@ -1053,6 +1069,8 @@ private:
 
     /** Process a new block. Perform any post-processing housekeeping */
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked);
+    /** What is done once a block was processed, whether or not it was accepted. It is called with no lock held. */
+    void OnBlockProcessed(const ValidationJobs::BlockAccepted& processed) LOCKS_EXCLUDED(::cs_main);
 
     /** Process compact block txns  */
     void ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
@@ -1752,19 +1770,21 @@ void PeerManagerImpl::ReattemptPrivateBroadcast(CScheduler& scheduler)
         for (const auto& stale_tx : stale_txs) {
             // Only hold lock per single submission
             LOCK(cs_main);
-            auto mempool_acceptable = m_chainman.ProcessTransaction(stale_tx, /*test_accept=*/true);
-            if (mempool_acceptable.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-                if (!m_tx_for_private_broadcast.TryGrantRetry(stale_tx)) continue;
-                LogDebug(BCLog::PRIVBROADCAST,
-                         "Reattempting broadcast of stale txid=%s wtxid=%s",
-                         stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString());
-                ++num_for_rebroadcast;
-            } else {
-                LogDebug(BCLog::PRIVBROADCAST, "Giving up broadcast attempts for txid=%s wtxid=%s: %s",
-                         stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString(),
-                         mempool_acceptable.m_state.ToString());
-                m_tx_for_private_broadcast.MarkResolved(stale_tx);
-            }
+            m_validation.ProcessTransaction(/*from=*/-1, stale_tx, /*test_accept=*/true, [&](const ValidationJobs::TxProcessed& processed) {
+                const MempoolAcceptResult& mempool_acceptable{processed.result};
+                if (mempool_acceptable.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                    if (!m_tx_for_private_broadcast.TryGrantRetry(stale_tx)) return;
+                    LogDebug(BCLog::PRIVBROADCAST,
+                             "Reattempting broadcast of stale txid=%s wtxid=%s",
+                             stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString());
+                    ++num_for_rebroadcast;
+                } else {
+                    LogDebug(BCLog::PRIVBROADCAST, "Giving up broadcast attempts for txid=%s wtxid=%s: %s",
+                             stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString(),
+                             mempool_acceptable.m_state.ToString());
+                    m_tx_for_private_broadcast.MarkResolved(stale_tx);
+                }
+            });
         }
 
         // This could overshoot, but that is ok - we will open some private connections in vain.
@@ -2144,6 +2164,7 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
       m_banman(banman),
       m_chainman(chainman),
       m_mempool(pool),
+      m_validation{chainman, pool},
       m_txdownloadman{node::TxDownloadOptions{pool, opts.deterministic_rng}},
       m_warnings{warnings},
       m_opts{opts},
@@ -2599,10 +2620,13 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         }
     } // release cs_main before calling ActivateBestChain
     if (need_activate_chain) {
-        BlockValidationState state;
-        if (!m_chainman.ActiveChainstate().ActivateBestChain(state, a_recent_block)) {
-            LogDebug(BCLog::NET, "failed to activate chain (%s)\n", state.ToString());
-        }
+        // The rest of this function runs right after, since the job is run inline. Once it is not, it has to
+        // wait for the result: the block is not served before the chain is activated.
+        m_validation.ActivateBestChain(a_recent_block, [](const ValidationJobs::ChainActivated& activated) {
+            if (!activated.success) {
+                LogDebug(BCLog::NET, "failed to activate chain (%s)\n", activated.state.ToString());
+            }
+        });
     }
 
     const CBlockIndex* pindex{nullptr};
@@ -3484,38 +3508,94 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
 
 // NOTE: the orphan processing used to be uninterruptible and quadratic, which could allow a peer to stall the node for
 // hours with specially crafted transactions. See https://bitcoincore.org/en/2024/07/03/disclose-orphan-dos.
+void PeerManagerImpl::OnTxProcessed(const ValidationJobs::TxProcessed& processed)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(::cs_main);
+    AssertLockHeld(m_tx_download_mutex);
+
+    const MempoolAcceptResult& result{processed.result};
+    const TxValidationState& state = result.m_state;
+
+    if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+        ProcessValidTx(processed.from, processed.tx, result.m_replaced_transactions);
+        // The peer may be gone by now.
+        m_connman.ForNode(processed.from, [](CNode* node) {
+            node->m_last_tx_time = GetTime<std::chrono::seconds>();
+            return true;
+        });
+    }
+    if (state.IsInvalid()) {
+        if (auto package_to_validate{ProcessInvalidTx(processed.from, processed.tx, state, /*first_time_failure=*/true)}) {
+            ValidatePackage(processed.from, *package_to_validate);
+        }
+    }
+}
+
+void PeerManagerImpl::ValidatePackage(NodeId from, const node::PackageToValidate& package_to_validate)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(::cs_main);
+    AssertLockHeld(m_tx_download_mutex);
+
+    m_validation.ProcessPackage(from, package_to_validate.m_txns, [&](const ValidationJobs::PackageProcessed& processed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_msgproc_mutex, m_tx_download_mutex) {
+        LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate.ToString(),
+                 processed.result.m_state.IsValid() ? "package accepted" : "package rejected");
+        ProcessPackageResult(package_to_validate, processed.result);
+    });
+}
+
 bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
 {
     AssertLockHeld(g_msgproc_mutex);
     LOCK2(::cs_main, m_tx_download_mutex);
 
     while (CTransactionRef porphanTx = m_txdownloadman.GetTxToReconsider(peer.m_id)) {
-        const MempoolAcceptResult result = m_chainman.ProcessTransaction(porphanTx);
-        const TxValidationState& state = result.m_state;
-        const Txid& orphanHash = porphanTx->GetHash();
-        const Wtxid& orphan_wtxid = porphanTx->GetWitnessHash();
-
-        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-            LogDebug(BCLog::TXPACKAGES, "   accepted orphan tx %s (wtxid=%s)\n", orphanHash.ToString(), orphan_wtxid.ToString());
-            ProcessValidTx(peer.m_id, porphanTx, result.m_replaced_transactions);
-            return true;
-        } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
-            LogDebug(BCLog::TXPACKAGES, "   invalid orphan tx %s (wtxid=%s) from peer=%d. %s\n",
-                orphanHash.ToString(),
-                orphan_wtxid.ToString(),
-                peer.m_id,
-                state.ToString());
-
-            if (Assume(state.IsInvalid() &&
-                       state.GetResult() != TxValidationResult::TX_UNKNOWN &&
-                       state.GetResult() != TxValidationResult::TX_NO_MEMPOOL &&
-                       state.GetResult() != TxValidationResult::TX_RESULT_UNSET)) {
-                ProcessInvalidTx(peer.m_id, porphanTx, state, /*first_time_failure=*/false);
-            }
-            return true;
-        }
+        // The orphan is reconsidered until one of them has a result other than missing inputs. The continuation
+        // tells whether it is that one. This relies on the job being run inline: it is called before the job
+        // returns.
+        bool done{false};
+        m_validation.ProcessTransaction(peer.m_id, porphanTx, /*test_accept=*/false, [&](const ValidationJobs::TxProcessed& processed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_msgproc_mutex, m_tx_download_mutex) {
+            done = OnOrphanProcessed(processed);
+        });
+        if (done) return true;
     }
 
+    return false;
+}
+
+bool PeerManagerImpl::OnOrphanProcessed(const ValidationJobs::TxProcessed& processed)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(::cs_main);
+    AssertLockHeld(m_tx_download_mutex);
+
+    const NodeId peer_id{processed.from};
+    const CTransactionRef& porphanTx{processed.tx};
+    const MempoolAcceptResult& result{processed.result};
+    const TxValidationState& state = result.m_state;
+    const Txid& orphanHash = porphanTx->GetHash();
+    const Wtxid& orphan_wtxid = porphanTx->GetWitnessHash();
+
+    if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+        LogDebug(BCLog::TXPACKAGES, "   accepted orphan tx %s (wtxid=%s)\n", orphanHash.ToString(), orphan_wtxid.ToString());
+        ProcessValidTx(peer_id, porphanTx, result.m_replaced_transactions);
+        return true;
+    } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
+        LogDebug(BCLog::TXPACKAGES, "   invalid orphan tx %s (wtxid=%s) from peer=%d. %s\n",
+            orphanHash.ToString(),
+            orphan_wtxid.ToString(),
+            peer_id,
+            state.ToString());
+
+        if (Assume(state.IsInvalid() &&
+                   state.GetResult() != TxValidationResult::TX_UNKNOWN &&
+                   state.GetResult() != TxValidationResult::TX_NO_MEMPOOL &&
+                   state.GetResult() != TxValidationResult::TX_RESULT_UNSET)) {
+            ProcessInvalidTx(peer_id, porphanTx, state, /*first_time_failure=*/false);
+        }
+        return true;
+    }
     return false;
 }
 
@@ -3683,18 +3763,35 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
 
 void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
 {
-    bool new_block{false};
-    m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
-    if (new_block) {
-        node.m_last_block_time = GetTime<std::chrono::seconds>();
+    // First accept and store the block, then activate the best chain, as ProcessNewBlock() does. What is done
+    // with the outcome comes last, after the activation, or right after the block was rejected.
+    m_validation.AcceptBlock(node.GetId(), block, force_processing, min_pow_checked, [this](const ValidationJobs::BlockAccepted& accepted) {
+        if (!accepted.accepted) {
+            OnBlockProcessed(accepted);
+            return;
+        }
+        m_validation.ActivateBlock(accepted.from, accepted.block, [this, accepted](const ValidationJobs::BlockActivated&) {
+            OnBlockProcessed(accepted);
+        });
+    });
+}
+
+void PeerManagerImpl::OnBlockProcessed(const ValidationJobs::BlockAccepted& processed)
+{
+    if (processed.new_block) {
+        // The peer may be gone by now.
+        m_connman.ForNode(processed.from, [](CNode* node) {
+            node->m_last_block_time = GetTime<std::chrono::seconds>();
+            return true;
+        });
         // In case this block came from a different peer than we requested
         // from, we can erase the block request now anyway (as we just stored
         // this block to disk).
         LOCK(cs_main);
-        RemoveBlockRequest(block->GetHash(), std::nullopt);
+        RemoveBlockRequest(processed.block->GetHash(), std::nullopt);
     } else {
         LOCK(cs_main);
-        mapBlockSource.erase(block->GetHash());
+        mapBlockSource.erase(processed.block->GetHash());
     }
 }
 
@@ -4519,10 +4616,12 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 LOCK(m_most_recent_block_mutex);
                 a_recent_block = m_most_recent_block;
             }
-            BlockValidationState state;
-            if (!m_chainman.ActiveChainstate().ActivateBestChain(state, a_recent_block)) {
-                LogDebug(BCLog::NET, "failed to activate chain (%s)\n", state.ToString());
-            }
+            // As in ProcessGetBlockData(), what follows has to wait for the result once jobs are not inline.
+            m_validation.ActivateBestChain(a_recent_block, [](const ValidationJobs::ChainActivated& activated) {
+                if (!activated.success) {
+                    LogDebug(BCLog::NET, "failed to activate chain (%s)\n", activated.state.ToString());
+                }
+            });
         }
 
         LOCK(cs_main);
@@ -4755,10 +4854,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             }
 
             if (package_to_validate) {
-                const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_to_validate->m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
-                LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate->ToString(),
-                         package_result.m_state.IsValid() ? "package accepted" : "package rejected");
-                ProcessPackageResult(package_to_validate.value(), package_result);
+                ValidatePackage(pfrom.GetId(), *package_to_validate);
             }
             return;
         }
@@ -4766,21 +4862,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // ReceivedTx should not be telling us to validate the tx and a package.
         Assume(!package_to_validate.has_value());
 
-        const MempoolAcceptResult result = m_chainman.ProcessTransaction(ptx);
-        const TxValidationState& state = result.m_state;
-
-        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-            ProcessValidTx(pfrom.GetId(), ptx, result.m_replaced_transactions);
-            pfrom.m_last_tx_time = GetTime<std::chrono::seconds>();
-        }
-        if (state.IsInvalid()) {
-            if (auto package_to_validate{ProcessInvalidTx(pfrom.GetId(), ptx, state, /*first_time_failure=*/true)}) {
-                const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_to_validate->m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
-                LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate->ToString(),
-                         package_result.m_state.IsValid() ? "package accepted" : "package rejected");
-                ProcessPackageResult(package_to_validate.value(), package_result);
-            }
-        }
+        m_validation.ProcessTransaction(pfrom.GetId(), ptx, /*test_accept=*/false, [&](const ValidationJobs::TxProcessed& processed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_msgproc_mutex, m_tx_download_mutex) {
+            OnTxProcessed(processed);
+        });
 
         return;
     }

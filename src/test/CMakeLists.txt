@@ -137,6 +137,7 @@ add_executable(test_bitcoin
   util_trace_tests.cpp
   validation_block_tests.cpp
   validation_chainstate_tests.cpp
+  validation_jobs_tests.cpp
   validation_chainstatemanager_tests.cpp
   validation_flush_tests.cpp
   validation_tests.cpp
