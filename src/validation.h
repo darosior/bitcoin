@@ -1282,6 +1282,34 @@ public:
      */
     bool ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block) LOCKS_EXCLUDED(cs_main);
 
+    //! The result of AcceptNewBlock().
+    struct BlockAcceptResult {
+        //! False if the block failed CheckBlock() or AcceptBlock(), or could not be stored.
+        bool accepted{false};
+        //! True if the block was stored by this call, i.e. it was first received here.
+        bool new_block{false};
+    };
+
+    /**
+     * The first half of ProcessNewBlock(): check the block, add its header to the block index, and store it. This
+     * announces the block as a new PoW-valid block and writes it to disk, but does not connect it to the chain.
+     *
+     * If the block is rejected, BlockChecked is signalled with the reason, before this returns.
+     * Otherwise the header tip notification is sent, and the caller is expected to call ActivateNewBlock().
+     *
+     * May not be called in a validationinterface callback. Parameters are as for ProcessNewBlock().
+     */
+    BlockAcceptResult AcceptNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked) LOCKS_EXCLUDED(cs_main);
+
+    /**
+     * The second half of ProcessNewBlock(): activate the best chain of the active chainstate, and of the historical
+     * chainstate if there is one. `block` is the block that was just accepted, which is used as a hint to avoid reading
+     * it back from disk. Returns false if an error stopped the activation.
+     *
+     * May not be called in a validationinterface callback.
+     */
+    bool ActivateNewBlock(const std::shared_ptr<const CBlock>& block) LOCKS_EXCLUDED(cs_main);
+
     /**
      * Process incoming block headers.
      *
