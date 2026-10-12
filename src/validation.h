@@ -950,9 +950,6 @@ class ChainstateManager
 {
 private:
 
-    /** The last header for which a headerTip notification was issued. */
-    CBlockIndex* m_last_notified_header GUARDED_BY(GetMutex()){nullptr};
-
     bool NotifyHeaderTip() LOCKS_EXCLUDED(GetMutex());
 
     //! Internal helper for ActivateSnapshot().
@@ -1080,12 +1077,6 @@ public:
         nBlockReverseSequenceId = -1;
     }
 
-
-    /** Best header we've seen so far for which the block is not known to be invalid
-        (used, among others, for getheaders queries' starting points).
-        In case of multiple best headers with the same work, it could point to any
-        because CBlockIndexWorkComparator tiebreaker rules are not applied. */
-    CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
 
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.

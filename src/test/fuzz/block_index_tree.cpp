@@ -64,7 +64,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 CBlockIndex* prev_block = PickValue(fuzzed_data_provider, blocks);
                 if (!(blockman.GetValidityStatus(*prev_block) & BLOCK_FAILED_VALID)) {
                     CBlockHeader header = ConsumeBlockHeader(fuzzed_data_provider, prev_block->GetBlockHash(), nonce_counter);
-                    CBlockIndex* index = blockman.AddToBlockIndex(header, chainman.m_best_header);
+                    CBlockIndex* index = blockman.AddToBlockIndex(header);
                     assert(blockman.GetValidityStatus(*index) & BLOCK_VALID_TREE);
                     assert(index->pprev == prev_block);
                     blocks.push_back(index);
@@ -203,7 +203,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
     {
         LOCK(cs_main);
         blockman.ModifyIndex(*genesis, [](auto& f) { f.nStorageStatus |= BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO; });
-        chainman.m_best_header = genesis;
+        blockman.SetBestHeader(genesis);
         chainman.ResetBestInvalid();
         chainman.nBlockSequenceId = 2;
         chainman.ActiveChain().SetTip(*genesis);

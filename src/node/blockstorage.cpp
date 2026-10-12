@@ -317,7 +317,44 @@ const CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash) const
     return it == m_block_index.end() ? nullptr : &it->second;
 }
 
-CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header)
+CBlockIndex* BlockManager::GetBestHeader() const
+{
+    AssertLockHeld(::cs_main);
+    return m_best_header;
+}
+
+void BlockManager::SetBestHeader(CBlockIndex* index)
+{
+    AssertLockHeld(::cs_main);
+    m_best_header = index;
+}
+
+void BlockManager::SetBestHeaderIfUnset(CBlockIndex* index)
+{
+    AssertLockHeld(::cs_main);
+    if (m_best_header == nullptr) m_best_header = index;
+}
+
+void BlockManager::RecalculateBestHeader(CBlockIndex* active_tip)
+{
+    AssertLockHeld(::cs_main);
+    m_best_header = active_tip;
+    for (auto& [_, block_index] : m_block_index) {
+        if (!(GetValidityStatus(block_index) & BLOCK_FAILED_VALID) && m_best_header->nChainWork < block_index.nChainWork) {
+            m_best_header = &block_index;
+        }
+    }
+}
+
+CBlockIndex* BlockManager::UpdateLastNotifiedHeader()
+{
+    AssertLockHeld(::cs_main);
+    if (m_best_header == m_last_notified_header) return nullptr;
+    m_last_notified_header = m_best_header;
+    return m_best_header;
+}
+
+CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block)
 {
     AssertLockHeld(cs_main);
 
@@ -341,8 +378,8 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
     RaiseValidity(*pindexNew, BLOCK_VALID_TREE);
-    if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
-        best_header = pindexNew;
+    if (m_best_header == nullptr || m_best_header->nChainWork < pindexNew->nChainWork) {
+        m_best_header = pindexNew;
     }
 
     m_dirty_blockindex.insert(pindexNew);
@@ -441,7 +478,7 @@ void BlockManager::FindFilesToPrune(
     const int num_chainstates{chainman.HistoricalChainstate() ? 2 : 1};
     const auto target = std::max(
         MIN_DISK_SPACE_FOR_BLOCK_FILES, GetPruneTarget() / num_chainstates);
-    const uint64_t target_sync_height = chainman.m_best_header->nHeight;
+    const uint64_t target_sync_height = m_best_header->nHeight;
 
     if (chain.m_chain.Height() < 0 || target == 0) {
         return;

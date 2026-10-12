@@ -304,6 +304,12 @@ private:
     const FlatFileSeq m_block_file_seq;
     const FlatFileSeq m_undo_file_seq;
 
+    //! See GetBestHeader().
+    CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
+
+    //! The last header for which a headerTip notification was issued.
+    CBlockIndex* m_last_notified_header GUARDED_BY(::cs_main){nullptr};
+
 protected:
     std::vector<CBlockFileInfo> m_blockfile_info;
 
@@ -347,6 +353,22 @@ public:
     std::optional<int> m_snapshot_height;
 
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Best header we've seen so far for which the block is not known to be invalid
+     * (used, among others, for getheaders queries' starting points).
+     * In case of multiple best headers with the same work, it could point to any
+     * because CBlockIndexWorkComparator tiebreaker rules are not applied.
+     */
+    CBlockIndex* GetBestHeader() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void SetBestHeader(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Set the best header to `index`, unless one is already set.
+    void SetBestHeaderIfUnset(CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Recalculate the best header: the most-work entry that is not known to be invalid, or `active_tip` if it has more work.
+    void RecalculateBestHeader(CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Return the best header and remember it as the last one that was notified, unless it already was.
+    //! Returns nullptr if the last notified header is the best header.
+    CBlockIndex* UpdateLastNotifiedHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** The mutable fields of a block index entry, passed to ModifyIndex(). */
     struct IndexFields {
@@ -415,7 +437,8 @@ public:
      */
     void ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    //! Add a header to the block index, and make it the best header if it has more work. Returns the existing entry if the header is already known.
+    CBlockIndex* AddToBlockIndex(const CBlockHeader& block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Create a new block index entry for a given block hash */
     CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 

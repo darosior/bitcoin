@@ -294,7 +294,7 @@ static bool IsCurrentForFeeEstimation(Chainstate& active_chainstate) EXCLUSIVE_L
     }
     if (active_chainstate.m_chain.Tip()->GetBlockTime() < count_seconds(GetTime<std::chrono::seconds>() - MAX_FEE_ESTIMATION_TIP_AGE))
         return false;
-    if (active_chainstate.m_chain.Height() < active_chainstate.m_chainman.m_best_header->nHeight - 1) {
+    if (active_chainstate.m_chain.Height() < active_chainstate.m_chainman.m_blockman.GetBestHeader()->nHeight - 1) {
         return false;
     }
     return true;
@@ -1967,7 +1967,7 @@ void Chainstate::InvalidChainFound(CBlockIndex* pindexNew)
         m_chainman.m_best_invalid = pindexNew;
     }
     SetBlockFailureFlags(pindexNew);
-    if (m_chainman.m_best_header != nullptr && m_chainman.m_best_header->GetAncestor(pindexNew->nHeight) == pindexNew) {
+    if (const CBlockIndex* best_header{m_blockman.GetBestHeader()}; best_header != nullptr && best_header->GetAncestor(pindexNew->nHeight) == pindexNew) {
         m_chainman.RecalculateBestHeader();
     }
 
@@ -2356,11 +2356,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             script_check_reason = "assumevalid hash not in headers";
         } else if (it->second.GetAncestor(pindex->nHeight) != pindex) {
             script_check_reason = (pindex->nHeight > it->second.nHeight) ? "block height above assumevalid height" : "block not in assumevalid chain";
-        } else if (m_chainman.m_best_header->GetAncestor(pindex->nHeight) != pindex) {
+        } else if (const CBlockIndex* best_header{m_blockman.GetBestHeader()}; best_header->GetAncestor(pindex->nHeight) != pindex) {
             script_check_reason = "block not in best header chain";
-        } else if (m_chainman.m_best_header->nChainWork < m_chainman.MinimumChainWork()) {
+        } else if (best_header->nChainWork < m_chainman.MinimumChainWork()) {
             script_check_reason = "best header chainwork below minimumchainwork";
-        } else if (GetBlockProofEquivalentTime(*m_chainman.m_best_header, *pindex, *m_chainman.m_best_header, params.GetConsensus()) <= TWO_WEEKS_IN_SECONDS) {
+        } else if (GetBlockProofEquivalentTime(*best_header, *pindex, *best_header, params.GetConsensus()) <= TWO_WEEKS_IN_SECONDS) {
             script_check_reason = "block too recent relative to best header";
         } else {
             // This block is a member of the assumed verified chain and an ancestor of the best header.
@@ -3300,24 +3300,18 @@ void ChainstateManager::UpdateIBDStatus()
 
 bool ChainstateManager::NotifyHeaderTip()
 {
-    bool fNotify = false;
     bool fInitialBlockDownload = false;
     CBlockIndex* pindexHeader = nullptr;
     {
         LOCK(GetMutex());
-        pindexHeader = m_best_header;
-
-        if (pindexHeader != m_last_notified_header) {
-            fNotify = true;
-            fInitialBlockDownload = IsInitialBlockDownload();
-            m_last_notified_header = pindexHeader;
-        }
+        pindexHeader = m_blockman.UpdateLastNotifiedHeader();
+        if (pindexHeader) fInitialBlockDownload = IsInitialBlockDownload();
     }
     // Send block tip changed notifications without the lock held
-    if (fNotify) {
+    if (pindexHeader) {
         GetNotifications().headerTip(GetSynchronizationState(fInitialBlockDownload, m_blockman.m_blockfiles_indexed), pindexHeader->nHeight, pindexHeader->nTime, false);
     }
-    return fNotify;
+    return pindexHeader != nullptr;
 }
 
 static void LimitValidationInterfaceQueue(ValidationSignals& signals) LOCKS_EXCLUDED(cs_main) {
@@ -3614,10 +3608,10 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
         // Recalculate m_best_header if it became invalid.
         auto candidate_it = highpow_outofchain_headers.lower_bound(new_tip->nChainWork);
 
-        const bool best_header_needs_update{m_chainman.m_best_header->GetAncestor(disconnected_tip->nHeight) == disconnected_tip};
+        const bool best_header_needs_update{m_blockman.GetBestHeader()->GetAncestor(disconnected_tip->nHeight) == disconnected_tip};
         if (best_header_needs_update) {
             // new_tip is definitely still valid at this point, but there may be better ones
-            m_chainman.m_best_header = new_tip;
+            m_blockman.SetBestHeader(new_tip);
         }
 
         while (candidate_it != highpow_outofchain_headers.end()) {
@@ -3639,8 +3633,8 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
                 // which needs to be marked failed later.
             }
             if (best_header_needs_update &&
-                m_chainman.m_best_header->nChainWork < candidate->nChainWork) {
-                m_chainman.m_best_header = candidate;
+                m_blockman.GetBestHeader()->nChainWork < candidate->nChainWork) {
+                m_blockman.SetBestHeader(candidate);
             }
             ++candidate_it;
         }
@@ -4228,7 +4222,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         LogDebug(BCLog::VALIDATION, "%s: not adding new block header %s, missing anti-dos proof-of-work validation\n", __func__, hash.ToString());
         return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "too-little-chainwork");
     }
-    CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
+    CBlockIndex* pindex{m_blockman.AddToBlockIndex(block)};
 
     if (ppindex)
         *ppindex = pindex;
@@ -4275,7 +4269,7 @@ void ChainstateManager::ReportHeadersPresync(int64_t height, int64_t timestamp)
         // Don't report headers presync progress if we already have a post-minchainwork header chain.
         // This means we lose reporting for potentially legitimate, but unlikely, deep reorgs, but
         // prevent attackers that spam low-work headers from filling our logs.
-        if (m_best_header->nChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
+        if (m_blockman.GetBestHeader()->nChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
         // Rate limit headers presync updates to 4 per second, as these are not subject to DoS
         // protection.
         auto now = MockableSteadyClock::now();
@@ -4921,14 +4915,16 @@ bool ChainstateManager::LoadBlockIndex()
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
 
+        CBlockIndex* best_header{m_blockman.GetBestHeader()};
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
             if (m_blockman.GetValidityStatus(*pindex) & BLOCK_FAILED_VALID && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
-            if (m_blockman.IsValid(*pindex, BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
-                m_best_header = pindex;
+            if (m_blockman.IsValid(*pindex, BLOCK_VALID_TREE) && (best_header == nullptr || CBlockIndexWorkComparator()(best_header, pindex)))
+                best_header = pindex;
         }
+        m_blockman.SetBestHeader(best_header);
     }
     return true;
 }
@@ -4953,7 +4949,7 @@ bool ChainstateManager::LoadGenesisBlock()
             LogError("Writing genesis block to disk failed");
             return false;
         }
-        CBlockIndex* pindex{m_blockman.AddToBlockIndex(genesis_block, m_best_header)};
+        CBlockIndex* pindex{m_blockman.AddToBlockIndex(genesis_block)};
         m_blockman.RecordBlockData(*pindex, genesis_block.vtx.size(), blockPos, DeploymentActiveAt(*pindex, *this, Consensus::DEPLOYMENT_SEGWIT));
         ReceivedBlockTransactions(pindex);
     } catch (const std::runtime_error& e) {
@@ -5163,9 +5159,10 @@ void ChainstateManager::CheckBlockIndex() const
     // The best header chain can differ from the active chain: E.g. its entries may belong to blocks that
     // are not yet validated.
     CChain best_hdr_chain;
-    assert(m_best_header);
-    assert(!(m_blockman.GetValidityStatus(*m_best_header) & BLOCK_FAILED_VALID));
-    best_hdr_chain.SetTip(*m_best_header);
+    CBlockIndex* const best_header{m_blockman.GetBestHeader()};
+    assert(best_header);
+    assert(!(m_blockman.GetValidityStatus(*best_header) & BLOCK_FAILED_VALID));
+    best_hdr_chain.SetTip(*best_header);
 
     std::multimap<const CBlockIndex*, const CBlockIndex*> forward;
     for (auto& [_, block_index] : m_blockman.m_block_index) {
@@ -5296,7 +5293,7 @@ void ChainstateManager::CheckBlockIndex() const
             assert((pindex->m_chain_tx_count != 0) == (pindex == snap_base));
         }
         // There should be no block with more work than m_best_header, unless it's known to be invalid
-        assert((m_blockman.GetValidityStatus(*pindex) & BLOCK_FAILED_VALID) || pindex->nChainWork <= m_best_header->nChainWork);
+        assert((m_blockman.GetValidityStatus(*pindex) & BLOCK_FAILED_VALID) || pindex->nChainWork <= best_header->nChainWork);
 
         // Chainstate-specific checks on setBlockIndexCandidates
         for (const auto& c : m_chainstates) {
@@ -5511,15 +5508,16 @@ double ChainstateManager::GuessVerificationProgress(const CBlockIndex* pindex) c
     }
 
     const int64_t nNow{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
+    const CBlockIndex* const best_header{m_blockman.GetBestHeader()};
     const auto block_time{
-        (Assume(m_best_header) && std::abs(nNow - pindex->GetBlockTime()) <= Ticks<std::chrono::seconds>(2h) &&
-         Assume(m_best_header->nHeight >= pindex->nHeight)) ?
+        (Assume(best_header) && std::abs(nNow - pindex->GetBlockTime()) <= Ticks<std::chrono::seconds>(2h) &&
+         Assume(best_header->nHeight >= pindex->nHeight)) ?
             // When the header is known to be recent, switch to a height-based
             // approach. This ensures the returned value is quantized when
             // close to "1.0", because some users expect it to be. This also
             // avoids relying too much on the exact miner-set timestamp, which
             // may be off.
-            nNow - (m_best_header->nHeight - pindex->nHeight) * GetConsensus().nPowTargetSpacing :
+            nNow - (best_header->nHeight - pindex->nHeight) * GetConsensus().nPowTargetSpacing :
             pindex->GetBlockTime(),
     };
 
@@ -5629,7 +5627,8 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             return util::Error{Untranslated(strprintf("The base block header (%s) is part of an invalid chain", base_blockhash.ToString()))};
         }
 
-        if (!m_best_header || m_best_header->GetAncestor(snapshot_start_block->nHeight) != snapshot_start_block) {
+        const CBlockIndex* best_header{m_blockman.GetBestHeader()};
+        if (!best_header || best_header->GetAncestor(snapshot_start_block->nHeight) != snapshot_start_block) {
             return util::Error{Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo.")};
         }
 
@@ -6266,18 +6265,13 @@ ChainstateRole Chainstate::GetRole() const
 void ChainstateManager::RecalculateBestHeader()
 {
     AssertLockHeld(cs_main);
-    m_best_header = ActiveChain().Tip();
-    for (auto& entry : m_blockman.m_block_index) {
-        if (!(m_blockman.GetValidityStatus(entry.second) & BLOCK_FAILED_VALID) && m_best_header->nChainWork < entry.second.nChainWork) {
-            m_best_header = &entry.second;
-        }
-    }
+    m_blockman.RecalculateBestHeader(ActiveChain().Tip());
 }
 
 std::optional<int> ChainstateManager::BlocksAheadOfTip() const
 {
     LOCK(::cs_main);
-    const CBlockIndex* best_header{m_best_header};
+    const CBlockIndex* best_header{m_blockman.GetBestHeader()};
     const CBlockIndex* tip{ActiveChain().Tip()};
     // Only consider headers that extend the active tip; ignore competing branches.
     if (best_header && tip && best_header->nChainWork > tip->nChainWork &&

@@ -302,7 +302,7 @@ public:
     bool getHeaderTip(int& height, int64_t& block_time) override
     {
         LOCK(::cs_main);
-        auto best_header = chainman().m_best_header;
+        auto best_header = chainman().m_blockman.GetBestHeader();
         if (best_header) {
             height = best_header->nHeight;
             block_time = best_header->GetBlockTime();

@@ -1318,7 +1318,7 @@ const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(
 const btck_BlockTreeEntry* btck_chainstate_manager_get_best_entry(const btck_ChainstateManager* chainstate_manager)
 {
     auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
-    return btck_BlockTreeEntry::ref(WITH_LOCK(chainman.GetMutex(), return chainman.m_best_header));
+    return btck_BlockTreeEntry::ref(WITH_LOCK(chainman.GetMutex(), return chainman.m_blockman.GetBestHeader()));
 }
 
 void btck_chainstate_manager_destroy(btck_ChainstateManager* chainman)

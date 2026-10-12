@@ -1454,7 +1454,7 @@ RPCMethod getblockchaininfo()
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
     obj.pushKV("blocks", height);
-    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    obj.pushKV("headers", chainman.m_blockman.GetBestHeader() ? chainman.m_blockman.GetBestHeader()->nHeight : -1);
     obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -3655,7 +3655,7 @@ return RPCMethod{
         return data;
     };
 
-    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    obj.pushKV("headers", chainman.m_blockman.GetBestHeader() ? chainman.m_blockman.GetBestHeader()->nHeight : -1);
     UniValue obj_chainstates{UniValue::VARR};
     if (const Chainstate * cs{chainman.HistoricalChainstate()}) {
         obj_chainstates.push_back(make_chain_data(*cs));
