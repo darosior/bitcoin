@@ -635,10 +635,10 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex, !m_net_state_mutex);
 
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
-    void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex, g_msgproc_mutex);
+    void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex, g_msgproc_mutex);
 
     /** If we have extra outbound peers, try to disconnect the one with the oldest block announcement */
-    void EvictExtraOutboundPeers(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
+    void EvictExtraOutboundPeers(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex);
 
     /** Retrieve unbroadcast transactions from the mempool and reattempt sending to peers */
     void ReattemptInitialBroadcast(CScheduler& scheduler) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
@@ -1053,10 +1053,10 @@ private:
     /** Update pindexLastCommonBlock and add not-in-flight missing successors to vBlocks, until it has
      *  at most count entries.
      */
-    void FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
+    void FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex);
 
     /** Request blocks for the background chainstate, if one is in use. */
-    void TryDownloadingHistoricalBlocks(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, const CBlockIndex* from_tip, const CBlockIndex* target_block) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
+    void TryDownloadingHistoricalBlocks(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, const CBlockIndex* from_tip, const CBlockIndex* target_block) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex);
 
     /**
     * \brief Find next blocks to download from a peer after a starting block.
@@ -1085,7 +1085,7 @@ private:
     *                     block in the window is in flight and no other peer is
     *                     trying to download the next block).
     */
-    void FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CBlockIndex* active_tip=nullptr, NodeId* nodeStaller=nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
+    void FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CBlockIndex* active_tip=nullptr, NodeId* nodeStaller=nullptr) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex);
 
     /* Multimap used to preserve insertion order */
     typedef std::multimap<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> BlockDownloadMap;
@@ -5801,7 +5801,6 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
 
 void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds, const CBlockIndex& tip)
 {
-    AssertLockHeld(cs_main);
     AssertLockHeld(m_net_state_mutex);
 
     CNodeState &state = *State(pto.GetId());
@@ -5885,8 +5884,7 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
             // disconnect our second youngest.
             to_disconnect = next_youngest_peer.first;
         }
-        m_connman.ForNode(to_disconnect, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex) {
-            AssertLockHeld(::cs_main);
+        m_connman.ForNode(to_disconnect, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex) {
             AssertLockHeld(m_net_state_mutex);
             // Make sure we're not getting a block right now, and that
             // we've been connected long enough for this eviction to happen
@@ -5922,8 +5920,7 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
         };
         std::optional<WorstPeer> worst_peer;
 
-        m_connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex, m_connman.GetNodesMutex()) {
-            AssertLockHeld(::cs_main);
+        m_connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex, m_connman.GetNodesMutex()) {
             AssertLockHeld(m_net_state_mutex);
 
             // Only consider outbound-full-relay peers that are not already
@@ -5943,8 +5940,7 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
             }
         });
         if (worst_peer.has_value()) {
-            bool disconnected = m_connman.ForNode((*worst_peer).node, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex) {
-                AssertLockHeld(::cs_main);
+            bool disconnected = m_connman.ForNode((*worst_peer).node, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex) {
                 AssertLockHeld(m_net_state_mutex);
 
                 // Only disconnect a peer that has been connected to us for
@@ -5978,7 +5974,6 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
 
 void PeerManagerImpl::CheckForStaleTipAndEvictPeers()
 {
-    LOCK(cs_main);
     LOCK(m_net_state_mutex);
 
     const auto current_time{NodeClock::now()};
@@ -6409,7 +6404,6 @@ bool PeerManagerImpl::SendMessages(CNode& node)
     ProcessInvBacklog(now);
 
     {
-        LOCK(cs_main);
         LOCK(m_net_state_mutex);
 
         CNodeState &state = *State(node.GetId());
@@ -6543,6 +6537,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 }
             }
             if (!fRevertToInv && !vHeaders.empty()) {
+                bool sent_cmpctblock{false};
                 if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks) {
                     // We only send up to 1 block as header-and-ids, as otherwise
                     // probably means we're doing an initial-ish-sync or they're slow
@@ -6558,15 +6553,29 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     }
                     if (cached_cmpctblock_msg.has_value()) {
                         PushMessage(node, std::move(cached_cmpctblock_msg.value()));
+                        sent_cmpctblock = true;
                     } else {
+                        // Nothing excludes the pruning of the block while we read it, if we are far enough behind
+                        // for the block to have fallen out of the blocks to keep. Announce it with its header or
+                        // with an inv then.
                         CBlock block;
-                        const bool ret{m_chainman.m_blockman.ReadBlock(block, *pBestIndex)};
-                        assert(ret);
-                        CBlockHeaderAndShortTxIDs cmpctblock{block, m_rng.rand64()};
-                        MakeAndPushMessage(node, NetMsgType::CMPCTBLOCK, cmpctblock);
+                        if (m_chainman.m_blockman.ReadBlock(block, *pBestIndex)) {
+                            CBlockHeaderAndShortTxIDs cmpctblock{block, m_rng.rand64()};
+                            MakeAndPushMessage(node, NetMsgType::CMPCTBLOCK, cmpctblock);
+                            sent_cmpctblock = true;
+                        } else {
+                            if (m_chainman.m_blockman.IsBlockPruned(*pBestIndex)) {
+                                LogDebug(BCLog::NET, "%s: block %s was pruned before it could be read to announce it to peer=%d\n", __func__,
+                                        vHeaders.front().GetHash().ToString(), node.GetId());
+                            } else {
+                                LogError("%s: cannot load block %s from disk to announce it to peer=%d", __func__,
+                                        vHeaders.front().GetHash().ToString(), node.GetId());
+                            }
+                        }
                     }
-                    state.pindexBestHeaderSent = pBestIndex;
-                } else if (peer.m_prefers_headers) {
+                    if (sent_cmpctblock) state.pindexBestHeaderSent = pBestIndex;
+                }
+                if (!sent_cmpctblock && peer.m_prefers_headers) {
                     if (vHeaders.size() > 1) {
                         LogDebug(BCLog::NET, "%s: %u headers, range (%s, %s), to peer=%d\n", __func__,
                                 vHeaders.size(),
@@ -6578,7 +6587,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     }
                     MakeAndPushMessage(node, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
                     state.pindexBestHeaderSent = pBestIndex;
-                } else
+                } else if (!sent_cmpctblock)
                     fRevertToInv = true;
             }
             if (fRevertToInv) {
@@ -6888,7 +6897,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
 
         if (!vGetData.empty())
             MakeAndPushMessage(node, NetMsgType::GETDATA, vGetData);
-    } // release cs_main
+    } // release m_net_state_mutex
     MaybeSendFeefilter(node, peer, current_time);
     return true;
 }
