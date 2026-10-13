@@ -190,7 +190,7 @@ void utxo_snapshot_fuzz(FuzzBufferType buffer)
             Assert(coinscache.HaveCoin(COutPoint{block->vtx.at(0)->GetHash(), 0}));
             const auto* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
             Assert(index);
-            Assert(index->nTx == 0);
+            Assert(WITH_LOCK(g_block_index_mutex, return index->nTx) == 0);
             if (index->nHeight == chainman.ActiveChainstate().SnapshotBase()->nHeight) {
                 auto params{chainman.GetParams().AssumeutxoForHeight(index->nHeight)};
                 Assert(params.has_value());

@@ -6,3 +6,4 @@
 #include <sync.h>
 
 RecursiveMutex cs_main;
+GlobalMutex g_block_index_mutex;

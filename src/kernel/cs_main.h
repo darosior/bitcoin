@@ -19,4 +19,67 @@
  */
 extern RecursiveMutex cs_main;
 
+/**
+ * The block index lock. It guards the block index and the state of the block files, which cs_main used to guard
+ * on its own. It is declared here, next to cs_main, because the fields it guards are fields of CBlockIndex, which
+ * is lower than the code that uses it and cannot name a member of it.
+ *
+ * This lock guards:
+ * - CBlockIndex::nStatus, nFile, nDataPos, nUndoPos and nTx;
+ * - the block index map itself (BlockManager::m_block_index): looking an entry up, iterating over all entries and
+ *   inserting new ones. Entries are never erased while the node runs, so a pointer to one stays valid;
+ * - the best header and the last notified header (ChainstateManager::m_best_header and
+ *   m_last_notified_header);
+ * - the set of dirty entries (BlockManager::m_dirty_blockindex);
+ * - the state of the block files: the block file info, the blockfile cursors, and the set of dirty block files;
+ * - the prune locks, the flag that requests a check for pruning, whether files were ever pruned, and the
+ *   snapshot height that segments the block files.
+ *
+ * The other fields of an entry do not need this lock. The header fields, phashBlock, pprev, pskip, nHeight,
+ * nChainWork and nTimeMax never change once the entry is inserted. nSequenceId, m_chain_tx_count and
+ * m_blocks_unlinked belong to chain selection and are guarded by cs_main.
+ *
+ * Lock order: cs_main, then this lock.
+ *
+ * This is a leaf lock. The code that holds it:
+ * - does not take cs_main, nor any other lock. That includes the functions that take cs_main themselves, such as
+ *   ActiveChain(), ActiveTip() and ActiveChainstate(): their results are computed before taking this lock.
+ *   Logging is the exception: LogDebug and the like take the logger's own mutex, which is a leaf too;
+ * - does not call a notification or a callback. Errors found under it are reported once it is released, see
+ *   BlockManager::DeferredNotifications;
+ * - does not wait for anything: no condition variable, no future, no draining of the validation queue.
+ * Nothing can wait for a thread that holds it, so it cannot be part of a deadlock, whatever the order a caller
+ * takes its other locks in.
+ *
+ * It is global, like cs_main: all the BlockManagers of a process share it, which costs contention and nothing
+ * else, since nothing is taken under it. It is non-recursive. GlobalMutex is the type for a Mutex that is a
+ * global (see sync.h). The functions that take it are annotated LOCKS_EXCLUDED(g_block_index_mutex), and clang
+ * rejects a call made while the caller is known to hold it. It does not follow that requirement through callers
+ * that are not annotated, so the leaf rule above is also checked by review and by the lock order checks.
+ *
+ * Reading and writing block and undo files runs under this lock, as it runs under cs_main on master: whoever
+ * needs the block index waits for a block that is being written or a file that is being flushed. The lock could
+ * later be split in one for the index and one for the storage, if measurements show that this wait matters. The
+ * annotations on the fields would then point to the code that has to change.
+ *
+ * The block tree database handle (BlockManager::m_block_tree_db) is not guarded: it is set once in the
+ * constructor, and the database is safe to use from several threads. What it stores is guarded by this lock, and
+ * a batch is built while holding it, see BlockManager::WriteBlockIndexDB().
+ *
+ * For now, the block and undo writers (BlockManager::WriteBlock, UpdateBlockInfo, WriteBlockUndo and
+ * FlushChainstateBlockFile) and everything that changes an existing entry also hold cs_main. The fields are
+ * public, so this is not enforced field by field: it is enforced by the function that flags an entry as dirty
+ * (BlockManager::MarkDirty()), which requires cs_main and this lock. A change that is not flagged is not written
+ * to disk, so it would be a bug anyway.
+ *
+ * Pruning depends on this. FindFilesToPrune() selects the files to prune and UnlinkPrunedFiles() unlinks them in
+ * the same cs_main critical section of FlushStateToDisk(), so no block or undo data can be written to a file
+ * between the two, only because every writer holds cs_main. Whoever lets a writer go without cs_main has to make
+ * sure it cannot write to a file that was selected for pruning.
+ *
+ * The paths that change the block index without cs_main are the insertion of new entries (which are fully built
+ * before they become visible), the best header, the last notified header and the prune locks.
+ */
+extern GlobalMutex g_block_index_mutex ACQUIRED_AFTER(::cs_main);
+
 #endif // BITCOIN_KERNEL_CS_MAIN_H

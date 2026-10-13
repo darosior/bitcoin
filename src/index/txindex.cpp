@@ -184,6 +184,7 @@ std::optional<TxIndexResult> TxIndex::FindTx(const Txid& tx_hash) const
                 LogWarning("Block index entry %s not found for txid %s", candidate_block_hash.ToString(), tx_hash.ToString());
                 continue;
             }
+            LOCK(g_block_index_mutex);
             if (!(block_index->nStatus & BLOCK_HAVE_DATA)) continue;
             const FlatFilePos tx_position{block_index->nFile, block_index->nDataPos + key.pos.tx_offset_in_block};
             candidates.emplace_back(tx_position, candidate_block_hash, key.pos.block_seq, m_chainstate->m_chain.Contains(*block_index));

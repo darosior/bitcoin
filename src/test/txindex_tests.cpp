@@ -79,6 +79,7 @@ FlatFilePos BlockFilePos(const ChainstateManager& chainman, uint32_t height)
     LOCK(cs_main);
     const CBlockIndex* block_index{chainman.ActiveChain()[height]};
     BOOST_REQUIRE(block_index);
+    LOCK(g_block_index_mutex);
     return {block_index->nFile, block_index->nDataPos};
 }
 
