@@ -3769,11 +3769,10 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     }
 }
 
-/** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
-void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos)
+/** Update chain selection for a block whose data was just recorded (see BlockManager::RecordBlockData()). */
+void ChainstateManager::ReceivedBlockTransactions(CBlockIndex* pindexNew)
 {
     AssertLockHeld(cs_main);
-    pindexNew->nTx = block.vtx.size();
     // Typically m_chain_tx_count will be 0 at this point, but it can be nonzero if this
     // is a pruned block which is being downloaded again, or if this is an
     // assumeutxo snapshot block which has a hardcoded m_chain_tx_count value from the
@@ -3786,16 +3785,6 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
             pindexNew->nHeight, pindexNew->m_chain_tx_count, prev_tx_sum(*pindexNew), CLIENT_NAME, FormatFullVersion(), CLIENT_BUGREPORT);
         pindexNew->m_chain_tx_count = 0;
     }
-    pindexNew->nFile = pos.nFile;
-    pindexNew->nDataPos = pos.nPos;
-    pindexNew->nUndoPos = 0;
-    pindexNew->nStatus |= BLOCK_HAVE_DATA;
-    if (DeploymentActiveAt(*pindexNew, *this, Consensus::DEPLOYMENT_SEGWIT)) {
-        pindexNew->nStatus |= BLOCK_OPT_WITNESS;
-    }
-    pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
-    m_blockman.m_dirty_blockindex.insert(pindexNew);
-
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
         std::deque<CBlockIndex*> queue;
@@ -4384,7 +4373,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
                 return false;
             }
         }
-        ReceivedBlockTransactions(block, pindex, blockPos);
+        m_blockman.RecordBlockData(*pindex, block.vtx.size(), blockPos, DeploymentActiveAt(*pindex, *this, Consensus::DEPLOYMENT_SEGWIT));
+        ReceivedBlockTransactions(pindex);
     } catch (const std::runtime_error& e) {
         return FatalError(GetNotifications(), state, strprintf(_("System error while saving block to disk: %s"), e.what()));
     }
@@ -4960,7 +4950,8 @@ bool ChainstateManager::LoadGenesisBlock()
             return false;
         }
         CBlockIndex* pindex{m_blockman.AddToBlockIndex(genesis_block, m_best_header)};
-        ReceivedBlockTransactions(genesis_block, pindex, blockPos);
+        m_blockman.RecordBlockData(*pindex, genesis_block.vtx.size(), blockPos, DeploymentActiveAt(*pindex, *this, Consensus::DEPLOYMENT_SEGWIT));
+        ReceivedBlockTransactions(pindex);
     } catch (const std::runtime_error& e) {
         LogError("Failed to write genesis block: %s", e.what());
         return false;

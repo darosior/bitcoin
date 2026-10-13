@@ -254,6 +254,19 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     return pindexNew;
 }
 
+void BlockManager::RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness)
+{
+    AssertLockHeld(::cs_main);
+    index.nTx = num_tx;
+    index.nFile = pos.nFile;
+    index.nDataPos = pos.nPos;
+    index.nUndoPos = 0;
+    index.nStatus |= BLOCK_HAVE_DATA;
+    if (opt_witness) index.nStatus |= BLOCK_OPT_WITNESS;
+    index.RaiseValidity(BLOCK_VALID_TRANSACTIONS);
+    m_dirty_blockindex.insert(&index);
+}
+
 void BlockManager::AddUnlinkedBlock(CBlockIndex* block)
 {
     AssertLockHeld(cs_main);
