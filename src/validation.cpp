@@ -126,24 +126,30 @@ TRACEPOINT_SEMAPHORE(utxocache, flush);
 TRACEPOINT_SEMAPHORE(mempool, replaced);
 TRACEPOINT_SEMAPHORE(mempool, rejected);
 
-const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locator) const
+const CBlockIndex* FindForkInGlobalIndex(const node::BlockManager& blockman, const CBlockIndex* tip, const CBlockLocator& locator)
 {
-    AssertLockHeld(cs_main);
+    if (!tip) return nullptr;
 
     // Find the latest block common to locator and chain - we expect that
     // locator.vHave is sorted descending by height.
     for (const uint256& hash : locator.vHave) {
-        const CBlockIndex* pindex{m_blockman.LookupBlockIndex(hash)};
+        const CBlockIndex* pindex{blockman.LookupBlockIndex(hash)};
         if (pindex) {
-            if (m_chain.Contains(*pindex)) {
+            if (tip->GetAncestor(pindex->nHeight) == pindex) {
                 return pindex;
             }
-            if (pindex->GetAncestor(m_chain.Height()) == m_chain.Tip()) {
-                return m_chain.Tip();
+            if (pindex->GetAncestor(tip->nHeight) == tip) {
+                return tip;
             }
         }
     }
-    return m_chain.Genesis();
+    return tip->GetAncestor(0);
+}
+
+const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locator) const
+{
+    AssertLockHeld(cs_main);
+    return ::FindForkInGlobalIndex(m_blockman, m_chain.Tip(), locator);
 }
 
 bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
