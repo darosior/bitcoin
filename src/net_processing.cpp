@@ -439,7 +439,7 @@ private:
 using PeerRef = std::shared_ptr<Peer>;
 
 /**
- * Maintain validation-specific state about nodes, protected by cs_main, instead
+ * Maintain validation-specific state about nodes, protected by m_net_state_mutex, instead
  * by CNode's own locks. This simplifies asynchronous operation, where
  * processing of incoming data is done after the ProcessMessage call returns,
  * and we're no longer holding the node's locks.
@@ -594,25 +594,25 @@ public:
     void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
     void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, !m_net_state_mutex);
 
     /** Implement NetEventsInterface */
     void ProcessPendingEvents() override
-        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex);
-    void InitializeNode(const CNode& node, ServiceFlags our_services) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_tx_download_mutex);
-    void FinalizeNode(const CNode& node) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, !m_tx_download_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
+    void InitializeNode(const CNode& node, ServiceFlags our_services) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_tx_download_mutex, !m_net_state_mutex);
+    void FinalizeNode(const CNode& node) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, !m_tx_download_mutex, !m_net_state_mutex);
     bool HasAllDesirableServiceFlags(ServiceFlags services) const override;
     bool ProcessMessages(CNode& node, std::atomic<bool>& interrupt) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex, !m_net_state_mutex);
     bool SendMessages(CNode& node) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_net_state_mutex);
 
     /** Implement PeerManager */
     void StartScheduledTasks(CScheduler& scheduler) override;
-    void CheckForStaleTipAndEvictPeers() override;
+    void CheckForStaleTipAndEvictPeers() override EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex);
     util::Expected<void, std::string> FetchBlock(NodeId peer_id, const CBlockIndex& block_index) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
-    bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_net_state_mutex);
+    bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_net_state_mutex);
     std::vector<node::TxOrphanage::OrphanInfo> GetOrphanTransactions() override EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     PeerManagerInfo GetInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
     std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -626,19 +626,19 @@ public:
         m_best_block_time = time;
     };
     void UnitTestMisbehaving(NodeId peer_id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), ""); };
-    void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) override;
+    void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) override EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex);
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
 
 private:
     void ProcessMessage(Peer& peer, CNode& pfrom, const std::string& msg_type, DataStream& vRecv, NodeClock::time_point time_received,
                         const std::atomic<bool>& interruptMsgProc)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex, !m_net_state_mutex);
 
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
-    void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds) EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
+    void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex, g_msgproc_mutex);
 
     /** If we have extra outbound peers, try to disconnect the one with the oldest block announcement */
-    void EvictExtraOutboundPeers(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void EvictExtraOutboundPeers(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /** Retrieve unbroadcast transactions from the mempool and reattempt sending to peers */
     void ReattemptInitialBroadcast(CScheduler& scheduler) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
@@ -718,7 +718,7 @@ private:
     /** Handle the result of the validation of a transaction a peer sent us: calls ProcessValidTx or ProcessInvalidTx,
      * and submits the package that ProcessInvalidTx found for it, if any. */
     void OnTxProcessed(const ValidationJobs::TxProcessed& processed)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_net_state_mutex);
 
     /** Handle the result of the validation of an orphan transaction: tell if its inputs are still missing. */
     void OnOrphanReconsidered(const ValidationJobs::OrphanReconsidered& reconsidered)
@@ -746,7 +746,7 @@ private:
      *                     will be empty.
      */
     bool ProcessOrphanTx(Peer& peer)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex, !m_net_state_mutex);
 
     /** Process a single headers message from a peer.
      *
@@ -758,7 +758,7 @@ private:
     void ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                                std::vector<CBlockHeader>&& headers,
                                bool via_compact_block)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, g_msgproc_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_net_state_mutex);
     /** Various helpers for headers processing, invoked by ProcessHeadersMessage() */
     /** Return true if headers are continuous and have valid proof-of-work (DoS points assigned on failure) */
     bool CheckHeadersPoW(const std::vector<CBlockHeader>& headers, Peer& peer);
@@ -767,7 +767,7 @@ private:
     /** Deal with state tracking and headers sync for peers that send
      * non-connecting headers (this can happen due to BIP 130 headers
      * announcements for blocks interacting with the 2hr (MAX_FUTURE_BLOCK_TIME) rule). */
-    void HandleUnconnectingHeaders(CNode& pfrom, Peer& peer, const std::vector<CBlockHeader>& headers) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    void HandleUnconnectingHeaders(CNode& pfrom, Peer& peer, const std::vector<CBlockHeader>& headers) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_net_state_mutex);
     /** Return true if the headers connect to each other, false otherwise */
     bool CheckHeadersAreContinuous(const std::vector<CBlockHeader>& headers) const;
     /** Try to continue a low-work headers sync that has already begun.
@@ -817,10 +817,10 @@ private:
      */
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Potentially fetch blocks from this peer upon receipt of a new headers tip */
-    void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header);
+    void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header) EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex);
     /** Update peer state based on received headers message */
     void UpdatePeerStateForReceivedHeaders(CNode& pfrom, const CBlockIndex& last_header, bool received_new_header, bool may_have_more_headers)
-        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_net_state_mutex);
 
     void SendBlockTransactions(CNode& pfrom, Peer& peer, const CBlock& block, const BlockTransactionsRequest& req);
 
@@ -851,7 +851,7 @@ private:
     void MaybeSendAddr(CNode& node, Peer& peer, std::chrono::microseconds current_time) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
     /** Send a single `sendheaders` message, after we have completed headers sync with a peer. */
-    void MaybeSendSendHeaders(CNode& node, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    void MaybeSendSendHeaders(CNode& node, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_net_state_mutex);
 
     /** Relay (gossip) an address to a few randomly chosen nodes.
      *
@@ -894,13 +894,38 @@ private:
 
     std::unique_ptr<TxReconciliationTracker> m_txreconciliation;
 
+    /**
+     * Guards what network code keeps about its peers that is not in Peer: the CNodeState of each of them, and
+     * what is derived from or indexes it (blocks in flight, where blocks came from, the counters of peers).
+     * See the members that are GUARDED_BY it.
+     *
+     * Every thread that touches this state takes it, not only the message handler: RPCs (getpeerinfo,
+     * getblockfrompeer, the announcement of a submitted block), the socket thread (InitializeNode(),
+     * FinalizeNode()) and the scheduler. It is therefore a lock of its own, and not g_msgproc_mutex, which only
+     * says that the thread is the message handler.
+     *
+     * Lock order: g_msgproc_mutex -> cs_main -> m_net_state_mutex ->
+     *     { m_peer_mutex, the mutexes inside Peer, m_most_recent_block_mutex, CConnman::m_nodes_mutex
+     *       (through ForNode() and ForEachNode()), g_block_index_mutex, m_tx_download_mutex -> m_mempool.cs }
+     * The edge from cs_main is there only because NewPoWValidBlock() is called while the block is being
+     * accepted, with cs_main held; it goes away when acceptance does not hold cs_main anymore.
+     *
+     * It must never be held while calling validation (the jobs of ValidationJobs, ProcessNewBlockHeaders(),
+     * anything that takes cs_main), as validation calls NewPoWValidBlock() with cs_main held: the functions that
+     * do are annotated with !m_net_state_mutex.
+     *
+     * The callbacks of ForNode() and ForEachNode() do not take it: they run with it held by their caller, and
+     * assert it.
+     */
+    mutable Mutex m_net_state_mutex ACQUIRED_AFTER(::cs_main);
+
     /** The height of the best chain */
     std::atomic<int> m_best_height{-1};
     /** The time of the best chain tip block */
     std::atomic<std::chrono::seconds> m_best_block_time{0s};
 
     /** Next time to check for stale tip */
-    std::chrono::seconds m_stale_tip_check_time GUARDED_BY(cs_main){0s};
+    std::chrono::seconds m_stale_tip_check_time GUARDED_BY(m_net_state_mutex){0s};
 
     node::Warnings& m_warnings;
     TimeOffsets m_outbound_time_offsets{m_warnings};
@@ -911,7 +936,7 @@ private:
 
     /** Whether we've completed initial sync yet, for determining when to turn
       * on extra block-relay-only peers. */
-    bool m_initial_sync_finished GUARDED_BY(cs_main){false};
+    bool m_initial_sync_finished GUARDED_BY(m_net_state_mutex){false};
 
     /** Protects m_peer_map. This mutex must not be locked while holding a lock
      *  on any of the mutexes inside a Peer object. */
@@ -925,19 +950,19 @@ private:
     std::map<NodeId, PeerRef> m_peer_map GUARDED_BY(m_peer_mutex);
 
     /** Map maintaining per-node state. */
-    std::map<NodeId, CNodeState> m_node_states GUARDED_BY(cs_main);
+    std::map<NodeId, CNodeState> m_node_states GUARDED_BY(m_net_state_mutex);
 
     /** Get a pointer to a const CNodeState, used when not mutating the CNodeState object. */
-    const CNodeState* State(NodeId pnode) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    const CNodeState* State(NodeId pnode) const EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
     /** Get a pointer to a mutable CNodeState. */
-    CNodeState* State(NodeId pnode) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CNodeState* State(NodeId pnode) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     uint32_t GetFetchFlags(const Peer& peer) const;
 
     std::map<uint64_t, std::chrono::microseconds> m_next_inv_to_inbounds_per_network_key GUARDED_BY(g_msgproc_mutex);
 
     /** Number of nodes with fSyncStarted. */
-    int nSyncStarted GUARDED_BY(cs_main) = 0;
+    int nSyncStarted GUARDED_BY(m_net_state_mutex) = 0;
 
     /** Hash of the last block we received via INV */
     uint256 m_last_block_inv_triggering_headers_sync GUARDED_BY(g_msgproc_mutex){};
@@ -948,16 +973,16 @@ private:
      * Set mapBlockSource[hash].second to false if the node should not be
      * punished if the block is invalid.
      */
-    std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(cs_main);
+    std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(m_net_state_mutex);
 
     /** Number of peers with wtxid relay. */
     std::atomic<int> m_wtxid_relay_peers{0};
 
     /** Number of outbound peers with m_chain_sync.m_protect. */
-    int m_outbound_peers_with_protect_from_disconnect GUARDED_BY(cs_main) = 0;
+    int m_outbound_peers_with_protect_from_disconnect GUARDED_BY(m_net_state_mutex) = 0;
 
     /** Number of preferable block download peers. */
-    int m_num_preferred_download_peers GUARDED_BY(cs_main){0};
+    int m_num_preferred_download_peers GUARDED_BY(m_net_state_mutex){0};
 
     /** Stalling timeout for blocks in IBD */
     std::atomic<std::chrono::seconds> m_block_stalling_timeout{BLOCK_STALLING_TIMEOUT_DEFAULT};
@@ -1000,13 +1025,13 @@ private:
     std::atomic_bool m_headers_presync_should_signal{false};
 
     /** Height of the highest block announced using BIP 152 high-bandwidth mode. */
-    int m_highest_fast_announce GUARDED_BY(::cs_main){0};
+    int m_highest_fast_announce GUARDED_BY(m_net_state_mutex){0};
 
     /** Have we requested this block from a peer */
-    bool IsBlockRequested(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool IsBlockRequested(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /** Have we requested this block from an outbound peer */
-    bool IsBlockRequestedFromOutbound(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_peer_mutex);
+    bool IsBlockRequestedFromOutbound(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex, !m_peer_mutex);
 
     /** Remove this block from our tracked requested blocks. Called if:
      *  - the block has been received from a peer
@@ -1015,23 +1040,23 @@ private:
      * flight from that peer (to avoid one peer's network traffic from
      * affecting another's state).
      */
-    void RemoveBlockRequest(const uint256& hash, std::optional<NodeId> from_peer) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void RemoveBlockRequest(const uint256& hash, std::optional<NodeId> from_peer) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /* Mark a block as in flight
      * Returns false, still setting pit, if the block was already in flight from the same peer
      * pit will only be valid as long as the same cs_main lock is being held
      */
-    bool BlockRequested(NodeId nodeid, const CBlockIndex& block, std::list<QueuedBlock>::iterator** pit = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool BlockRequested(NodeId nodeid, const CBlockIndex& block, std::list<QueuedBlock>::iterator** pit = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
-    bool TipMayBeStale() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool TipMayBeStale() EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /** Update pindexLastCommonBlock and add not-in-flight missing successors to vBlocks, until it has
      *  at most count entries.
      */
-    void FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /** Request blocks for the background chainstate, if one is in use. */
-    void TryDownloadingHistoricalBlocks(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, const CBlockIndex* from_tip, const CBlockIndex* target_block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void TryDownloadingHistoricalBlocks(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, const CBlockIndex* from_tip, const CBlockIndex* target_block) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /**
     * \brief Find next blocks to download from a peer after a starting block.
@@ -1060,11 +1085,11 @@ private:
     *                     block in the window is in flight and no other peer is
     *                     trying to download the next block).
     */
-    void FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CChain* activeChain=nullptr, NodeId* nodeStaller=nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CChain* activeChain=nullptr, NodeId* nodeStaller=nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /* Multimap used to preserve insertion order */
     typedef std::multimap<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> BlockDownloadMap;
-    BlockDownloadMap mapBlocksInFlight GUARDED_BY(cs_main);
+    BlockDownloadMap mapBlocksInFlight GUARDED_BY(m_net_state_mutex);
 
     /** When our tip was last updated. */
     std::atomic<std::chrono::seconds> m_last_tip_update{0s};
@@ -1074,12 +1099,12 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, !tx_relay.m_tx_inventory_mutex);
 
     void ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
     /** Process a new block. Perform any post-processing housekeeping */
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
-        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
     //! What validation tells us, queued by the callbacks of CValidationInterface and processed in the order they came
     //! in by the message handler thread, in ProcessPendingEvents(). They hold the arguments of the callbacks: the
     //! block index entries are never removed, so the pointers to them stay valid.
@@ -1120,16 +1145,16 @@ private:
     /** Processing of the events. They are what the callbacks of CValidationInterface used to do on the spot. */
     void OnActiveTipChange(const CBlockIndex& new_tip, bool is_ibd) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void OnUpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
-    void OnBlockChecked(const uint256& hash, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    void OnBlockChecked(const uint256& hash, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_net_state_mutex);
     /** The results of the jobs that process a block: the block was accepted, then activated. */
-    void OnBlockAccepted(const ValidationJobs::BlockAccepted& accepted) LOCKS_EXCLUDED(::cs_main);
-    void OnBlockActivated(const ValidationJobs::BlockActivated& activated) LOCKS_EXCLUDED(::cs_main);
+    void OnBlockAccepted(const ValidationJobs::BlockAccepted& accepted) EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex) LOCKS_EXCLUDED(::cs_main);
+    void OnBlockActivated(const ValidationJobs::BlockActivated& activated) EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex) LOCKS_EXCLUDED(::cs_main);
     /** What is done once a block was processed, whether or not it was accepted. */
-    void OnBlockProcessed(NodeId from, const uint256& block_hash, bool new_block) LOCKS_EXCLUDED(::cs_main);
+    void OnBlockProcessed(NodeId from, const uint256& block_hash, bool new_block) EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex) LOCKS_EXCLUDED(::cs_main);
 
     /** Process compact block txns  */
     void ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
-        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
 
     /**
      * Schedule an INV for a transaction to be sent to the given peer (via `PushMessage()`).
@@ -1145,13 +1170,13 @@ private:
      * lNodesAnnouncingHeaderAndIDs, and keeping that list under a certain size by
      * removing the first element if necessary.
      */
-    void MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_peer_mutex);
+    void MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex, !m_peer_mutex);
 
     /** Stack of nodes which we have set to announce using compact blocks */
-    std::list<NodeId> lNodesAnnouncingHeaderAndIDs GUARDED_BY(cs_main);
+    std::list<NodeId> lNodesAnnouncingHeaderAndIDs GUARDED_BY(m_net_state_mutex);
 
     /** Number of peers from which we're downloading blocks. */
-    int m_peers_downloading_from GUARDED_BY(cs_main) = 0;
+    int m_peers_downloading_from GUARDED_BY(m_net_state_mutex) = 0;
 
     void AddToCompactExtraTransactions(const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
@@ -1163,9 +1188,9 @@ private:
     size_t vExtraTxnForCompactIt GUARDED_BY(g_msgproc_mutex) = 0;
 
     /** Check whether the last unknown block a peer advertised is not yet known. */
-    void ProcessBlockAvailability(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void ProcessBlockAvailability(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
     /** Update tracking information about which blocks a peer is assumed to have. */
-    void UpdateBlockAvailability(NodeId nodeid, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void UpdateBlockAvailability(NodeId nodeid, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
     bool CanDirectFetch() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**
@@ -1183,7 +1208,7 @@ private:
     bool BlockRequestAllowed(const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool AlreadyHaveBlock(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
-        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
 
     /**
      * Validation logic for compact filters request handling.
@@ -1279,7 +1304,10 @@ const CNodeState* PeerManagerImpl::State(NodeId pnode) const
 
 CNodeState* PeerManagerImpl::State(NodeId pnode)
 {
-    return const_cast<CNodeState*>(std::as_const(*this).State(pnode));
+    std::map<NodeId, CNodeState>::iterator it = m_node_states.find(pnode);
+    if (it == m_node_states.end())
+        return nullptr;
+    return &it->second;
 }
 
 /**
@@ -1446,6 +1474,7 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
 void PeerManagerImpl::MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid)
 {
     AssertLockHeld(cs_main);
+    AssertLockHeld(m_net_state_mutex);
 
     // When in -blocksonly mode, never request high-bandwidth mode from peers. Our
     // mempool will not contain the transactions necessary to reconstruct the
@@ -1481,8 +1510,9 @@ void PeerManagerImpl::MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid)
             }
         }
     }
-    const bool nodeid_was_appended{m_connman.ForNode(nodeid, [this](CNode* pfrom) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+    const bool nodeid_was_appended{m_connman.ForNode(nodeid, [this](CNode* pfrom) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex) {
         AssertLockHeld(::cs_main);
+        AssertLockHeld(m_net_state_mutex);
         MakeAndPushMessage(*pfrom, NetMsgType::SENDCMPCT, /*high_bandwidth=*/true, /*version=*/CMPCTBLOCKS_VERSION);
         // save BIP152 bandwidth state: we select peer to be high-bandwidth
         pfrom->m_bip152_highbandwidth_to = true;
@@ -1505,6 +1535,7 @@ void PeerManagerImpl::MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid)
 bool PeerManagerImpl::TipMayBeStale()
 {
     AssertLockHeld(cs_main);
+    AssertLockHeld(m_net_state_mutex);
     const Consensus::Params& consensusParams = m_chainparams.GetConsensus();
     if (m_last_tip_update.load() == 0s) {
         m_last_tip_update = GetTime<std::chrono::seconds>();
@@ -1771,6 +1802,7 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
 void PeerManagerImpl::UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time)
 {
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
     CNodeState *state = State(node);
     if (state) state->m_last_block_announcement = time;
 }
@@ -1780,6 +1812,7 @@ void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_service
     NodeId nodeid = node.GetId();
     {
         LOCK(cs_main); // For m_node_states
+        LOCK(m_net_state_mutex);
         m_node_states.try_emplace(m_node_states.end(), nodeid);
     }
     WITH_LOCK(m_tx_download_mutex, m_txdownloadman.CheckIsEmpty(nodeid));
@@ -1853,6 +1886,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     NodeId nodeid = node.GetId();
     {
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
     {
         // We remove the PeerRef from g_peer_map here, but we don't always
         // destruct the Peer. Sometimes another thread is still holding a
@@ -1983,6 +2017,7 @@ bool PeerManagerImpl::GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) c
 {
     {
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
         const CNodeState* state = State(nodeid);
         if (state == nullptr)
             return false;
@@ -2169,6 +2204,7 @@ util::Expected<void, std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, co
     // assertion failure in BlockRequested. This lock can be replaced with a
     // net-specific lock when more of CNodeState is moved into Peer.
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
 
     // Ensure this peer exists and hasn't been disconnected
     PeerRef peer = GetPeerRef(peer_id);
@@ -2286,6 +2322,7 @@ void PeerManagerImpl::ProcessPendingEvents()
     AssertLockNotHeld(m_validation_events_mutex);
     AssertLockNotHeld(m_tx_download_mutex);
     AssertLockNotHeld(m_peer_mutex);
+    AssertLockNotHeld(m_net_state_mutex);
 
     while (true) {
         std::deque<ValidationEvent> events;
@@ -2382,6 +2419,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
     auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock, FastRandomContext().rand64());
 
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
 
     if (pindex->nHeight <= m_highest_fast_announce)
         return;
@@ -2407,8 +2445,9 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
         m_most_recent_block_txs = std::move(most_recent_block_txs);
     }
 
-    m_connman.ForEachNode([this, pindex, &lazy_ser, &hashBlock](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+    m_connman.ForEachNode([this, pindex, &lazy_ser, &hashBlock](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex) {
         AssertLockHeld(::cs_main);
+        AssertLockHeld(m_net_state_mutex);
 
         if (pnode->GetCommonVersion() < INVALID_CB_NO_BAN_VERSION || pnode->fDisconnect)
             return;
@@ -2473,6 +2512,7 @@ void PeerManagerImpl::OnUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlo
 void PeerManagerImpl::OnBlockChecked(const uint256& hash, const BlockValidationState& state)
 {
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
 
     std::map<uint256, std::pair<NodeId, bool>>::iterator it = mapBlockSource.find(hash);
 
@@ -3060,7 +3100,11 @@ void PeerManagerImpl::HandleUnconnectingHeaders(CNode& pfrom, Peer& peer,
     // Set hashLastUnknownBlock for this peer, so that if we
     // eventually get the headers - even from a different peer -
     // we can use this peer to download.
-    WITH_LOCK(cs_main, UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash()));
+    {
+        LOCK(cs_main);
+        LOCK(m_net_state_mutex);
+        UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash());
+    }
 }
 
 bool PeerManagerImpl::CheckHeadersAreContinuous(const std::vector<CBlockHeader>& headers) const
@@ -3248,6 +3292,7 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
 void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
 {
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
     CNodeState *nodestate = State(pfrom.GetId());
 
     if (CanDirectFetch() && WITH_LOCK(g_block_index_mutex, return last_header.IsValid(BLOCK_VALID_TREE)) && m_chainman.ActiveChain().Tip()->nChainWork <= last_header.nChainWork) {
@@ -3315,6 +3360,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
         const CBlockIndex& last_header, bool received_new_header, bool may_have_more_headers)
 {
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
     CNodeState *nodestate = State(pfrom.GetId());
 
     UpdateBlockAvailability(pfrom.GetId(), last_header.GetBlockHash());
@@ -3366,6 +3412,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                                             std::vector<CBlockHeader>&& headers,
                                             bool via_compact_block)
 {
+    AssertLockNotHeld(m_net_state_mutex);
+
     size_t nCount = headers.size();
 
     if (nCount == 0) {
@@ -3632,6 +3680,7 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
 bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
 {
     AssertLockHeld(g_msgproc_mutex);
+    AssertLockNotHeld(m_net_state_mutex);
     LOCK(::cs_main);
 
     while (CTransactionRef porphanTx = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetTxToReconsider(peer.m_id))) {
@@ -3898,6 +3947,9 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
 
 void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
 {
+    // Accepting a block announces it with NewPoWValidBlock(), which takes m_net_state_mutex with cs_main held.
+    AssertLockNotHeld(m_net_state_mutex);
+
     // First accept and store the block, then activate the best chain, as ProcessNewBlock() does: the result of the
     // first job is what submits the second one, and the result of the second one is what handles the outcome.
     //
@@ -3934,9 +3986,11 @@ void PeerManagerImpl::OnBlockProcessed(NodeId from, const uint256& block_hash, b
         // from, we can erase the block request now anyway (as we just stored
         // this block to disk).
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
         RemoveBlockRequest(block_hash, std::nullopt);
     } else {
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
         mapBlockSource.erase(block_hash);
     }
 }
@@ -3947,6 +4001,7 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
     bool fBlockRead{false};
     {
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
 
         auto range_flight = mapBlocksInFlight.equal_range(block_transactions.blockhash);
         size_t already_in_flight = std::distance(range_flight.first, range_flight.second);
@@ -4252,6 +4307,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // Potentially mark this peer as a preferred download peer.
         {
             LOCK(cs_main);
+            LOCK(m_net_state_mutex);
             CNodeState* state = State(pfrom.GetId());
             state->fPreferredDownload = (!pfrom.IsInboundConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)) && !pfrom.IsAddrFetchConn() && CanServeBlocks(peer);
             m_num_preferred_download_peers += state->fPreferredDownload;
@@ -4390,7 +4446,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         {
-            LOCK2(::cs_main, m_tx_download_mutex);
+            LOCK2(::cs_main, m_net_state_mutex);
+            LOCK(m_tx_download_mutex);
             const CNodeState* state = State(pfrom.GetId());
             m_txdownloadman.ConnectedPeer(pfrom.GetId(), node::TxDownloadConnectionInfo {
                 .m_preferred = state->fPreferredDownload,
@@ -4424,6 +4481,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         if (sendcmpct_version != CMPCTBLOCKS_VERSION) return;
 
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
         CNodeState* nodestate = State(pfrom.GetId());
         nodestate->m_provides_cmpctblocks = true;
         nodestate->m_requested_hb_cmpctblocks = sendcmpct_hb;
@@ -4603,7 +4661,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         std::unordered_set<uint256, SaltedUint256Hasher> seen_txids{0, m_txhash_hasher};
         std::unordered_set<uint256, SaltedUint256Hasher> seen_wtxids{0, m_txhash_hasher};
 
-        LOCK2(cs_main, m_tx_download_mutex);
+        LOCK2(cs_main, m_net_state_mutex);
+        LOCK(m_tx_download_mutex);
 
         const auto current_time{GetTime<std::chrono::microseconds>()};
         uint256* best_block{nullptr};
@@ -4890,6 +4949,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
 
         // Don't serve headers from our active chain until our chainwork is at least
         // the minimum chain work. This prevents us from starting a low-work headers
@@ -5015,6 +5075,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
     if (msg_type == NetMsgType::CMPCTBLOCK)
     {
+        AssertLockNotHeld(m_net_state_mutex);
+
         // Ignore cmpctblock received while importing
         if (m_chainman.m_blockman.LoadingBlocks()) {
             LogDebug(BCLog::CMPCTBLOCK, "%s sent us a compact block even though we are still loading blocks!", pfrom.LogPeer());
@@ -5026,6 +5088,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         {
             LOCK(cs_main);
+            LOCK(m_net_state_mutex);
             const CNodeState *nodestate = State(pfrom.GetId());
             if (!nodestate->m_provides_cmpctblocks) {
                 LogDebug(BCLog::CMPCTBLOCK, "%s sent us a compact block despite never having sent us a SENDCMPCT!", pfrom.LogPeer());
@@ -5088,6 +5151,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         {
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
         UpdateBlockAvailability(pfrom.GetId(), pindex->GetBlockHash());
 
         CNodeState *nodestate = State(pfrom.GetId());
@@ -5254,6 +5318,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // block that is in flight from some other peer.
             {
                 LOCK(cs_main);
+                LOCK(m_net_state_mutex);
                 mapBlockSource.emplace(pblock->GetHash(), std::make_pair(pfrom.GetId(), false));
             }
             // Setting force_processing to true means that we bypass some of
@@ -5271,7 +5336,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 // process from some other peer.  We do this after calling
                 // ProcessNewBlock so that a malleated cmpctblock announcement
                 // can't be used to interfere with block relay.
-                WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), std::nullopt));
+                LOCK(cs_main);
+                LOCK(m_net_state_mutex);
+                RemoveBlockRequest(pblock->GetHash(), std::nullopt);
             }
         }
         return;
@@ -5352,7 +5419,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                            /*check_witness_root=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT))) {
             LogDebug(BCLog::NET, "Received mutated block from peer=%d\n", peer.m_id);
             Misbehaving(peer, "mutated block");
-            WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), peer.m_id));
+            LOCK(cs_main);
+            LOCK(m_net_state_mutex);
+            RemoveBlockRequest(pblock->GetHash(), peer.m_id);
             return;
         }
 
@@ -5361,6 +5430,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         bool min_pow_checked = false;
         {
             LOCK(cs_main);
+            LOCK(m_net_state_mutex);
             // Always process the block if we requested it, since we may
             // need it even when it's not a candidate for a new best tip.
             forceProcessing = IsBlockRequested(hash);
@@ -5732,6 +5802,7 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
 void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds)
 {
     AssertLockHeld(cs_main);
+    AssertLockHeld(m_net_state_mutex);
 
     CNodeState &state = *State(pto.GetId());
 
@@ -5814,8 +5885,9 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
             // disconnect our second youngest.
             to_disconnect = next_youngest_peer.first;
         }
-        m_connman.ForNode(to_disconnect, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        m_connman.ForNode(to_disconnect, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex) {
             AssertLockHeld(::cs_main);
+            AssertLockHeld(m_net_state_mutex);
             // Make sure we're not getting a block right now, and that
             // we've been connected long enough for this eviction to happen
             // at all.
@@ -5850,8 +5922,9 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
         };
         std::optional<WorstPeer> worst_peer;
 
-        m_connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_connman.GetNodesMutex()) {
+        m_connman.ForEachNode([&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex, m_connman.GetNodesMutex()) {
             AssertLockHeld(::cs_main);
+            AssertLockHeld(m_net_state_mutex);
 
             // Only consider outbound-full-relay peers that are not already
             // marked for disconnection
@@ -5870,8 +5943,9 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
             }
         });
         if (worst_peer.has_value()) {
-            bool disconnected = m_connman.ForNode((*worst_peer).node, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            bool disconnected = m_connman.ForNode((*worst_peer).node, [&](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_net_state_mutex) {
                 AssertLockHeld(::cs_main);
+                AssertLockHeld(m_net_state_mutex);
 
                 // Only disconnect a peer that has been connected to us for
                 // some reasonable fraction of our check-frequency, to give
@@ -5905,6 +5979,7 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
 void PeerManagerImpl::CheckForStaleTipAndEvictPeers()
 {
     LOCK(cs_main);
+    LOCK(m_net_state_mutex);
 
     const auto current_time{NodeClock::now()};
     auto now{GetTime<std::chrono::seconds>()};
@@ -6047,6 +6122,7 @@ void PeerManagerImpl::MaybeSendSendHeaders(CNode& node, Peer& peer)
     // because of the state tracking done.
     if (!peer.m_sent_sendheaders && node.GetCommonVersion() >= SENDHEADERS_VERSION) {
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
         CNodeState &state = *State(node.GetId());
         if (state.pindexBestKnownBlock != nullptr &&
                 state.pindexBestKnownBlock->nChainWork > m_chainman.MinimumChainWork()) {
@@ -6335,6 +6411,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
 
     {
         LOCK(cs_main);
+        LOCK(m_net_state_mutex);
 
         CNodeState &state = *State(node.GetId());
 
