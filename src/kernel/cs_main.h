@@ -36,8 +36,9 @@ extern RecursiveMutex cs_main;
  *   snapshot height that segments the block files.
  *
  * The other fields of an entry do not need this lock. The header fields, phashBlock, pprev, pskip, nHeight,
- * nChainWork and nTimeMax never change once the entry is inserted. nSequenceId, m_chain_tx_count and
- * m_blocks_unlinked belong to chain selection and are guarded by cs_main.
+ * nChainWork and nTimeMax never change once the entry is inserted. nSequenceId and m_blocks_unlinked belong to
+ * chain selection and are guarded by cs_main. So is the writing of m_chain_tx_count, which is also read without it
+ * as a hint (see CBlockIndex::HaveNumChainTxs()), and is therefore not annotated.
  *
  * Lock order: cs_main, then this lock.
  *

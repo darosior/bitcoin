@@ -1915,7 +1915,7 @@ static RPCMethod getchaintxstats()
     const CBlockIndex& past_block{*CHECK_NONFATAL(pindex->GetAncestor(pindex->nHeight - blockcount))};
     const int64_t nTimeDiff{pindex->GetMedianTimePast() - past_block.GetMedianTimePast()};
 
-    const auto [tx_count, past_tx_count]{WITH_LOCK(::cs_main, return std::make_pair(pindex->m_chain_tx_count, past_block.m_chain_tx_count))};
+    const auto [tx_count, past_tx_count]{WITH_LOCK(::cs_main, return std::make_pair(pindex->m_chain_tx_count.load(), past_block.m_chain_tx_count.load()))};
 
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("time", pindex->nTime);
@@ -3494,7 +3494,7 @@ UniValue WriteUTXOSnapshot(
     result.pushKV("base_height", tip->nHeight);
     result.pushKV("path", path.utf8string());
     result.pushKV("txoutset_hash", maybe_stats->hashSerialized.ToString());
-    result.pushKV("nchaintx", WITH_LOCK(::cs_main, return tip->m_chain_tx_count));
+    result.pushKV("nchaintx", WITH_LOCK(::cs_main, return tip->m_chain_tx_count.load()));
     return result;
 }
 

@@ -17,6 +17,7 @@
 #include <util/time.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <string>
@@ -126,7 +127,10 @@ public:
     //! This value will be non-zero if this block and all previous blocks back
     //! to the genesis block or an assumeutxo snapshot block have reached the
     //! VALID_TRANSACTIONS level.
-    uint64_t m_chain_tx_count GUARDED_BY(::cs_main){0};
+    //!
+    //! Written with cs_main held, which is not enforced: the value is also read without it, by network
+    //! code that only uses it as a hint (see HaveNumChainTxs()).
+    std::atomic<uint64_t> m_chain_tx_count{0};
 
     //! Verification status of this block. See enum BlockStatus
     //!
@@ -210,8 +214,11 @@ public:
      *
      * Note that this will be true for the snapshot base block, if one is loaded, since its m_chain_tx_count value will have
      * been set manually based on the related AssumeutxoData entry.
+     *
+     * The value is only written with cs_main held. A caller that holds it gets an exact answer. This can also be
+     * called without it, for a hint that may be out of date.
      */
-    bool HaveNumChainTxs() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return m_chain_tx_count != 0; }
+    bool HaveNumChainTxs() const { return m_chain_tx_count.load(std::memory_order_relaxed) != 0; }
 
     NodeSeconds Time() const
     {
