@@ -362,8 +362,9 @@ static int64_t AddTx(ChainstateManager& chainman, CWallet& wallet, uint32_t lock
     FakeNodeClock clock{mock_time};
     CBlockIndex* block = nullptr;
     if (blockTime > 0) {
-        LOCK(cs_main);
-        auto inserted = chainman.BlockIndex().emplace(std::piecewise_construct, std::make_tuple(GetRandHash()), std::make_tuple());
+        const uint256 block_hash{GetRandHash()};
+        LOCK(g_block_index_mutex);
+        auto inserted = chainman.BlockIndex().emplace(std::piecewise_construct, std::make_tuple(block_hash), std::make_tuple());
         assert(inserted.second);
         const uint256& hash = inserted.first->first;
         block = &inserted.first->second;

@@ -447,13 +447,13 @@ static bool rest_block(const std::any& context,
         if (!pblockindex) {
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
         }
-        if (!(pblockindex->nStatus & BLOCK_HAVE_DATA)) {
+        if (!WITH_LOCK(g_block_index_mutex, return pblockindex->nStatus & BLOCK_HAVE_DATA)) {
             if (chainman.m_blockman.IsBlockPruned(*pblockindex)) {
                 return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (pruned data)");
             }
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (not fully downloaded)");
         }
-        pos = pblockindex->GetBlockPos();
+        pos = WITH_LOCK(g_block_index_mutex, return pblockindex->GetBlockPos());
     }
 
     const auto block_data{chainman.m_blockman.ReadRawBlock(pos, block_part)};
@@ -697,7 +697,7 @@ static bool rest_block_filter(const std::any& context, HTTPRequest* req, const s
         if (!block_index) {
             return RESTERR(req, HTTP_NOT_FOUND, uri_parts[1] + " not found");
         }
-        block_was_connected = block_index->IsValid(BLOCK_VALID_SCRIPTS);
+        block_was_connected = WITH_LOCK(g_block_index_mutex, return block_index->IsValid(BLOCK_VALID_SCRIPTS));
     }
 
     bool index_ready = index->BlockUntilSyncedToCurrentChain();

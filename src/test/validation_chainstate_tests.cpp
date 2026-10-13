@@ -9,6 +9,7 @@
 #include <consensus/validation.h>
 #include <node/blockstorage.h>
 #include <node/kernel_notifications.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -18,6 +19,7 @@
 #include <test/util/coins.h>
 #include <test/util/common.h>
 #include <test/util/setup_common.h>
+#include <test/util/validation.h>
 #include <tinyformat.h>
 #include <uint256.h>
 #include <util/check.h>
@@ -25,8 +27,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <vector>
 
 class CTxMemPool;
@@ -171,6 +175,93 @@ BOOST_FIXTURE_TEST_CASE(chainstate_update_tip, TestChain100Setup)
     // validation chain.
     BOOST_CHECK(block_added);
     BOOST_CHECK_EQUAL(curr_tip, get_notify_tip());
+}
+
+//! Mine a header on top of `prev`.
+static CBlockHeader MineHeader(const ChainstateManager& chainman, const CBlockIndex& prev)
+{
+    CBlockHeader header;
+    header.nVersion = prev.nVersion;
+    header.hashPrevBlock = prev.GetBlockHash();
+    header.hashMerkleRoot = uint256::ONE;
+    header.nTime = prev.nTime + 1;
+    header.nBits = GetNextWorkRequired(&prev, &header, chainman.GetConsensus());
+    while (!CheckProofOfWork(header.GetHash(), header.nBits, chainman.GetConsensus())) ++header.nNonce;
+    return header;
+}
+
+//! Add `count` headers on top of `base`, each on top of the previous one, and return their entries.
+static std::vector<CBlockIndex*> AddHeaderBranch(ChainstateManager& chainman, const CBlockIndex& base, int count)
+{
+    std::vector<CBlockIndex*> branch;
+    const CBlockIndex* prev{&base};
+    for (int i = 0; i < count; ++i) {
+        const CBlockHeader header{MineHeader(chainman, *prev)};
+        BlockValidationState state;
+        BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state));
+        CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(header.GetHash())};
+        BOOST_REQUIRE(index);
+        branch.push_back(index);
+        prev = index;
+    }
+    return branch;
+}
+
+//! InvalidChainFound() flags a block and all its descendants, and moves the best header off the failed branch. It does
+//! so in one critical section of g_block_index_mutex: someone who looks at the block index in the meantime never sees
+//! a descendant of a failed block that is not failed, nor the best header on a failed branch.
+BOOST_FIXTURE_TEST_CASE(invalid_chain_found_flags_descendants_and_best_header, TestChain100Setup)
+{
+    auto& chainman{static_cast<TestChainstateManager&>(*Assert(m_node.chainman))};
+    const auto best_header{[&] { return WITH_LOCK(g_block_index_mutex, return chainman.m_best_header); }};
+
+    // A branch of headers from the middle of the chain. It has more work than the tip, so its tip is the best header.
+    CBlockIndex* const fork_point{WITH_LOCK(::cs_main, return chainman.ActiveChain()[50])};
+    const std::vector<CBlockIndex*> branch{AddHeaderBranch(chainman, *fork_point, 300)};
+    BOOST_REQUIRE_EQUAL(best_header(), branch.back());
+
+    // Fail a block in the middle of the branch. Its descendants must be failed with it, and the best header must
+    // fall back to its parent: the most work among the entries that are not failed.
+    constexpr int FAILED_POS{100};
+    CBlockIndex* const failed{branch[FAILED_POS]};
+    std::atomic<bool> observer_ready{false};
+    std::atomic<bool> done{false};
+    std::atomic<int> inconsistent_views{0};
+    std::thread observer([&] {
+        observer_ready = true;
+        while (!done) {
+            LOCK(g_block_index_mutex);
+            const bool failed_is_failed{(failed->nStatus & BLOCK_FAILED_VALID) != 0};
+            for (size_t i{FAILED_POS}; i < branch.size(); ++i) {
+                if (((branch[i]->nStatus & BLOCK_FAILED_VALID) != 0) != failed_is_failed) ++inconsistent_views;
+            }
+            const CBlockIndex* const best{chainman.m_best_header};
+            if (failed_is_failed ? best->GetAncestor(failed->nHeight) == failed : best != branch.back()) ++inconsistent_views;
+        }
+    });
+    while (!observer_ready) std::this_thread::yield();
+    {
+        LOCK(::cs_main);
+        chainman.InvalidChainFound(failed);
+    }
+    done = true;
+    observer.join();
+    BOOST_CHECK_EQUAL(inconsistent_views, 0);
+
+    for (size_t i{0}; i < branch.size(); ++i) {
+        BOOST_CHECK_EQUAL((WITH_LOCK(g_block_index_mutex, return branch[i]->nStatus) & BLOCK_FAILED_VALID) != 0, i >= FAILED_POS);
+    }
+    BOOST_CHECK_EQUAL(best_header(), branch[FAILED_POS - 1]);
+
+    // Resetting the failure clears the flags again, and the best header goes back to the end of the branch.
+    {
+        LOCK(::cs_main);
+        chainman.ActiveChainstate().ResetBlockFailureFlags(failed);
+    }
+    for (const CBlockIndex* index : branch) {
+        BOOST_CHECK(!(WITH_LOCK(g_block_index_mutex, return index->nStatus) & BLOCK_FAILED_VALID));
+    }
+    BOOST_CHECK_EQUAL(best_header(), branch.back());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -45,7 +45,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
     }
 
-    if (!chainman.BlockIndex().empty() &&
+    if (WITH_LOCK(g_block_index_mutex, return !chainman.BlockIndex().empty()) &&
             !chainman.m_blockman.LookupBlockIndex(chainman.GetConsensus().hashGenesisBlock)) {
         // If the loaded chain has a wrong genesis, bail out immediately
         // (we're likely using a testnet datadir, or the other way around).
@@ -54,7 +54,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
 
     // Check for changed -prune state.  What we are concerned about is a user who has pruned blocks
     // in the past, but is now trying to run unpruned.
-    if (chainman.m_blockman.m_have_pruned && !options.prune) {
+    if (WITH_LOCK(g_block_index_mutex, return chainman.m_blockman.m_have_pruned) && !options.prune) {
         return {ChainstateLoadStatus::FAILURE, _("You need to rebuild the database using -reindex to go back to unpruned mode.  This will redownload the entire blockchain")};
     }
 

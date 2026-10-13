@@ -3,10 +3,15 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chain.h>
+#include <kernel/cs_main.h>
+#include <primitives/block.h>
+#include <streams.h>
+#include <sync.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -18,48 +23,53 @@ FUZZ_TARGET(chain)
     if (!disk_block_index) {
         return;
     }
+    (void)disk_block_index->ConstructBlockHash();
 
+    // What is read is written back as it was.
+    DataStream written;
+    written << *disk_block_index;
+    CDiskBlockIndex read_back;
+    DataStream to_read{written};
+    to_read >> read_back;
+    DataStream rewritten;
+    rewritten << read_back;
+    assert(std::ranges::equal(written, rewritten));
+
+    // An in-memory entry built from the fields of the disk entry.
+    CBlockHeader header;
+    header.nVersion = disk_block_index->nVersion;
+    header.hashMerkleRoot = disk_block_index->hashMerkleRoot;
+    header.nTime = disk_block_index->nTime;
+    header.nBits = disk_block_index->nBits;
+    header.nNonce = disk_block_index->nNonce;
+    CBlockIndex block_index{header};
     const uint256 zero{};
-    disk_block_index->phashBlock = &zero;
+    block_index.phashBlock = &zero;
+    block_index.nHeight = disk_block_index->nHeight;
+    {
+        LOCK(g_block_index_mutex);
+        block_index.nStatus = disk_block_index->nStatus;
+        block_index.nTx = disk_block_index->nTx;
+        block_index.nFile = disk_block_index->nFile;
+        block_index.nDataPos = disk_block_index->nDataPos;
+        block_index.nUndoPos = disk_block_index->nUndoPos;
+
+        (void)block_index.GetBlockPos();
+        (void)block_index.GetUndoPos();
+        (void)block_index.IsValid(BLOCK_VALID_TRANSACTIONS);
+
+        // Writing the entry again gives the same status word.
+        CDiskBlockIndex from_memory{&block_index};
+        assert(from_memory.nStatus == disk_block_index->nStatus);
+    }
     {
         LOCK(::cs_main);
-        (void)disk_block_index->ConstructBlockHash();
-        (void)disk_block_index->GetBlockPos();
-        (void)disk_block_index->GetBlockTime();
-        (void)disk_block_index->GetBlockTimeMax();
-        (void)disk_block_index->GetMedianTimePast();
-        (void)disk_block_index->GetUndoPos();
-        (void)disk_block_index->HaveNumChainTxs();
-        (void)disk_block_index->IsValid(BLOCK_VALID_TRANSACTIONS);
+        (void)block_index.GetBlockHash();
+        (void)block_index.GetBlockTime();
+        (void)block_index.GetBlockTimeMax();
+        (void)block_index.GetMedianTimePast();
+        (void)block_index.HaveNumChainTxs();
+        (void)block_index.GetBlockHeader();
     }
-
-    const CBlockHeader block_header = disk_block_index->GetBlockHeader();
-    (void)CDiskBlockIndex{*disk_block_index};
-    (void)disk_block_index->BuildSkip();
-
-    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 10000) {
-        const BlockStatus block_status = fuzzed_data_provider.PickValueInArray({
-            BlockStatus::BLOCK_VALID_UNKNOWN,
-            BlockStatus::BLOCK_VALID_RESERVED,
-            BlockStatus::BLOCK_VALID_TREE,
-            BlockStatus::BLOCK_VALID_TRANSACTIONS,
-            BlockStatus::BLOCK_VALID_CHAIN,
-            BlockStatus::BLOCK_VALID_SCRIPTS,
-            BlockStatus::BLOCK_VALID_MASK,
-            BlockStatus::BLOCK_HAVE_DATA,
-            BlockStatus::BLOCK_HAVE_UNDO,
-            BlockStatus::BLOCK_HAVE_MASK,
-            BlockStatus::BLOCK_FAILED_VALID,
-            BlockStatus::BLOCK_OPT_WITNESS,
-        });
-        if (block_status & ~BLOCK_VALID_MASK) {
-            continue;
-        }
-        WITH_LOCK(::cs_main, (void)disk_block_index->RaiseValidity(block_status));
-    }
-
-    CBlockIndex block_index{block_header};
-    block_index.phashBlock = &zero;
-    (void)block_index.GetBlockHash();
     (void)block_index.ToString();
 }

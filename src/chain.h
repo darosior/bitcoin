@@ -106,13 +106,13 @@ public:
     int nHeight{0};
 
     //! Which # file this block is stored in (blk?????.dat)
-    int nFile GUARDED_BY(::cs_main){0};
+    int nFile GUARDED_BY(g_block_index_mutex){0};
 
     //! Byte offset within blk?????.dat where this block's data is stored
-    unsigned int nDataPos GUARDED_BY(::cs_main){0};
+    unsigned int nDataPos GUARDED_BY(g_block_index_mutex){0};
 
     //! Byte offset within rev?????.dat where this block's undo data is stored
-    unsigned int nUndoPos GUARDED_BY(::cs_main){0};
+    unsigned int nUndoPos GUARDED_BY(g_block_index_mutex){0};
 
     //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
     arith_uint256 nChainWork{};
@@ -120,7 +120,7 @@ public:
     //! Number of transactions in this block. This will be nonzero if the block
     //! reached the VALID_TRANSACTIONS level, and zero otherwise.
     //! Note: in a potential headers-first mode, this number cannot be relied upon
-    unsigned int nTx{0};
+    unsigned int nTx GUARDED_BY(g_block_index_mutex){0};
 
     //! (memory only) Number of transactions in the chain up to and including this block.
     //! This value will be non-zero if this block and all previous blocks back
@@ -134,7 +134,7 @@ public:
     //! load to avoid a spurious startup failure requiring -reindex.
     //! @sa NeedsRedownload
     //! @sa ActivateSnapshot
-    uint32_t nStatus GUARDED_BY(::cs_main){0};
+    uint32_t nStatus GUARDED_BY(g_block_index_mutex){0};
 
     //! block header
     int32_t nVersion{0};
@@ -160,9 +160,9 @@ public:
     {
     }
 
-    FlatFilePos GetBlockPos() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    FlatFilePos GetBlockPos() const EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex)
     {
-        AssertLockHeld(::cs_main);
+        AssertLockHeld(g_block_index_mutex);
         FlatFilePos ret;
         if (nStatus & BLOCK_HAVE_DATA) {
             ret.nFile = nFile;
@@ -171,9 +171,9 @@ public:
         return ret;
     }
 
-    FlatFilePos GetUndoPos() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    FlatFilePos GetUndoPos() const EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex)
     {
-        AssertLockHeld(::cs_main);
+        AssertLockHeld(g_block_index_mutex);
         FlatFilePos ret;
         if (nStatus & BLOCK_HAVE_UNDO) {
             ret.nFile = nFile;
@@ -248,9 +248,9 @@ public:
 
     //! Check whether this block index entry is valid up to the passed validity level.
     bool IsValid(enum BlockStatus nUpTo) const
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+        EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex)
     {
-        AssertLockHeld(::cs_main);
+        AssertLockHeld(g_block_index_mutex);
         assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
         if (nStatus & BLOCK_FAILED_VALID)
             return false;
@@ -259,9 +259,9 @@ public:
 
     //! Raise the validity level of this block index entry.
     //! Returns true if the validity was changed.
-    bool RaiseValidity(enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    bool RaiseValidity(enum BlockStatus nUpTo) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex)
     {
-        AssertLockHeld(::cs_main);
+        AssertLockHeld(g_block_index_mutex);
         assert(!(nUpTo & ~BLOCK_VALID_MASK)); // Only validity flags allowed.
         if (nStatus & BLOCK_FAILED_VALID) return false;
 
@@ -282,17 +282,13 @@ public:
     CBlockIndex() = default;
     ~CBlockIndex() = default;
 
-protected:
-    //! CBlockIndex should not allow public copy construction because equality
+    //! CBlockIndex does not allow copy construction because equality
     //! comparison via pointer is very common throughout the codebase, making
     //! use of copy a footgun. Also, use of copies do not have the benefit
     //! of simplifying lifetime considerations due to attributes like pprev and
     //! pskip, which are at risk of becoming dangling pointers in a copied
     //! instance.
-    //!
-    //! We declare these protected instead of simply deleting them so that
-    //! CDiskBlockIndex can reuse copy construction.
-    CBlockIndex(const CBlockIndex&) = default;
+    CBlockIndex(const CBlockIndex&) = delete;
     CBlockIndex& operator=(const CBlockIndex&) = delete;
     CBlockIndex(CBlockIndex&&) = delete;
     CBlockIndex& operator=(CBlockIndex&&) = delete;
@@ -313,8 +309,14 @@ int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& fr
 const CBlockIndex* LastCommonAncestor(const CBlockIndex* pa, const CBlockIndex* pb);
 
 
-/** Used to marshal pointers into hashes for db storage. */
-class CDiskBlockIndex : public CBlockIndex
+/**
+ * Used to marshal pointers into hashes for db storage.
+ *
+ * It holds its own copy of everything that is stored for an entry, so that serializing it does not read the entry
+ * (whose fields are guarded by g_block_index_mutex). The constructor from an entry reads it and has to be called
+ * with that lock held.
+ */
+class CDiskBlockIndex
 {
     /** Historically CBlockLocator's version field has been written to disk
      * streams as the client version, but the value has never been used.
@@ -325,21 +327,41 @@ class CDiskBlockIndex : public CBlockIndex
     static constexpr int DUMMY_VERSION = 259900;
 
 public:
+    int nHeight{0};
+    uint32_t nStatus{0};
+    unsigned int nTx{0};
+    int nFile{0};
+    unsigned int nDataPos{0};
+    unsigned int nUndoPos{0};
+
+    //! block header
+    int32_t nVersion{0};
     uint256 hashPrev;
+    uint256 hashMerkleRoot;
+    uint32_t nTime{0};
+    uint32_t nBits{0};
+    uint32_t nNonce{0};
 
-    CDiskBlockIndex()
-    {
-        hashPrev = uint256();
-    }
+    CDiskBlockIndex() = default;
 
-    explicit CDiskBlockIndex(const CBlockIndex* pindex) : CBlockIndex(*pindex)
+    explicit CDiskBlockIndex(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex)
+        : nHeight{pindex->nHeight},
+          nStatus{pindex->nStatus},
+          nTx{pindex->nTx},
+          nFile{pindex->nFile},
+          nDataPos{pindex->nDataPos},
+          nUndoPos{pindex->nUndoPos},
+          nVersion{pindex->nVersion},
+          hashPrev{pindex->pprev ? pindex->pprev->GetBlockHash() : uint256()},
+          hashMerkleRoot{pindex->hashMerkleRoot},
+          nTime{pindex->nTime},
+          nBits{pindex->nBits},
+          nNonce{pindex->nNonce}
     {
-        hashPrev = (pprev ? pprev->GetBlockHash() : uint256());
     }
 
     SERIALIZE_METHODS(CDiskBlockIndex, obj)
     {
-        LOCK(::cs_main);
         int _nVersion = DUMMY_VERSION;
         READWRITE(VARINT_MODE(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
 
@@ -370,9 +392,6 @@ public:
         block.nNonce = nNonce;
         return block.GetHash();
     }
-
-    uint256 GetBlockHash() = delete;
-    std::string ToString() = delete;
 };
 
 /** An in-memory indexed chain of blocks. */

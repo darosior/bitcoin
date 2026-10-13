@@ -99,9 +99,12 @@ CreateAndActivateUTXOSnapshot(
                 // ids that are set when blocks are received, to make test setup
                 // more realistic and satisfy consistency checks in
                 // CheckBlockIndex().
-                assert(pindex->IsValid(BlockStatus::BLOCK_VALID_TREE));
-                pindex->nStatus = BlockStatus::BLOCK_VALID_TREE;
-                pindex->nTx = 0;
+                {
+                    LOCK(g_block_index_mutex);
+                    assert(pindex->IsValid(BlockStatus::BLOCK_VALID_TREE));
+                    pindex->nStatus = BlockStatus::BLOCK_VALID_TREE;
+                    pindex->nTx = 0;
+                }
                 pindex->m_chain_tx_count = 0;
                 pindex->nSequenceId = 0;
                 pindex = pindex->pprev;
