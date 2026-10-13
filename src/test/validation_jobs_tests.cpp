@@ -25,7 +25,10 @@ BOOST_AUTO_TEST_CASE(block_jobs_post_one_result_with_the_node_id)
 {
     auto& chainman{*Assert(m_node.chainman)};
     std::vector<ValidationJobs::Result> results;
-    const ValidationJobs jobs{chainman, *Assert(m_node.mempool), [&](ValidationJobs::Result&& result) { results.push_back(std::move(result)); }};
+    const ValidationJobs jobs{chainman, *Assert(m_node.mempool), [&](ValidationJobs::Result&& result) {
+        AssertLockNotHeld(::cs_main);
+        results.push_back(std::move(result));
+    }};
     constexpr NodeId PEER{42};
 
     const auto block{std::make_shared<const CBlock>(CreateBlock({}, CScript{} << OP_TRUE))};
@@ -58,7 +61,11 @@ BOOST_AUTO_TEST_CASE(transaction_and_package_jobs_post_one_result_with_the_node_
 {
     auto& chainman{*Assert(m_node.chainman)};
     std::vector<ValidationJobs::Result> results;
-    const ValidationJobs jobs{chainman, *Assert(m_node.mempool), [&](ValidationJobs::Result&& result) { results.push_back(std::move(result)); }};
+    // The results of the jobs for the mempool are posted with cs_main held, see ValidationJobs::Submit().
+    const ValidationJobs jobs{chainman, *Assert(m_node.mempool), [&](ValidationJobs::Result&& result) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
+        results.push_back(std::move(result));
+    }};
     constexpr NodeId PEER{7};
 
     // A transaction that spends an output that does not exist.
@@ -67,7 +74,6 @@ BOOST_AUTO_TEST_CASE(transaction_and_package_jobs_post_one_result_with_the_node_
     mtx.vout.emplace_back(1000, CScript{} << OP_TRUE);
     const CTransactionRef tx{MakeTransactionRef(mtx)};
 
-    LOCK(::cs_main);
     jobs.Submit(ValidationJobs::ProcessTransaction{PEER, tx});
     BOOST_REQUIRE_EQUAL(results.size(), 1U);
     const auto* processed{std::get_if<ValidationJobs::TxProcessed>(&results.back())};

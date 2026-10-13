@@ -120,10 +120,11 @@ public:
         : m_chainman{chainman}, m_mempool{mempool}, m_post_result{std::move(post_result)} {}
 
     /**
-     * Do the work of a job, and post its result. The jobs for blocks must be submitted without cs_main, and those for
-     * transactions and packages with it.
+     * Do the work of a job, and post its result. Jobs are submitted without cs_main, and take it themselves. The
+     * results of the jobs for the mempool are posted with it held, so that they are in the queue where the changes of
+     * the chain that came before the decision of the mempool are before them, and the later ones are after.
      */
-    void Submit(Job job) const;
+    void Submit(Job job) const LOCKS_EXCLUDED(::cs_main);
 
 private:
     ChainstateManager& m_chainman;

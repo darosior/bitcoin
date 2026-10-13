@@ -3683,7 +3683,6 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
 {
     AssertLockHeld(g_msgproc_mutex);
     AssertLockNotHeld(m_net_state_mutex);
-    LOCK(::cs_main);
 
     while (CTransactionRef porphanTx = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetTxToReconsider(peer.m_id))) {
         // The orphan is reconsidered until one of them has a result other than missing inputs, which the handler of
@@ -3769,7 +3768,6 @@ void PeerManagerImpl::OnTxProcessed(const ValidationJobs::TxProcessed& processed
         });
     }
     if (package_to_validate) {
-        LOCK(::cs_main);
         m_validation.Submit(ValidationJobs::ProcessPackage{processed.from, *package_to_validate});
     }
 }
@@ -5045,8 +5043,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                                            "network from %s",
                      txid.ToString(), pfrom.LogPeer());
         }
-
-        LOCK(cs_main);
 
         const auto [should_validate, package_to_validate] = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.ReceivedTx(pfrom.GetId(), ptx));
         if (!should_validate) {
