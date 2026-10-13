@@ -3801,7 +3801,7 @@ void ChainstateManager::ReceivedBlockTransactions(CBlockIndex* pindexNew)
     // assumeutxo snapshot block which has a hardcoded m_chain_tx_count value from the
     // snapshot metadata. If the pindex is not the snapshot block and the
     // m_chain_tx_count value is not zero, assert that value is actually correct.
-    auto prev_tx_sum = [](CBlockIndex& block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return WITH_LOCK(g_block_index_mutex, return block.nTx) + (block.pprev ? block.pprev->m_chain_tx_count : 0); };
+    auto prev_tx_sum = [](CBlockIndex& block) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return WITH_LOCK(g_block_index_mutex, return block.nTx) + (block.pprev ? block.pprev->m_chain_tx_count.load() : 0); };
     if (!Assume(pindexNew->m_chain_tx_count == 0 || pindexNew->m_chain_tx_count == prev_tx_sum(*pindexNew) ||
                 std::ranges::any_of(m_chainstates, [&](const auto& cs) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return cs->SnapshotBase() == pindexNew; }))) {
         LogWarning("Internal bug detected: block %d has unexpected m_chain_tx_count %i that should be %i (%s %s). Please report this issue here: %s\n",
@@ -6022,6 +6022,7 @@ util::Result<void> ChainstateManager::PopulateAndValidateSnapshot(
 
     assert(index);
     assert(index == snapshot_start_block);
+    AssertLockHeld(::cs_main);
     index->m_chain_tx_count = au_data.m_chain_tx_count;
 
     LogInfo("[snapshot] validated snapshot (%.2f MB)",
