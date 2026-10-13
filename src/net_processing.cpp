@@ -821,7 +821,7 @@ private:
 
     /** Return true if the given header is an ancestor of
      *  m_chainman.m_best_header or our current tip */
-    bool IsAncestorOfBestHeaderOrTip(const CBlockIndex* header) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool IsAncestorOfBestHeaderOrTip(const CBlockIndex* header);
 
     /** Request further headers from this peer with a given locator.
      * We don't issue a getheaders message if we have a recent one outstanding.
@@ -1201,7 +1201,7 @@ private:
     void ProcessBlockAvailability(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex);
     /** Update tracking information about which blocks a peer is assumed to have. */
     void UpdateBlockAvailability(NodeId nodeid, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex);
-    bool CanDirectFetch(const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool CanDirectFetch(const CBlockIndex& tip);
 
     /**
      * Estimates the distance, in blocks, between the best-known block and the network chain tip.
@@ -3065,7 +3065,6 @@ bool PeerManagerImpl::CheckHeadersPoW(const std::vector<CBlockHeader>& headers, 
 arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
 {
     arith_uint256 near_chaintip_work = 0;
-    LOCK(cs_main);
     if (const CBlockIndex* tip{m_chainman.PublishedTip()}) {
         // Use a 144 block buffer, so that we'll accept headers that fork from
         // near our tip.
@@ -3286,7 +3285,6 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
  */
 void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
 {
-    LOCK(cs_main);
     LOCK(m_net_state_mutex);
     CNodeState *nodestate = State(pfrom.GetId());
     const CBlockIndex* const tip{m_chainman.PublishedTip()};
@@ -3355,7 +3353,6 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
 void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
         const CBlockIndex& last_header, bool received_new_header, bool may_have_more_headers)
 {
-    LOCK(cs_main);
     LOCK(m_net_state_mutex);
     CNodeState *nodestate = State(pfrom.GetId());
     const CBlockIndex* const tip{m_chainman.PublishedTip()};
@@ -3476,7 +3473,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     }
 
     // Do these headers connect to something in our block index?
-    const CBlockIndex *chain_start_header{WITH_LOCK(::cs_main, return m_chainman.m_blockman.LookupBlockIndex(headers[0].hashPrevBlock))};
+    const CBlockIndex *chain_start_header{m_chainman.m_blockman.LookupBlockIndex(headers[0].hashPrevBlock)};
     bool headers_connect_blockindex{chain_start_header != nullptr};
 
     if (!headers_connect_blockindex) {
@@ -3498,7 +3495,6 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // used to fingerprint us).
     const CBlockIndex *last_received_header{nullptr};
     {
-        LOCK(cs_main);
         last_received_header = m_chainman.m_blockman.LookupBlockIndex(headers.back().GetHash());
         already_validated_work = already_validated_work || IsAncestorOfBestHeaderOrTip(last_received_header);
     }
@@ -5120,8 +5116,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         const auto blockhash = cmpctblock.header.GetHash();
 
         {
-        LOCK(cs_main);
-
         const CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(cmpctblock.header.hashPrevBlock);
         if (!prev_block) {
             // Doesn't connect (or is genesis), instead of DoSing in AcceptBlockHeader, request deeper headers
@@ -5158,7 +5152,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         bool fProcessBLOCKTXN = false;
 
         // If we end up treating this as a plain headers message, call that as well
-        // without cs_main.
+        // without m_net_state_mutex.
         bool fRevertToHeaderProcessing = false;
 
         // Keep a CBlock for "optimistic" compactblock reconstructions (see
@@ -5167,7 +5161,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         bool fBlockReconstructed = false;
 
         {
-        LOCK(cs_main);
         LOCK(m_net_state_mutex);
         UpdateBlockAvailability(pfrom.GetId(), pindex->GetBlockHash());
 
@@ -5314,7 +5307,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 fRevertToHeaderProcessing = true;
             }
         }
-        } // cs_main
+        } // m_net_state_mutex
 
         if (fProcessBLOCKTXN) {
             BlockTransactions txn;
@@ -5428,7 +5421,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         LogDebug(BCLog::NET, "received block %s peer=%d\n", pblock->GetHash().ToString(), pfrom.GetId());
 
-        const CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
+        const CBlockIndex* prev_block{m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock)};
 
         // Check for possible mutation if it connects to something we know so we can check for DEPLOYMENT_SEGWIT being active
         if (prev_block && IsBlockMutated(/*block=*/*pblock,
@@ -5444,7 +5437,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         const uint256 hash(pblock->GetHash());
         bool min_pow_checked = false;
         {
-            LOCK(cs_main);
             LOCK(m_net_state_mutex);
             // Always process the block if we requested it, since we may
             // need it even when it's not a candidate for a new best tip.
