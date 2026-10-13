@@ -30,16 +30,21 @@ void ValidationJobs::Submit(Job job) const
             }
             m_post_result(ChainActivated{});
         },
-        [&](const ProcessTransaction& job) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-            AssertLockHeld(::cs_main);
+        // The results of the jobs for the mempool are posted with cs_main held: a tip change is notified under it, so
+        // that their order in the queue is the order of the changes of the chain and of the decisions of the mempool.
+        [&](const ProcessTransaction& job) {
+            AssertLockNotHeld(::cs_main);
+            LOCK(::cs_main);
             m_post_result(TxProcessed{job.from, job.tx, m_chainman.ProcessTransaction(job.tx)});
         },
-        [&](const ReconsiderOrphan& job) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-            AssertLockHeld(::cs_main);
+        [&](const ReconsiderOrphan& job) {
+            AssertLockNotHeld(::cs_main);
+            LOCK(::cs_main);
             m_post_result(OrphanReconsidered{job.from, job.tx, m_chainman.ProcessTransaction(job.tx)});
         },
-        [&](const ProcessPackage& job) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-            AssertLockHeld(::cs_main);
+        [&](const ProcessPackage& job) {
+            AssertLockNotHeld(::cs_main);
+            LOCK(::cs_main);
             m_post_result(PackageProcessed{job.from, job.package, ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, job.package.m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)});
         },
     }, job);
