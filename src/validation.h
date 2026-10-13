@@ -997,7 +997,7 @@ private:
     friend Chainstate;
 
     /** Most recent headers presync progress update, for rate-limiting. */
-    MockableSteadyClock::time_point m_last_presync_update GUARDED_BY(GetMutex()){};
+    MockableSteadyClock::time_point m_last_presync_update GUARDED_BY(g_block_index_mutex){};
 
     //! A queue for script verifications that have to be performed by worker threads.
     CCheckQueue<CScriptCheck> m_script_check_queue;
@@ -1423,7 +1423,7 @@ public:
      *  headers are not yet fed to validation during that time, but validation is (for now)
      *  responsible for logging and signalling through NotifyHeaderTip, so it needs this
      *  information. */
-    void ReportHeadersPresync(int64_t height, int64_t timestamp);
+    void ReportHeadersPresync(int64_t height, int64_t timestamp) LOCKS_EXCLUDED(g_block_index_mutex);
 
     //! When starting up, search the datadir for a chainstate based on a UTXO
     //! snapshot that is in the process of being validated and load it if found.
