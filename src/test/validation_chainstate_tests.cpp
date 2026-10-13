@@ -28,6 +28,9 @@
 #include <boost/test/unit_test.hpp>
 
 #include <atomic>
+#include <chrono>
+#include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -262,6 +265,67 @@ BOOST_FIXTURE_TEST_CASE(invalid_chain_found_flags_descendants_and_best_header, T
         BOOST_CHECK(!(WITH_LOCK(g_block_index_mutex, return index->nStatus) & BLOCK_FAILED_VALID));
     }
     BOOST_CHECK_EQUAL(best_header(), branch.back());
+}
+
+//! A setup that does not check the block index after every operation. CheckBlockIndex() takes cs_main, which would
+//! get in the way of tests about code that does not need it.
+struct TestChain100SetupNoCheckBlockIndex : public TestChain100Setup {
+    TestChain100SetupNoCheckBlockIndex() : TestChain100Setup{ChainType::REGTEST, {.check_block_index = 0}} {}
+};
+
+//! Headers are accepted while another thread holds cs_main, which is held while a block is connected.
+BOOST_FIXTURE_TEST_CASE(headers_are_accepted_while_cs_main_is_held, TestChain100SetupNoCheckBlockIndex)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const CBlockIndex* const tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    const CBlockHeader header{MineHeader(chainman, *tip)};
+
+    std::promise<void> locked;
+    std::promise<void> release;
+    std::thread holder{[&] {
+        LOCK(::cs_main);
+        locked.set_value();
+        release.get_future().wait();
+    }};
+    locked.get_future().wait();
+
+    // If accepting a header needed cs_main, this would not finish before it is released below.
+    std::future<bool> accepted{std::async(std::launch::async, [&] {
+        BlockValidationState state;
+        return chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state);
+    })};
+    const bool finished{accepted.wait_for(std::chrono::seconds{30}) == std::future_status::ready};
+    release.set_value();
+    holder.join();
+
+    BOOST_REQUIRE(finished);
+    BOOST_CHECK(accepted.get());
+    BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(header.GetHash()) != nullptr);
+}
+
+//! A header built on a failed block is rejected with bad-prevblk and not added to the block index, and the best
+//! header does not descend from the failed block.
+BOOST_FIXTURE_TEST_CASE(header_on_failed_block_is_rejected, TestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    const CBlock block{CreateBlock({}, CScript{} << OP_TRUE)};
+    const CBlockHeader& header{block};
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({&header, 1}, /*min_pow_checked=*/true, state));
+    CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+    BOOST_REQUIRE(pindex);
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(state, pindex));
+    BOOST_CHECK(WITH_LOCK(g_block_index_mutex, return pindex->nStatus) & BLOCK_FAILED_VALID);
+
+    const CBlockHeader child{MineHeader(chainman, *pindex)};
+    BlockValidationState child_state;
+    BOOST_CHECK(!chainman.ProcessNewBlockHeaders({&child, 1}, /*min_pow_checked=*/true, child_state));
+    BOOST_CHECK_EQUAL(child_state.GetRejectReason(), "bad-prevblk");
+
+    BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(child.GetHash()));
+    const CBlockIndex* best{WITH_LOCK(g_block_index_mutex, return chainman.m_best_header)};
+    BOOST_REQUIRE(best);
+    BOOST_CHECK(best->GetAncestor(pindex->nHeight) != pindex);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
