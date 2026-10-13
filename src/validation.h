@@ -994,6 +994,22 @@ private:
     //! A queue for script verifications that have to be performed by worker threads.
     CCheckQueue<CScriptCheck> m_script_check_queue;
 
+    /**
+     * What network code reads about the chainstates without taking cs_main, set by PublishChainView() whenever it
+     * changes. Block index entries are never removed, so a pointer that was read stays valid. The atomics are not
+     * set together: a reader loads each of them once, and a pair that spans a change is as good as one that
+     * does not (the historical range is only used to decide what to download next).
+     */
+    //! @{
+    //! The tip of CurrentChainstate().
+    std::atomic<const CBlockIndex*> m_published_tip{nullptr};
+    //! The base of the snapshot that CurrentChainstate() was created from, as long as it is not validated.
+    std::atomic<const CBlockIndex*> m_published_unvalidated_snapshot_base{nullptr};
+    //! The tip and the target block of HistoricalChainstate(). Both are null if there is none.
+    std::atomic<const CBlockIndex*> m_published_historical_tip{nullptr};
+    std::atomic<const CBlockIndex*> m_published_historical_target{nullptr};
+    //! @}
+
     //! Timers and counters used for benchmarking validation in both background
     //! and active chainstates.
     SteadyClock::duration GUARDED_BY(::cs_main) time_check{};
@@ -1173,10 +1189,23 @@ public:
         if (it != m_chainstates.end()) {
             auto ret{std::move(*it)};
             m_chainstates.erase(it);
+            PublishChainView();
             return ret;
         }
         return nullptr;
     }
+
+    //! Set what network code reads about the chainstates without cs_main from their current state. To be called
+    //! whenever the tip of a chainstate, the chainstates, or the assumeutxo state of one of them changes.
+    //! Must not be called with g_block_index_mutex held.
+    void PublishChainView() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+
+    //! The tip of the active chainstate (nullptr before there is one), for callers that do not hold cs_main. It
+    //! may be behind the chainstate by the time it is used, which is what holding cs_main would prevent.
+    const CBlockIndex* PublishedTip() const { return m_published_tip.load(); }
+
+    //! The snapshot base of the active chainstate if it is not validated yet, else nullptr.
+    const CBlockIndex* PublishedUnvalidatedSnapshotBase() const { return m_published_unvalidated_snapshot_base.load(); }
 
     //! Alternatives to CurrentChainstate() used by older code to query latest
     //! chainstate information without locking cs_main. Newer code should avoid
@@ -1413,8 +1442,10 @@ public:
     //! @sa node/chainstate:LoadChainstate()
     bool ValidatedSnapshotCleanup(Chainstate& validated_cs, Chainstate& unvalidated_cs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    //! Get range of historical blocks to download.
-    std::optional<std::pair<const CBlockIndex*, const CBlockIndex*>> GetHistoricalBlockRange() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Get range of historical blocks to download: the tip of the historical chainstate and the block it targets, if
+    //! there is one. It is what PublishChainView() published, so it does not need cs_main, and is what the chainstates
+    //! say for a caller that holds it.
+    std::optional<std::pair<const CBlockIndex*, const CBlockIndex*>> GetHistoricalBlockRange() const;
 
     //! Call ActivateBestChain() on every chainstate.
     util::Result<void> ActivateBestChains() LOCKS_EXCLUDED(::cs_main);
