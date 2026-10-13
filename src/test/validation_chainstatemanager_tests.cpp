@@ -37,6 +37,23 @@ using node::SnapshotMetadata;
 
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
 
+//! What is published for readers that do not hold cs_main is what the chainstates say.
+static void CheckPublishedChainView(ChainstateManager& chainman)
+{
+    LOCK(::cs_main);
+    const Chainstate& current{chainman.CurrentChainstate()};
+    BOOST_CHECK_EQUAL(chainman.PublishedTip(), current.m_chain.Tip());
+    BOOST_CHECK_EQUAL(chainman.PublishedUnvalidatedSnapshotBase(),
+                      current.m_assumeutxo == Assumeutxo::UNVALIDATED ? current.SnapshotBase() : nullptr);
+    const Chainstate* historical{chainman.HistoricalChainstate()};
+    const auto range{chainman.PublishedHistoricalRange()};
+    BOOST_CHECK_EQUAL(range.has_value(), historical != nullptr);
+    if (historical && range) {
+        BOOST_CHECK_EQUAL(range->first, historical->m_chain.Tip());
+        BOOST_CHECK_EQUAL(range->second, historical->TargetBlock());
+    }
+}
+
 //! Basic tests for ChainstateManager.
 //!
 //! First create a legacy (IBD) chainstate, then create a snapshot chainstate.
@@ -662,6 +679,9 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
     BlockValidationState state;
     BOOST_REQUIRE(chainstate.InvalidateBlock(state, block99));
     BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.ActiveChain().Tip()) == block98);
+    // The tip that is published follows the disconnection.
+    CheckPublishedChainView(chainman);
+    BOOST_CHECK_EQUAL(chainman.PublishedTip(), block98);
     CScript coinbase_script = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
     for (int i = 0; i < 2; ++i) {
         CreateAndProcessBlock({}, coinbase_script);
@@ -808,6 +828,11 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion, SnapshotTestSetup
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& active_cs = chainman.ActiveChainstate();
     Chainstate& validated_cs{*Assert(WITH_LOCK(cs_main, return chainman.HistoricalChainstate()))};
+    // The snapshot chainstate is the active one, and is not validated: the historical chainstate is still
+    // validating it.
+    CheckPublishedChainView(chainman);
+    BOOST_CHECK(chainman.PublishedUnvalidatedSnapshotBase() != nullptr);
+    BOOST_CHECK(chainman.PublishedHistoricalRange().has_value());
     auto tip_cache_before_complete = active_cs.m_coinstip_cache_size_bytes;
     auto db_cache_before_complete = active_cs.m_coinsdb_cache_size_bytes;
 
@@ -824,6 +849,11 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion, SnapshotTestSetup
 
     res = WITH_LOCK(::cs_main, return chainman.MaybeValidateSnapshot(validated_cs, active_cs));
     BOOST_CHECK_EQUAL(res, SnapshotCompletionResult::SUCCESS);
+
+    // Validating it has removed the historical range and the unvalidated base.
+    CheckPublishedChainView(chainman);
+    BOOST_CHECK(chainman.PublishedUnvalidatedSnapshotBase() == nullptr);
+    BOOST_CHECK(!chainman.PublishedHistoricalRange().has_value());
 
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.CurrentChainstate().m_assumeutxo == Assumeutxo::VALIDATED));
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.CurrentChainstate().m_from_snapshot_blockhash));
@@ -879,6 +909,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion, SnapshotTestSetup
         LOCK(chainman_restarted.GetMutex());
         BOOST_CHECK_EQUAL(chainman_restarted.ActiveHeight(), 220);
     }
+    CheckPublishedChainView(chainman_restarted);
 }
 
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion_hash_mismatch, SnapshotTestSetup)
