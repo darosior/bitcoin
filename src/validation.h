@@ -1068,6 +1068,22 @@ public:
     std::atomic_bool m_cached_is_ibd{true};
 
     /**
+     * What network code reads about the chainstates without taking cs_main, set by PublishChainView() whenever it
+     * changes. Block index entries are never removed, so a pointer that was read stays valid. The atomics are not
+     * set together: a reader loads each of them once, and a pair that spans a change is as good as one that
+     * does not (the historical range is only used to decide what to download next).
+     */
+    //! @{
+    //! The tip of CurrentChainstate().
+    std::atomic<const CBlockIndex*> m_published_tip{nullptr};
+    //! The base of the snapshot that CurrentChainstate() was created from, as long as it is not validated.
+    std::atomic<const CBlockIndex*> m_published_unvalidated_snapshot_base{nullptr};
+    //! The tip and the target block of HistoricalChainstate(). Both are null if there is none.
+    std::atomic<const CBlockIndex*> m_published_historical_tip{nullptr};
+    std::atomic<const CBlockIndex*> m_published_historical_target{nullptr};
+    //! @}
+
+    /**
      * Every received block is assigned a unique and increasing identifier, so we
      * know which one to give priority in case of a fork.
      */
@@ -1173,9 +1189,31 @@ public:
         if (it != m_chainstates.end()) {
             auto ret{std::move(*it)};
             m_chainstates.erase(it);
+            PublishChainView();
             return ret;
         }
         return nullptr;
+    }
+
+    //! Set what network code reads about the chainstates without cs_main from their current state. To be called
+    //! whenever the tip of a chainstate, the chainstates, or the assumeutxo state of one of them changes.
+    //! Must not be called with g_block_index_mutex held.
+    void PublishChainView() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+
+    //! The tip of the active chainstate (nullptr before there is one), for callers that do not hold cs_main. It
+    //! may be behind the chainstate by the time it is used, which is what holding cs_main would prevent.
+    const CBlockIndex* PublishedTip() const { return m_published_tip.load(); }
+
+    //! The snapshot base of the active chainstate if it is not validated yet, else nullptr.
+    const CBlockIndex* PublishedUnvalidatedSnapshotBase() const { return m_published_unvalidated_snapshot_base.load(); }
+
+    //! The tip of the historical chainstate and the block it targets, if there is one.
+    std::optional<std::pair<const CBlockIndex*, const CBlockIndex*>> PublishedHistoricalRange() const
+    {
+        const CBlockIndex* tip{m_published_historical_tip.load()};
+        const CBlockIndex* target{m_published_historical_target.load()};
+        if (!tip || !target) return std::nullopt;
+        return std::make_pair(tip, target);
     }
 
     //! Alternatives to CurrentChainstate() used by older code to query latest

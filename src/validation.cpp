@@ -2997,6 +2997,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     }
 
     m_chain.SetTip(*pindexDelete->pprev);
+    m_chainman.PublishChainView();
     m_chainman.UpdateIBDStatus();
 
     UpdateTip(pindexDelete->pprev);
@@ -3094,6 +3095,7 @@ bool Chainstate::ConnectTip(
     }
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
+    m_chainman.PublishChainView();
     m_chainman.UpdateIBDStatus();
     // Not fired while IBD is active. removeForBlock() above still runs.
     if (m_mempool && m_chainman.m_options.signals && !m_chainman.IsInitialBlockDownload()) {
@@ -4603,6 +4605,7 @@ bool Chainstate::LoadChainTip()
         return false;
     }
     m_chain.SetTip(*pindex);
+    m_chainman.PublishChainView();
     m_chainman.UpdateIBDStatus();
     m_last_flushed_block = pindex;
     tip = m_chain.Tip();
@@ -5607,6 +5610,7 @@ Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool)
     AssertLockHeld(::cs_main);
     assert(m_chainstates.empty());
     m_chainstates.emplace_back(std::make_unique<Chainstate>(mempool, m_blockman, *this));
+    PublishChainView();
     return *m_chainstates.back();
 }
 
@@ -6085,6 +6089,7 @@ SnapshotCompletionResult ChainstateManager::MaybeValidateSnapshot(Chainstate& va
         validated_cs.SetTargetBlock(nullptr);
 
         unvalidated_cs.m_assumeutxo = Assumeutxo::INVALID;
+        PublishChainView();
 
         auto rename_result = unvalidated_cs.InvalidateCoinsDBOnDisk();
         if (!rename_result) {
@@ -6148,6 +6153,7 @@ SnapshotCompletionResult ChainstateManager::MaybeValidateSnapshot(Chainstate& va
 
     unvalidated_cs.m_assumeutxo = Assumeutxo::VALIDATED;
     validated_cs.m_target_utxohash = AssumeutxoHash{validated_cs_stats->hashSerialized};
+    PublishChainView();
     this->MaybeRebalanceCaches();
 
     return SnapshotCompletionResult::SUCCESS;
@@ -6194,6 +6200,23 @@ void ChainstateManager::MaybeRebalanceCaches()
 void ChainstateManager::ResetChainstates()
 {
     m_chainstates.clear();
+    PublishChainView();
+}
+
+void ChainstateManager::PublishChainView()
+{
+    AssertLockHeld(::cs_main);
+    // There is no chainstate after ResetChainstates(); every other caller has one that qualifies as the current one.
+    const Chainstate* current{m_chainstates.empty() ? nullptr : &CurrentChainstate()};
+    const Chainstate* historical{HistoricalChainstate()};
+    // A block that is not in the index (a chainstate that was only created for a test) is published as null.
+    const auto lookup{[&](const std::optional<uint256>& hash) -> const CBlockIndex* {
+        return hash ? m_blockman.LookupBlockIndex(*hash) : nullptr;
+    }};
+    m_published_tip = current ? current->m_chain.Tip() : nullptr;
+    m_published_unvalidated_snapshot_base = current && current->m_assumeutxo == Assumeutxo::UNVALIDATED ? lookup(current->m_from_snapshot_blockhash) : nullptr;
+    m_published_historical_tip = historical ? historical->m_chain.Tip() : nullptr;
+    m_published_historical_target = historical ? lookup(historical->TargetBlockHash()) : nullptr;
 }
 
 /**
@@ -6254,6 +6277,7 @@ Chainstate& ChainstateManager::AddChainstate(std::unique_ptr<Chainstate> chainst
     m_chainstates.push_back(std::move(chainstate));
     Chainstate& curr_chainstate{CurrentChainstate()};
     assert(&curr_chainstate == m_chainstates.back().get());
+    PublishChainView();
 
     // Transfer possession of the mempool to the chainstate.
     // Mempool is empty at this point because we're still in IBD.
