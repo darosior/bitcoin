@@ -4108,9 +4108,8 @@ arith_uint256 CalculateClaimedHeadersWork(std::span<const CBlockHeader> headers)
  *  v0.12 and v0.15 (when no additional protection was in place) whereby an attacker could unboundedly
  *  grow our in-memory block index. See https://bitcoincore.org/en/2024/07/03/disclose-header-spam.
  */
-static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const ChainstateManager& chainman, const CBlockIndex* pindexPrev) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const ChainstateManager& chainman, const CBlockIndex* pindexPrev)
 {
-    AssertLockHeld(::cs_main);
     assert(pindexPrev != nullptr);
     const int nHeight = pindexPrev->nHeight + 1;
 
@@ -4216,11 +4215,10 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
 {
-    AssertLockHeld(cs_main);
-
-    // The duplicate check, the checks on the previous block and the insertion are one critical section.
-    // Otherwise a block could be marked as failed between the check of its status and the insertion of a header
-    // on top of it, and the header would be added to a failed chain.
+    // The duplicate check, the checks on the previous block and the insertion are one critical section of
+    // g_block_index_mutex. Otherwise a block could be marked as failed between the check of its status and the
+    // insertion of a header on top of it, and the header would be added to a failed chain. The checks only read
+    // immutable fields of the entries and buried deployments, and take no other lock.
     LOCK(g_block_index_mutex);
 
     // Check for duplicate
@@ -4278,19 +4276,16 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex)
 {
     AssertLockNotHeld(cs_main);
-    {
-        LOCK(cs_main);
-        for (const CBlockHeader& header : headers) {
-            CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
-            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
-            CheckBlockIndex();
+    for (const CBlockHeader& header : headers) {
+        CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
+        bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked)};
+        CheckBlockIndex();
 
-            if (!accepted) {
-                return false;
-            }
-            if (ppindex) {
-                *ppindex = pindex;
-            }
+        if (!accepted) {
+            return false;
+        }
+        if (ppindex) {
+            *ppindex = pindex;
         }
     }
     if (NotifyHeaderTip()) {
