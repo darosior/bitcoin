@@ -68,6 +68,14 @@ class SnapshotMetadata;
 namespace Consensus {
 struct Params;
 } // namespace Consensus
+
+/**
+ * Find the last block that a locator and the chain that ends in tip have in common: the first block of the locator
+ * (they are sorted descending by height) that is in the chain, or the tip if the block is a descendant of it, or
+ * else the genesis block. It is nullptr if there is no tip, as there is no chain. Only the tip is needed, since the
+ * chain is made of the tip and its ancestors, which never change.
+ */
+const CBlockIndex* FindForkInGlobalIndex(const node::BlockManager& blockman, const CBlockIndex* tip, const CBlockLocator& locator);
 namespace util {
 class SignalInterrupt;
 } // namespace util

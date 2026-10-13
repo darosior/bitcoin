@@ -640,7 +640,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex, !m_net_state_mutex);
 
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
-    void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex, g_msgproc_mutex);
+    void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex, g_msgproc_mutex);
 
     /** If we have extra outbound peers, try to disconnect the one with the oldest block announcement */
     void EvictExtraOutboundPeers(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
@@ -1065,7 +1065,7 @@ private:
     /** Update pindexLastCommonBlock and add not-in-flight missing successors to vBlocks, until it has
      *  at most count entries.
      */
-    void FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
+    void FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller, const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /** Request blocks for the background chainstate, if one is in use. */
     void TryDownloadingHistoricalBlocks(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, const CBlockIndex* from_tip, const CBlockIndex* target_block) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
@@ -1081,10 +1081,10 @@ private:
     *                     blocks will be added if it reaches this size.
     * \param nWindowEnd   Maximum height of blocks to allow in vBlocks. No
     *                     blocks will be added above this height.
-    * \param activeChain  Optional pointer to a chain to compare against. If
-    *                     provided, any next blocks which are already contained
-    *                     in this chain will not be appended to vBlocks, but
-    *                     instead will be used to update the
+    * \param active_tip  Optional pointer to the tip of the chain to compare
+    *                     against. If provided, any next blocks which are
+    *                     already contained in this chain will not be appended
+    *                     to vBlocks, but instead will be used to update the
     *                     state->pindexLastCommonBlock pointer.
     * \param nodeStaller  Optional pointer to a NodeId variable that will receive
     *                     the ID of another peer that might be causing this peer
@@ -1097,7 +1097,7 @@ private:
     *                     block in the window is in flight and no other peer is
     *                     trying to download the next block).
     */
-    void FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CChain* activeChain=nullptr, NodeId* nodeStaller=nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
+    void FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CBlockIndex* active_tip=nullptr, NodeId* nodeStaller=nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
 
     /* Multimap used to preserve insertion order */
     typedef std::multimap<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> BlockDownloadMap;
@@ -1201,7 +1201,7 @@ private:
     void ProcessBlockAvailability(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
     /** Update tracking information about which blocks a peer is assumed to have. */
     void UpdateBlockAvailability(NodeId nodeid, const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_net_state_mutex);
-    bool CanDirectFetch() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool CanDirectFetch(const CBlockIndex& tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**
      * Estimates the distance, in blocks, between the best-known block and the network chain tip.
@@ -1215,7 +1215,7 @@ private:
      * and in best equivalent proof of work) than the best header chain we know
      * about and we fully-validated them at some point.
      */
-    bool BlockRequestAllowed(const CBlockIndex& block_index) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool BlockRequestAllowed(const CBlockIndex& block_index, const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool AlreadyHaveBlock(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
@@ -1558,9 +1558,9 @@ int64_t PeerManagerImpl::ApproximateBestBlockDepth() const
     return (GetTime<std::chrono::seconds>() - m_best_block_time.load()).count() / m_chainparams.GetConsensus().nPowTargetSpacing;
 }
 
-bool PeerManagerImpl::CanDirectFetch()
+bool PeerManagerImpl::CanDirectFetch(const CBlockIndex& tip)
 {
-    return m_chainman.ActiveChain().Tip()->Time() > NodeClock::now() - m_chainparams.GetConsensus().PowTargetSpacing() * 20;
+    return tip.Time() > NodeClock::now() - m_chainparams.GetConsensus().PowTargetSpacing() * 20;
 }
 
 static bool PeerHasHeader(CNodeState *state, const CBlockIndex *pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -1570,6 +1570,25 @@ static bool PeerHasHeader(CNodeState *state, const CBlockIndex *pindex) EXCLUSIV
     if (state->pindexBestHeaderSent && pindex == state->pindexBestHeaderSent->GetAncestor(pindex->nHeight))
         return true;
     return false;
+}
+
+//! Whether the block is in the chain that ends in tip, which is what CChain::Contains() says of the chain with that tip.
+static bool ChainContains(const CBlockIndex* tip, const CBlockIndex& block)
+{
+    return tip && tip->GetAncestor(block.nHeight) == &block;
+}
+
+//! The blocks of the chain that ends in tip that follow the block, which has to be in it (nullptr is none), at most
+//! count of them (and the first one even if count is not positive, as the loops that call this do), in the order of
+//! their height. This is what calling CChain::Next() repeatedly gives.
+static std::vector<const CBlockIndex*> ChainBlocksAfter(const CBlockIndex* tip, const CBlockIndex* block, int count)
+{
+    std::vector<const CBlockIndex*> blocks;
+    if (!tip || !block || tip->nHeight <= block->nHeight) return blocks;
+    const CBlockIndex* last{tip->GetAncestor(std::min<int>(tip->nHeight, block->nHeight + std::max(count, 1)))};
+    blocks.resize(last->nHeight - block->nHeight);
+    for (auto it = blocks.rbegin(); it != blocks.rend(); ++it, last = last->pprev) *it = last;
+    return blocks;
 }
 
 void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
@@ -1606,7 +1625,7 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
 }
 
 // Logic for calculating which blocks to download from a given peer, given our current tip.
-void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller)
+void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, NodeId& nodeStaller, const CBlockIndex& tip)
 {
     if (count == 0)
         return;
@@ -1618,7 +1637,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // Make sure pindexBestKnownBlock is up to date, we'll need it.
     ProcessBlockAvailability(peer.m_id);
 
-    if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->nChainWork < m_chainman.ActiveChain().Tip()->nChainWork || state->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
+    if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->nChainWork < tip.nChainWork || state->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
         // This peer has nothing interesting.
         return;
     }
@@ -1627,9 +1646,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // abort downloading blocks from peers that don't have the snapshot block in their best chain.
     // We can't reorg to this chain due to missing undo data until validation completes,
     // so downloading blocks from it would be futile.
-    const CBlockIndex* snap_base{m_chainman.CurrentChainstate().SnapshotBase()};
-    if (snap_base && m_chainman.CurrentChainstate().m_assumeutxo == Assumeutxo::UNVALIDATED &&
-        state->pindexBestKnownBlock->GetAncestor(snap_base->nHeight) != snap_base) {
+    const CBlockIndex* snap_base{m_chainman.PublishedUnvalidatedSnapshotBase()};
+    if (snap_base && state->pindexBestKnownBlock->GetAncestor(snap_base->nHeight) != snap_base) {
         LogDebug(BCLog::NET, "Not downloading blocks from peer=%d, which doesn't have the snapshot block in its best chain.\n", peer.m_id);
         return;
     }
@@ -1638,7 +1656,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // pindexLastCommonBlock is required to be an ancestor of pindexBestKnownBlock, and will be used as a starting point.
     // It is being set to the fork point between the peer's best known block and the current tip, unless it is already set to
     // an ancestor with more work than the fork point.
-    auto fork_point = LastCommonAncestor(state->pindexBestKnownBlock, m_chainman.ActiveTip());
+    auto fork_point = LastCommonAncestor(state->pindexBestKnownBlock, &tip);
     if (state->pindexLastCommonBlock == nullptr ||
         fork_point->nChainWork > state->pindexLastCommonBlock->nChainWork ||
         state->pindexBestKnownBlock->GetAncestor(state->pindexLastCommonBlock->nHeight) != state->pindexLastCommonBlock) {
@@ -1653,7 +1671,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // download that next block if the window were 1 larger.
     int nWindowEnd = state->pindexLastCommonBlock->nHeight + BLOCK_DOWNLOAD_WINDOW;
 
-    FindNextBlocks(vBlocks, peer, state, pindexWalk, count, nWindowEnd, &m_chainman.ActiveChain(), &nodeStaller);
+    FindNextBlocks(vBlocks, peer, state, pindexWalk, count, nWindowEnd, &tip, &nodeStaller);
 }
 
 void PeerManagerImpl::TryDownloadingHistoricalBlocks(const Peer& peer, unsigned int count, std::vector<const CBlockIndex*>& vBlocks, const CBlockIndex *from_tip, const CBlockIndex* target_block)
@@ -1672,7 +1690,7 @@ void PeerManagerImpl::TryDownloadingHistoricalBlocks(const Peer& peer, unsigned 
         // This peer can't provide us the complete series of blocks leading up to the
         // assumeutxo snapshot base.
         //
-        // Presumably this peer's chain has less work than our ActiveChain()'s tip, or else we
+        // Presumably this peer's chain has less work than our active chain's tip, or else we
         // will eventually crash when we try to reorg to it. Let other logic
         // deal with whether we disconnect this peer.
         //
@@ -1685,7 +1703,7 @@ void PeerManagerImpl::TryDownloadingHistoricalBlocks(const Peer& peer, unsigned 
     FindNextBlocks(vBlocks, peer, state, from_tip, count, std::min<int>(from_tip->nHeight + BLOCK_DOWNLOAD_WINDOW, target_block->nHeight));
 }
 
-void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CChain* activeChain, NodeId* nodeStaller)
+void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, const Peer& peer, CNodeState *state, const CBlockIndex *pindexWalk, unsigned int count, int nWindowEnd, const CBlockIndex* active_tip, NodeId* nodeStaller)
 {
     std::vector<const CBlockIndex*> vToFetch;
     int nMaxHeight = std::min<int>(state->pindexBestKnownBlock->nHeight, nWindowEnd + 1);
@@ -1718,8 +1736,8 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 return;
             }
 
-            if (WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_HAVE_DATA) || (activeChain && activeChain->Contains(*pindex))) {
-                if (activeChain && pindex->HaveNumChainTxs()) {
+            if (WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_HAVE_DATA) || (active_tip && ChainContains(active_tip, *pindex))) {
+                if (active_tip && pindex->HaveNumChainTxs()) {
                     state->pindexLastCommonBlock = pindex;
                 }
                 continue;
@@ -2174,10 +2192,10 @@ void PeerManagerImpl::MaybePunishNodeForBlock(NodeId nodeid, const BlockValidati
     }
 }
 
-bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index)
+bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index, const CBlockIndex* tip)
 {
     AssertLockHeld(cs_main);
-    if (m_chainman.ActiveChain().Contains(block_index)) return true;
+    if (ChainContains(tip, block_index)) return true;
     LOCK(g_block_index_mutex);
     const CBlockIndex* best_header{m_chainman.m_best_header};
     return block_index.IsValid(BLOCK_VALID_SCRIPTS) && (best_header != nullptr) &&
@@ -2456,7 +2474,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
 
 /**
  * Update our best height and announce any block hashes which weren't previously
- * in m_chainman.ActiveChain() to our peers.
+ * in the active chain to our peers.
  */
 void PeerManagerImpl::OnUpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
 {
@@ -2781,11 +2799,12 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     FlatFilePos block_pos{};
     {
         LOCK(cs_main);
+        tip = m_chainman.PublishedTip();
         pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
         if (!pindex) {
             return;
         }
-        if (!BlockRequestAllowed(*pindex)) {
+        if (!BlockRequestAllowed(*pindex, tip)) {
             LogDebug(BCLog::NET, "%s: ignoring request from peer=%i for old block that isn't in the main chain\n", __func__, pfrom.GetId());
             return;
         }
@@ -2799,7 +2818,6 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             pfrom.fDisconnect = true;
             return;
         }
-        tip = m_chainman.ActiveChain().Tip();
         // Avoid leaking prune-height by never sending blocks below the NODE_NETWORK_LIMITED threshold
         if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && (
                 (((peer.m_our_services & NODE_NETWORK_LIMITED) == NODE_NETWORK_LIMITED) && ((peer.m_our_services & NODE_NETWORK) != NODE_NETWORK) && (tip->nHeight - pindex->nHeight > (int)NODE_NETWORK_LIMITED_MIN_BLOCKS + 2 /* add two blocks buffer extension for possible races */) )
@@ -2818,7 +2836,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             }
             block_pos = pindex->GetBlockPos();
         }
-        can_direct_fetch = CanDirectFetch();
+        can_direct_fetch = CanDirectFetch(*tip);
     }
 
     std::shared_ptr<const CBlock> pblock;
@@ -3057,8 +3075,7 @@ arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
 {
     arith_uint256 near_chaintip_work = 0;
     LOCK(cs_main);
-    if (m_chainman.ActiveChain().Tip() != nullptr) {
-        const CBlockIndex *tip = m_chainman.ActiveChain().Tip();
+    if (const CBlockIndex* tip{m_chainman.PublishedTip()}) {
         // Use a 144 block buffer, so that we'll accept headers that fork from
         // near our tip.
         near_chaintip_work = tip->nChainWork - std::min<arith_uint256>(144*GetBlockProof(*tip), tip->nChainWork);
@@ -3252,7 +3269,7 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
         return false;
     } else if (const CBlockIndex* best_header{WITH_LOCK(g_block_index_mutex, return m_chainman.m_best_header)}; best_header != nullptr && header == best_header->GetAncestor(header->nHeight)) {
         return true;
-    } else if (m_chainman.ActiveChain().Contains(*header)) {
+    } else if (ChainContains(m_chainman.PublishedTip(), *header)) {
         return true;
     }
     return false;
@@ -3282,12 +3299,13 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     LOCK(cs_main);
     LOCK(m_net_state_mutex);
     CNodeState *nodestate = State(pfrom.GetId());
+    const CBlockIndex* const tip{m_chainman.PublishedTip()};
 
-    if (CanDirectFetch() && WITH_LOCK(g_block_index_mutex, return last_header.IsValid(BLOCK_VALID_TREE)) && m_chainman.ActiveChain().Tip()->nChainWork <= last_header.nChainWork) {
+    if (CanDirectFetch(*tip) && WITH_LOCK(g_block_index_mutex, return last_header.IsValid(BLOCK_VALID_TREE)) && tip->nChainWork <= last_header.nChainWork) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
         // Calculate all the blocks we'd need to switch to last_header, up to a limit.
-        while (pindexWalk && !m_chainman.ActiveChain().Contains(*pindexWalk) && vToFetch.size() <= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
+        while (pindexWalk && !ChainContains(tip, *pindexWalk) && vToFetch.size() <= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
             if (!WITH_LOCK(g_block_index_mutex, return pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
                     !IsBlockRequested(pindexWalk->GetBlockHash()) &&
                     (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) || CanServeWitnesses(peer))) {
@@ -3301,7 +3319,7 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         // the main chain -- this shouldn't really happen.  Bail out on the
         // direct fetch and rely on parallel download instead.
         // Common ancestor must exist (genesis).
-        if (!m_chainman.ActiveChain().Contains(*Assert(pindexWalk))) {
+        if (!ChainContains(tip, *Assert(pindexWalk))) {
             LogDebug(BCLog::NET, "Large reorg, won't direct fetch to %s (%d)\n",
                      last_header.GetBlockHash().ToString(),
                      last_header.nHeight);
@@ -3350,6 +3368,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
     LOCK(cs_main);
     LOCK(m_net_state_mutex);
     CNodeState *nodestate = State(pfrom.GetId());
+    const CBlockIndex* const tip{m_chainman.PublishedTip()};
 
     UpdateBlockAvailability(pfrom.GetId(), last_header.GetBlockHash());
 
@@ -3357,7 +3376,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
     // because it is set in UpdateBlockAvailability. Some nullptr checks
     // are still present, however, as belt-and-suspenders.
 
-    if (received_new_header && last_header.nChainWork > m_chainman.ActiveChain().Tip()->nChainWork) {
+    if (received_new_header && last_header.nChainWork > tip->nChainWork) {
         nodestate->m_last_block_announcement = NodeClock::now();
     }
 
@@ -3371,7 +3390,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
             // us sync -- disconnect if it is an outbound disconnection
             // candidate.
             // Note: We compare their tip to the minimum chain work (rather than
-            // m_chainman.ActiveChain().Tip()) because we won't start block download
+            // the tip) because we won't start block download
             // until we have a headers chain that has at least
             // the minimum chain work, even if a peer has a chain past our tip,
             // as an anti-DoS measure.
@@ -3388,7 +3407,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
     // thus always subject to eviction under the bad/lagging chain logic.
     // See ChainSyncTimeoutState.
     if (!pfrom.fDisconnect && pfrom.IsFullOutboundConn() && nodestate->pindexBestKnownBlock != nullptr) {
-        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && nodestate->pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork && !nodestate->m_chain_sync.m_protect) {
+        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && nodestate->pindexBestKnownBlock->nChainWork >= tip->nChainWork && !nodestate->m_chain_sync.m_protect) {
             LogDebug(BCLog::NET, "Protecting outbound peer=%d from eviction\n", pfrom.GetId());
             nodestate->m_chain_sync.m_protect = true;
             ++m_outbound_peers_with_protect_from_disconnect;
@@ -3819,7 +3838,7 @@ bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& node, Peer& peer,
         stop_index = m_chainman.m_blockman.LookupBlockIndex(stop_hash);
 
         // Check that the stop block exists and the peer would be allowed to fetch it.
-        if (!stop_index || !BlockRequestAllowed(*stop_index)) {
+        if (!stop_index || !BlockRequestAllowed(*stop_index, m_chainman.PublishedTip())) {
             LogDebug(BCLog::NET, "peer requested invalid block hash: %s, %s",
                      stop_hash.ToString(), node.DisconnectMsg());
             node.fDisconnect = true;
@@ -4836,16 +4855,16 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         LOCK(cs_main);
+        const CBlockIndex* const tip{m_chainman.PublishedTip()};
 
         // Find the last block the caller has in the main chain
-        const CBlockIndex* pindex = m_chainman.ActiveChainstate().FindForkInGlobalIndex(locator);
+        const CBlockIndex* fork = FindForkInGlobalIndex(m_chainman.m_blockman, tip, locator);
 
         // Send the rest of the chain
-        if (pindex)
-            pindex = m_chainman.ActiveChain().Next(*pindex);
         int nLimit = 500;
-        LogDebug(BCLog::NET, "getblocks %d to %s limit %d from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), nLimit, pfrom.GetId());
-        for (; pindex; pindex = m_chainman.ActiveChain().Next(*pindex))
+        const std::vector<const CBlockIndex*> to_send{ChainBlocksAfter(tip, fork, nLimit)};
+        LogDebug(BCLog::NET, "getblocks %d to %s limit %d from peer=%d\n", (!to_send.empty() ? to_send.front()->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), nLimit, pfrom.GetId());
+        for (const CBlockIndex* pindex : to_send)
         {
             if (pindex->GetBlockHash() == hashStop)
             {
@@ -4855,7 +4874,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // If pruning, don't inv blocks unless we have on disk and are likely to still have
             // for some reasonable time window (1 hour) that block relay might require.
             const int nPrunedBlocksLikelyToHave = MIN_BLOCKS_TO_KEEP - 3600 / m_chainparams.GetConsensus().nPowTargetSpacing;
-            if (m_chainman.m_blockman.IsPruneMode() && (!WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_HAVE_DATA) || pindex->nHeight <= m_chainman.ActiveChain().Tip()->nHeight - nPrunedBlocksLikelyToHave)) {
+            if (m_chainman.m_blockman.IsPruneMode() && (!WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_HAVE_DATA) || pindex->nHeight <= tip->nHeight - nPrunedBlocksLikelyToHave)) {
                 LogDebug(BCLog::NET, " getblocks stopping, pruned or too old block at %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
                 break;
             }
@@ -4910,7 +4929,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 return;
             }
 
-            if (pindex->nHeight >= m_chainman.ActiveChain().Height() - MAX_BLOCKTXN_DEPTH) {
+            // The tip of an empty chain has height -1.
+            const CBlockIndex* const tip{m_chainman.PublishedTip()};
+            if (pindex->nHeight >= (tip ? tip->nHeight : -1) - MAX_BLOCKTXN_DEPTH) {
                 // The data cannot be pruned in the meantime: pruning holds cs_main.
                 block_pos = WITH_LOCK(g_block_index_mutex, return pindex->GetBlockPos());
             }
@@ -4963,8 +4984,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // Don't serve headers from our active chain until our chainwork is at least
         // the minimum chain work. This prevents us from starting a low-work headers
         // sync that will inevitably be aborted by our peer.
-        if (m_chainman.ActiveTip() == nullptr ||
-                (m_chainman.ActiveTip()->nChainWork < m_chainman.MinimumChainWork() && !pfrom.HasPermission(NetPermissionFlags::Download))) {
+        const CBlockIndex* const tip{m_chainman.PublishedTip()};
+        if (tip == nullptr ||
+                (tip->nChainWork < m_chainman.MinimumChainWork() && !pfrom.HasPermission(NetPermissionFlags::Download))) {
             LogDebug(BCLog::NET, "Ignoring getheaders from peer=%d because active chain has too little work; sending empty response\n", pfrom.GetId());
             // Just respond with an empty headers message, to tell the peer to
             // go away but not treat us as unresponsive.
@@ -4973,39 +4995,43 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         CNodeState *nodestate = State(pfrom.GetId());
-        const CBlockIndex* pindex = nullptr;
+        int nLimit = m_opts.max_headers_result;
+        // The blocks to send, up to the limit
+        std::vector<const CBlockIndex*> to_send;
         if (locator.IsNull())
         {
             // If locator is null, return the hashStop block
-            pindex = m_chainman.m_blockman.LookupBlockIndex(hashStop);
+            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hashStop);
             if (!pindex) {
                 return;
             }
-            if (!BlockRequestAllowed(*pindex)) {
+            if (!BlockRequestAllowed(*pindex, tip)) {
                 LogDebug(BCLog::NET, "%s: ignoring request from peer=%i for old block header that isn't in the main chain\n", __func__, pfrom.GetId());
                 return;
             }
+            // It is the one that stops what is sent.
+            to_send.push_back(pindex);
         }
         else
         {
             // Find the last block the caller has in the main chain
-            pindex = m_chainman.ActiveChainstate().FindForkInGlobalIndex(locator);
-            if (pindex)
-                pindex = m_chainman.ActiveChain().Next(*pindex);
+            to_send = ChainBlocksAfter(tip, FindForkInGlobalIndex(m_chainman.m_blockman, tip, locator), nLimit);
         }
 
         // we must use CBlocks, as CBlockHeaders won't include the 0x00 nTx count at the end
         std::vector<CBlock> vHeaders;
-        int nLimit = m_opts.max_headers_result;
-        LogDebug(BCLog::NET, "getheaders %d to %s from peer=%d\n", (pindex ? pindex->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
-        for (; pindex; pindex = m_chainman.ActiveChain().Next(*pindex))
+        LogDebug(BCLog::NET, "getheaders %d to %s from peer=%d\n", (!to_send.empty() ? to_send.front()->nHeight : -1), hashStop.IsNull() ? "end" : hashStop.ToString(), pfrom.GetId());
+        const CBlockIndex* pindex = nullptr; // the last block sent, if the limit or hashStop made us stop
+        for (const CBlockIndex* block : to_send)
         {
-            vHeaders.emplace_back(pindex->GetBlockHeader());
-            if (--nLimit <= 0 || pindex->GetBlockHash() == hashStop)
+            vHeaders.emplace_back(block->GetBlockHeader());
+            if (--nLimit <= 0 || block->GetBlockHash() == hashStop) {
+                pindex = block;
                 break;
+            }
         }
-        // pindex can be nullptr either if we sent m_chainman.ActiveChain().Tip() OR
-        // if our peer has m_chainman.ActiveChain().Tip() (and thus we are sending an empty
+        // pindex can be nullptr either if we sent the tip OR
+        // if our peer has the tip (and thus we are sending an empty
         // headers message). In both cases it's safe to update
         // pindexBestHeaderSent to be our tip.
         //
@@ -5016,7 +5042,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // without the new block. By resetting the BestHeaderSent, we ensure we
         // will re-announce the new block via headers (or compact blocks again)
         // in the SendMessages logic.
-        nodestate->pindexBestHeaderSent = pindex ? pindex : m_chainman.ActiveChain().Tip();
+        nodestate->pindexBestHeaderSent = pindex ? pindex : tip;
         MakeAndPushMessage(pfrom, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
         return;
     }
@@ -5164,10 +5190,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         UpdateBlockAvailability(pfrom.GetId(), pindex->GetBlockHash());
 
         CNodeState *nodestate = State(pfrom.GetId());
+        const CBlockIndex* const tip{m_chainman.PublishedTip()};
 
         // If this was a new header with more work than our tip, update the
         // peer's last block announcement time
-        if (received_new_header && pindex->nChainWork > m_chainman.ActiveChain().Tip()->nChainWork) {
+        if (received_new_header && pindex->nChainWork > tip->nChainWork) {
             nodestate->m_last_block_announcement = NodeClock::now();
         }
 
@@ -5194,7 +5221,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        if (pindex->nChainWork <= m_chainman.ActiveChain().Tip()->nChainWork || // We know something better
+        if (pindex->nChainWork <= tip->nChainWork || // We know something better
                 WITH_LOCK(g_block_index_mutex, return pindex->nTx) != 0) { // We had this block at some point, but pruned it
             if (requested_block_from_this_peer) {
                 // We requested this block for some reason, but our mempool will probably be useless
@@ -5207,13 +5234,13 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         // If we're not close to tip yet, give up and let parallel block fetch work its magic
-        if (!already_in_flight && !CanDirectFetch()) {
+        if (!already_in_flight && !CanDirectFetch(*tip)) {
             return;
         }
 
         // We want to be a bit conservative just to be extra careful about DoS
         // possibilities in compact block processing...
-        if (pindex->nHeight <= m_chainman.ActiveChain().Height() + 2) {
+        if (pindex->nHeight <= tip->nHeight + 2) {
             if ((already_in_flight < MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK && nodestate->vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) ||
                  requested_block_from_this_peer) {
                 std::list<QueuedBlock>::iterator* queuedBlockIt = nullptr;
@@ -5812,7 +5839,7 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     return fMoreWork;
 }
 
-void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds)
+void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds, const CBlockIndex& tip)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(m_net_state_mutex);
@@ -5826,7 +5853,7 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
         // their chain has more work than ours, we should sync to it,
         // unless it's invalid, in which case we should find that out and
         // disconnect from them elsewhere).
-        if (state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork) {
+        if (state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= tip.nChainWork) {
             // The outbound peer has sent us a block with at least as much work as our current tip, so reset the timeout if it was set
             if (state.m_chain_sync.m_timeout != 0s) {
                 state.m_chain_sync.m_timeout = 0s;
@@ -5841,7 +5868,7 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
             // for them, they caught up to our tip at the time of setting the timer but not to our current one (we've also advanced).
             // Either way, set a new timeout based on our current tip.
             state.m_chain_sync.m_timeout = time_in_seconds + CHAIN_SYNC_TIMEOUT;
-            state.m_chain_sync.m_work_header = m_chainman.ActiveChain().Tip();
+            state.m_chain_sync.m_work_header = &tip;
             state.m_chain_sync.m_sent_getheaders = false;
         } else if (state.m_chain_sync.m_timeout > 0s && time_in_seconds > state.m_chain_sync.m_timeout) {
             // No evidence yet that our peer has synced to a chain with work equal to that
@@ -6012,7 +6039,7 @@ void PeerManagerImpl::CheckForStaleTipAndEvictPeers()
         m_stale_tip_check_time = now + STALE_CHECK_INTERVAL;
     }
 
-    if (!m_initial_sync_finished && CanDirectFetch()) {
+    if (!m_initial_sync_finished && CanDirectFetch(*m_chainman.PublishedTip())) {
         m_connman.StartExtraBlockRelayPeers();
         m_initial_sync_finished = true;
     }
@@ -6429,12 +6456,13 @@ bool PeerManagerImpl::SendMessages(CNode& node)
         CNodeState &state = *State(node.GetId());
 
         // Start block sync
+        // One view of the chain for the whole pass
+        const CBlockIndex* const tip{m_chainman.PublishedTip()};
         const CBlockIndex* best_header;
         {
-            CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
             LOCK(g_block_index_mutex);
             if (m_chainman.m_best_header == nullptr) {
-                m_chainman.m_best_header = tip;
+                m_chainman.m_best_header = m_chainman.m_blockman.LookupBlockIndexLocked(tip->GetBlockHash());
             }
             best_header = m_chainman.m_best_header;
         }
@@ -6512,11 +6540,11 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 bool fFoundStartingHeader = false;
                 // Try to find first header that our peer doesn't have, and
                 // then send all headers past that one.  If we come across any
-                // headers that aren't on m_chainman.ActiveChain(), give up.
+                // headers that aren't on the active chain, give up.
                 for (const uint256& hash : peer.m_blocks_for_headers_relay) {
                     const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
                     assert(pindex);
-                    if (m_chainman.ActiveChain()[pindex->nHeight] != pindex) {
+                    if (tip->GetAncestor(pindex->nHeight) != pindex) {
                         // Bail out if we reorged away from this block
                         fRevertToInv = true;
                         break;
@@ -6606,9 +6634,9 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     // Warn if we're announcing a block that is not on the main chain.
                     // This should be very rare and could be optimized out.
                     // Just log for now.
-                    if (m_chainman.ActiveChain()[pindex->nHeight] != pindex) {
+                    if (tip->GetAncestor(pindex->nHeight) != pindex) {
                         LogDebug(BCLog::NET, "Announcing block %s not on main chain (tip=%s)\n",
-                            hashToAnnounce.ToString(), m_chainman.ActiveChain().Tip()->GetBlockHash().ToString());
+                            hashToAnnounce.ToString(), tip->GetBlockHash().ToString());
                     }
 
                     // If the peer's chain has this block, don't inv it back.
@@ -6842,7 +6870,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
 
         // Check that outbound peers have reasonable chains
         // GetTime() is used by this anti-DoS logic so we can test this using mocktime
-        ConsiderEviction(node, peer, GetTime<std::chrono::seconds>());
+        ConsiderEviction(node, peer, GetTime<std::chrono::seconds>(), *tip);
 
         //
         // Message: getdata (blocks)
@@ -6859,7 +6887,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
             // If there are multiple chainstates, download blocks for the
             // current chainstate first, to prioritize getting to network tip
             // before downloading historical blocks.
-            FindNextBlocksToDownload(peer, get_inflight_budget(), vToDownload, staller);
+            FindNextBlocksToDownload(peer, get_inflight_budget(), vToDownload, staller, *tip);
             auto historical_blocks{m_chainman.GetHistoricalBlockRange()};
             if (historical_blocks && !IsLimitedPeer(peer)) {
                 // If the first needed historical block is not an ancestor of the last,
