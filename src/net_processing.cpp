@@ -1205,7 +1205,7 @@ private:
      * and in best equivalent proof of work) than the best header chain we know
      * about and we fully-validated them at some point.
      */
-    bool BlockRequestAllowed(const CBlockIndex& block_index, const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool BlockRequestAllowed(const CBlockIndex& block_index, const CBlockIndex* tip);
     bool AlreadyHaveBlock(const uint256& block_hash);
     void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
@@ -2197,7 +2197,6 @@ void PeerManagerImpl::MaybePunishNodeForBlock(NodeId nodeid, const BlockValidati
 
 bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex& block_index, const CBlockIndex* tip)
 {
-    AssertLockHeld(cs_main);
     if (ChainContains(tip, block_index)) return true;
     LOCK(g_block_index_mutex);
     const CBlockIndex* best_header{m_chainman.m_best_header};
@@ -2774,7 +2773,6 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
 
     bool need_activate_chain = false;
     {
-        LOCK(cs_main);
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
         if (pindex) {
             LOCK(g_block_index_mutex);
@@ -2788,7 +2786,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                 need_activate_chain = true;
             }
         }
-    } // release cs_main before calling ActivateBestChain
+    }
     if (need_activate_chain) {
         // The rest of this function runs right after, since the job is done as it is submitted. Once it is not, it has
         // to wait for the result: the block is not served before the chain is activated.
@@ -2801,7 +2799,6 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     bool can_direct_fetch{false};
     FlatFilePos block_pos{};
     {
-        LOCK(cs_main);
         tip = m_chainman.PublishedTip();
         pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
         if (!pindex) {
@@ -2851,7 +2848,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         if (const auto block_data{m_chainman.m_blockman.ReadRawBlock(block_pos)}) {
             MakeAndPushMessage(pfrom, NetMsgType::BLOCK, std::span{*block_data});
         } else {
-            if (WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.IsBlockPruned(*pindex))) {
+            if (m_chainman.m_blockman.IsBlockPruned(*pindex)) {
                 LogDebug(BCLog::NET, "Block was pruned before it could be read, %s", pfrom.DisconnectMsg());
             } else {
                 LogError("Cannot load block from disk, %s", pfrom.DisconnectMsg());
@@ -2864,7 +2861,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         // Send block from disk
         std::shared_ptr<CBlock> pblockRead = std::make_shared<CBlock>();
         if (!m_chainman.m_blockman.ReadBlock(*pblockRead, block_pos, inv.hash)) {
-            if (WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.IsBlockPruned(*pindex))) {
+            if (m_chainman.m_blockman.IsBlockPruned(*pindex)) {
                 LogDebug(BCLog::NET, "Block was pruned before it could be read, %s", pfrom.DisconnectMsg());
             } else {
                 LogError("Cannot load block from disk, %s", pfrom.DisconnectMsg());
@@ -3805,7 +3802,6 @@ bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& node, Peer& peer,
     }
 
     {
-        LOCK(cs_main);
         stop_index = m_chainman.m_blockman.LookupBlockIndex(stop_hash);
 
         // Check that the stop block exists and the peer would be allowed to fetch it.
@@ -4824,7 +4820,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             ProcessPendingEvents();
         }
 
-        LOCK(cs_main);
         const CBlockIndex* const tip{m_chainman.PublishedTip()};
 
         // Find the last block the caller has in the main chain
@@ -4882,7 +4877,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             LOCK(m_most_recent_block_mutex);
             if (m_most_recent_block_hash == req.blockhash)
                 recent_block = m_most_recent_block;
-            // Unlock m_most_recent_block_mutex to avoid cs_main lock inversion
+            // Unlock m_most_recent_block_mutex before taking other locks: NewPoWValidBlock() takes it with
+            // m_net_state_mutex held
         }
         if (recent_block) {
             SendBlockTransactions(pfrom, peer, *recent_block, req);
@@ -4890,10 +4886,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         FlatFilePos block_pos{};
+        const CBlockIndex* pindex{nullptr};
         {
-            LOCK(cs_main);
-
-            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(req.blockhash);
+            pindex = m_chainman.m_blockman.LookupBlockIndex(req.blockhash);
             if (!pindex || !WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_HAVE_DATA)) {
                 LogDebug(BCLog::NET, "Peer %d sent us a getblocktxn for a block we don't have\n", pfrom.GetId());
                 return;
@@ -4902,20 +4897,26 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // The tip of an empty chain has height -1.
             const CBlockIndex* const tip{m_chainman.PublishedTip()};
             if (pindex->nHeight >= (tip ? tip->nHeight : -1) - MAX_BLOCKTXN_DEPTH) {
-                // The data cannot be pruned in the meantime: pruning holds cs_main.
                 block_pos = WITH_LOCK(g_block_index_mutex, return pindex->GetBlockPos());
             }
         }
 
         if (!block_pos.IsNull()) {
             CBlock block;
-            const bool ret{m_chainman.m_blockman.ReadBlock(block, block_pos, req.blockhash)};
-            // If height is above MAX_BLOCKTXN_DEPTH then this block cannot get
-            // pruned after we release cs_main above, so this read should never fail.
-            assert(ret);
-
-            SendBlockTransactions(pfrom, peer, block, req);
-            return;
+            // The block is within MAX_BLOCKTXN_DEPTH of the tip, so it is not pruned, unless
+            // the chain has moved by more than MIN_BLOCKS_TO_KEEP blocks since the tip was read
+            // (nothing excludes pruning while this runs). Reading it may fail then.
+            if (m_chainman.m_blockman.ReadBlock(block, block_pos, req.blockhash)) {
+                SendBlockTransactions(pfrom, peer, block, req);
+                return;
+            }
+            if (m_chainman.m_blockman.IsBlockPruned(*pindex)) {
+                LogDebug(BCLog::NET, "Block of the getblocktxn of peer %d was pruned before it could be read\n", pfrom.GetId());
+            } else {
+                LogError("Cannot load block %s from disk for the getblocktxn of peer %d", req.blockhash.ToString(), pfrom.GetId());
+            }
+        } else {
+            LogDebug(BCLog::NET, "Peer %d sent us a getblocktxn for a block > %i deep\n", pfrom.GetId(), MAX_BLOCKTXN_DEPTH);
         }
 
         // If an older block is requested (should never happen in practice,
@@ -4925,7 +4926,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // might maliciously send lots of getblocktxn requests to trigger
         // expensive disk reads, because it will require the peer to
         // actually receive all the data read from disk over the network.
-        LogDebug(BCLog::NET, "Peer %d sent us a getblocktxn for a block > %i deep\n", pfrom.GetId(), MAX_BLOCKTXN_DEPTH);
+        // If the block could not be read, the response to this request is
+        // that of a request for any block that is gone: ProcessGetBlockData()
+        // sends nothing for a pruned block.
         CInv inv{MSG_WITNESS_BLOCK, req.blockhash};
         WITH_LOCK(peer.m_getdata_requests_mutex, peer.m_getdata_requests.push_back(inv));
         // The message processing loop will go around again (without pausing) and we'll respond then
@@ -4948,7 +4951,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        LOCK(cs_main);
         LOCK(m_net_state_mutex);
 
         // Don't serve headers from our active chain until our chainwork is at least
