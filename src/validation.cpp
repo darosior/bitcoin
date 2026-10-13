@@ -4310,13 +4310,13 @@ bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> hea
 
 void ChainstateManager::ReportHeadersPresync(int64_t height, int64_t timestamp)
 {
-    AssertLockNotHeld(GetMutex());
+    AssertLockNotHeld(g_block_index_mutex);
     {
-        LOCK(GetMutex());
+        LOCK(g_block_index_mutex);
         // Don't report headers presync progress if we already have a post-minchainwork header chain.
         // This means we lose reporting for potentially legitimate, but unlikely, deep reorgs, but
         // prevent attackers that spam low-work headers from filling our logs.
-        if (WITH_LOCK(g_block_index_mutex, return m_best_header->nChainWork) >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
+        if (m_best_header->nChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
         // Rate limit headers presync updates to 4 per second, as these are not subject to DoS
         // protection.
         auto now = MockableSteadyClock::now();
