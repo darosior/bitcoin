@@ -1308,7 +1308,12 @@ public:
      */
     bool AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    void ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /**
+     * Chain selection bookkeeping for a block whose data was recorded with BlockManager::RecordBlockData(): assign
+     * the sequence id and chain transaction count to it and to the descendants it connects, add them to the block
+     * index candidates, or remember them as unlinked until their parent's data arrives.
+     */
+    void ReceivedBlockTransactions(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**
      * Try to add a transaction to the memory pool.
