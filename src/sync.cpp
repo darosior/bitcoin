@@ -288,6 +288,7 @@ void AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine,
     abort();
 }
 template void AssertLockHeldInternal(const char*, const char*, int, Mutex*);
+template void AssertLockHeldInternal(const char*, const char*, int, GlobalMutex*);
 template void AssertLockHeldInternal(const char*, const char*, int, RecursiveMutex*);
 
 template <typename MutexType>
@@ -298,6 +299,7 @@ void AssertLockNotHeldInternal(const char* pszName, const char* pszFile, int nLi
     abort();
 }
 template void AssertLockNotHeldInternal(const char*, const char*, int, Mutex*);
+template void AssertLockNotHeldInternal(const char*, const char*, int, GlobalMutex*);
 template void AssertLockNotHeldInternal(const char*, const char*, int, RecursiveMutex*);
 
 void DeleteLock(void* cs)

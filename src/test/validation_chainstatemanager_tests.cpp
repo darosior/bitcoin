@@ -528,6 +528,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
 
         // Blocks with heights in range [91, 110] are marked as missing data.
         if (i < last_assumed_valid_idx && i >= assumed_valid_start_idx) {
+            LOCK(g_block_index_mutex);
             index->nStatus = BlockStatus::BLOCK_VALID_TREE;
             index->nTx = 0;
             index->m_chain_tx_count = 0;
@@ -618,14 +619,18 @@ BOOST_FIXTURE_TEST_CASE(loadblockindex_invalid_descendants, TestChain100Setup)
     auto* child{m_node.chainman->ActiveChain().Tip()};
     auto* parent{child->pprev};
     auto* grand_parent{parent->pprev};
-    grand_parent->nStatus = (grand_parent->nStatus | BLOCK_FAILED_VALID);
-    parent->nStatus = (parent->nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
-    child->nStatus = (child->nStatus & ~BLOCK_FAILED_VALID);
+    {
+        LOCK(g_block_index_mutex);
+        grand_parent->nStatus = (grand_parent->nStatus | BLOCK_FAILED_VALID);
+        parent->nStatus = (parent->nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+        child->nStatus = (child->nStatus & ~BLOCK_FAILED_VALID);
+    }
 
     // Reload block index to recompute block status validity flags.
     m_node.chainman->LoadBlockIndex();
 
     // check grand_parent, parent, child is marked as BLOCK_FAILED_VALID after reloading the block index
+    LOCK(g_block_index_mutex);
     BOOST_CHECK(grand_parent->nStatus & BLOCK_FAILED_VALID);
     BOOST_CHECK(parent->nStatus & BLOCK_FAILED_VALID);
     BOOST_CHECK(child->nStatus & BLOCK_FAILED_VALID);
@@ -674,13 +679,13 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
     {
         LOCK(chainman.GetMutex());
         chainstate.ResetBlockFailureFlags(block99);
-        chainman.RecalculateBestHeader();
     }
     chainstate.ActivateBestChain(state);
     BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.ActiveChain().Tip()) == block100);
 
     {
         LOCK(chainman.GetMutex());
+        LOCK(g_block_index_mutex);
         BOOST_CHECK(!(block100->nStatus & BLOCK_FAILED_VALID));
         BOOST_CHECK(!(block99->nStatus & BLOCK_FAILED_VALID));
         BOOST_CHECK(!(fork_block100->nStatus & BLOCK_FAILED_VALID));
@@ -692,6 +697,7 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
 
     {
         LOCK(chainman.GetMutex());
+        LOCK(g_block_index_mutex);
         // block98 and all descendants of block98 are marked BLOCK_FAILED_VALID
         BOOST_CHECK(block98->nStatus & BLOCK_FAILED_VALID);
         BOOST_CHECK(block99->nStatus & BLOCK_FAILED_VALID);
@@ -706,11 +712,11 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_and_reconsider_fork, TestChain100Setup)
     {
         LOCK(chainman.GetMutex());
         chainstate.ResetBlockFailureFlags(block99);
-        chainman.RecalculateBestHeader();
     }
     chainstate.ActivateBestChain(state);
     {
         LOCK(chainman.GetMutex());
+        LOCK(g_block_index_mutex);
         BOOST_CHECK(!(block98->nStatus & BLOCK_FAILED_VALID));
         BOOST_CHECK(!(block99->nStatus & BLOCK_FAILED_VALID));
         BOOST_CHECK(!(block100->nStatus & BLOCK_FAILED_VALID));

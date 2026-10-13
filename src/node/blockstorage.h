@@ -23,6 +23,7 @@
 #include <util/fs.h>
 #include <util/hasher.h>
 #include <util/obfuscation.h>
+#include <util/translation.h>
 
 #include <algorithm>
 #include <array>
@@ -100,15 +101,27 @@ class BlockTreeDB : public CDBWrapper
 {
 public:
     using CDBWrapper::CDBWrapper;
-    void WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo);
+    /**
+     * Serialize the given file infos, last file number and block index entries into `batch`, which must have been
+     * created for this database. The entries are live objects, so the caller must hold the locks that guard their
+     * fields while this runs.
+     */
+    void FillBatch(CDBBatch& batch, const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo) const
+        EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+    /** Write a batch filled by FillBatch() and sync it to disk. It reads no entry, so it can run without any lock. */
+    void WriteBatchSync(CDBBatch& batch);
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo& info);
     bool ReadLastBlockFile(int& nFile);
     void WriteReindexing(bool fReindexing);
     void ReadReindexing(bool& fReindexing);
     void WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
+    /**
+     * Load the block index entries into memory. It writes the fields of the entries directly, so the caller
+     * must hold the locks that guard them.
+     */
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 };
 } // namespace kernel
 
@@ -204,13 +217,36 @@ private:
      * collections like m_dirty_blockindex.
      */
     bool LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
 
-    /** Return false if block file or undo file flushing fails. */
-    [[nodiscard]] bool FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Notifications (fatal and flush errors) raised by code that holds g_block_index_mutex. Handlers must not run
+     * under that mutex, so they are collected here and sent when this object is destroyed. Declare it before
+     * the LOCK() of the mutex, so that it is destroyed after the mutex is released. The destructor asserts that
+     * the mutex is not held.
+     */
+    class DeferredNotifications
+    {
+    public:
+        explicit DeferredNotifications(BlockManager& blockman) : m_blockman{blockman} {}
+        ~DeferredNotifications();
+        DeferredNotifications(const DeferredNotifications&) = delete;
+        DeferredNotifications& operator=(const DeferredNotifications&) = delete;
 
-    /** Return false if undo file flushing fails. */
-    [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize = false);
+        void FatalError(const bilingual_str& message) { m_pending.emplace_back(Kind::FATAL, message); }
+        void FlushError(const bilingual_str& message) { m_pending.emplace_back(Kind::FLUSH, message); }
+
+    private:
+        enum class Kind { FATAL, FLUSH };
+        BlockManager& m_blockman;
+        std::vector<std::pair<Kind, bilingual_str>> m_pending;
+    };
+
+    /** Return false if block file or undo file flushing fails. Errors are added to `notifications`. */
+    [[nodiscard]] bool FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo, DeferredNotifications& notifications) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+
+    /** Return false if undo file flushing fails. Errors are added to `notifications`. */
+    [[nodiscard]] bool FlushUndoFile(int block_file, bool finalize, DeferredNotifications& notifications) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     /**
      * Helper function performing various preparations before a block can be saved to disk:
@@ -220,18 +256,24 @@ private:
      *
      * The nAddSize argument passed to this function should include not just the size of the serialized CBlock, but also the size of
      * separator fields (STORAGE_HEADER_BYTES).
+     *
+     * Errors are added to `notifications`.
      */
-    [[nodiscard]] FlatFilePos FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    [[nodiscard]] bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] FlatFilePos FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, DeferredNotifications& notifications) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+    [[nodiscard]] bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize, DeferredNotifications& notifications) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     AutoFile OpenUndoFile(const FlatFilePos& pos, bool fReadOnly = false) const;
 
-    /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
+    /**
+     * Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain.
+     * `chain_prune_range` is the result of Chainstate::GetPruneRange() for `chain`, without a height limit. The caller
+     * computes it, because GetPruneRange() looks up block index entries, which takes g_block_index_mutex.
+     */
     void FindFilesToPruneManual(
         std::set<int>& setFilesToPrune,
         int nManualPruneHeight,
-        const Chainstate& chain);
+        const std::pair<int, int>& chain_prune_range,
+        const Chainstate& chain) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
 
     /**
      * Prune block and undo files (blk???.dat and rev???.dat) so that the disk space used is less than a user-defined target.
@@ -248,12 +290,16 @@ private:
      *
      * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
      * @param        last_prune        The last height we're able to prune, according to the prune locks
+     * @param        chain_prune_range The result of Chainstate::GetPruneRange() for `chain`, without a height limit.
+     *                                 The caller computes it, because GetPruneRange() looks up block index entries,
+     *                                 which takes g_block_index_mutex.
      */
     void FindFilesToPrune(
         std::set<int>& setFilesToPrune,
         int last_prune,
+        const std::pair<int, int>& chain_prune_range,
         const Chainstate& chain,
-        ChainstateManager& chainman);
+        ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
 
     //! Since assumedvalid chainstates may be syncing a range of the chain that is very
     //! far away from the normal/background validation process, we should segment blockfiles
@@ -266,13 +312,13 @@ private:
     //!
     //! The first element is the NORMAL cursor, second is ASSUMED.
     std::array<std::optional<BlockfileCursor>, BlockfileType::NUM_TYPES>
-        m_blockfile_cursors GUARDED_BY(::cs_main) = {
+        m_blockfile_cursors GUARDED_BY(g_block_index_mutex) = {
             BlockfileCursor{},
             std::nullopt,
     };
-    int MaxBlockfileNum() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    int MaxBlockfileNum() const EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex)
     {
-        AssertLockHeld(::cs_main);
+        AssertLockHeld(g_block_index_mutex);
         static const BlockfileCursor empty_cursor;
         const auto& normal = m_blockfile_cursors[BlockfileType::NORMAL].value_or(empty_cursor);
         const auto& assumed = m_blockfile_cursors[BlockfileType::ASSUMED].value_or(empty_cursor);
@@ -283,7 +329,7 @@ private:
      *  block/undo files that should be deleted.  Set on startup
      *  or if we allocate more file space when we're in prune mode
      */
-    bool m_check_for_pruning = false;
+    bool m_check_for_pruning GUARDED_BY(g_block_index_mutex) = false;
 
     const bool m_prune_mode;
 
@@ -295,9 +341,9 @@ private:
      * @note Internally, only blocks at height (height_first - PRUNE_LOCK_BUFFER - 1) and
      * below will be pruned, but callers should avoid assuming any particular buffer size.
      */
-    std::unordered_map<std::string, PruneLockInfo> m_prune_locks GUARDED_BY(::cs_main);
+    std::unordered_map<std::string, PruneLockInfo> m_prune_locks GUARDED_BY(g_block_index_mutex);
 
-    BlockfileType BlockfileTypeForHeight(int height);
+    BlockfileType BlockfileTypeForHeight(int height) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     const kernel::BlockManagerOpts m_opts;
 
@@ -305,13 +351,21 @@ private:
     const FlatFileSeq m_undo_file_seq;
 
 protected:
-    std::vector<CBlockFileInfo> m_blockfile_info;
+    std::vector<CBlockFileInfo> m_blockfile_info GUARDED_BY(g_block_index_mutex);
 
-    /** Dirty block index entries. */
-    std::set<CBlockIndex*> m_dirty_blockindex;
+    /**
+     * Dirty block index entries. An entry is marked dirty in the same critical section of g_block_index_mutex as
+     * the change, so that a flush that holds the mutex always writes a consistent entry.
+     *
+     * This is where "every change to an existing entry also holds cs_main" is enforced. The fields of the entries
+     * are public, so the compiler cannot require cs_main on each write, but a change that is not flagged is not
+     * written, and flagging requires cs_main (MarkDirty()). The flush relies on it: it holds cs_main from the
+     * capture of the entries to the write, so none changes in between.
+     */
+    std::set<CBlockIndex*> m_dirty_blockindex GUARDED_BY(g_block_index_mutex);
 
     /** Dirty block file entries. */
-    std::set<int> m_dirty_fileinfo;
+    std::set<int> m_dirty_fileinfo GUARDED_BY(g_block_index_mutex);
 
 public:
     using Options = kernel::BlockManagerOpts;
@@ -330,7 +384,7 @@ public:
      */
     std::atomic_bool m_blockfiles_indexed{true};
 
-    BlockMap m_block_index GUARDED_BY(cs_main);
+    BlockMap m_block_index GUARDED_BY(g_block_index_mutex);
 
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
@@ -344,58 +398,78 @@ public:
      * had been previously loaded. After the snapshot is validated, this is unset to
      * restore normal LoadBlockIndex behavior.
      */
-    std::optional<int> m_snapshot_height;
+    std::optional<int> m_snapshot_height GUARDED_BY(g_block_index_mutex);
 
-    std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+
+    //! Flag an entry that changed, so that the next flush writes it. Every change to an existing entry has to be
+    //! flagged, and this requires cs_main in addition to g_block_index_mutex, which is how it is enforced that
+    //! every writer of an existing entry holds cs_main (see the comment at g_block_index_mutex). The entries that
+    //! are inserted are the exception: nobody else can see them yet.
+    void MarkDirty(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
 
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.
      */
     //! Unlinked blocks feed the candidates for chain selection, so this is guarded by cs_main.
     std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked GUARDED_BY(::cs_main);
-    void AddUnlinkedBlock(CBlockIndex* block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void AddUnlinkedBlock(CBlockIndex* block) EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_block_index_mutex);
 
-    std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
+    //! The block tree database. The handle is set once, in the constructor. See g_block_index_mutex.
+    const std::unique_ptr<BlockTreeDB> m_block_tree_db;
 
-    void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Write the dirty block index entries and block file info to the block tree database, in a synced write.
+     *
+     * The batch is built while holding g_block_index_mutex, since the entries are live objects, and the
+     * synced write happens after it is released, so that nobody who needs the block index waits for the disk.
+     * The caller must hold cs_main for the whole of FlushStateToDisk(): every change to an existing entry holds
+     * it too, so nothing can change an entry between the capture and the write. Entries that are inserted in the
+     * meantime stay dirty, and are written by the next flush.
+     */
+    void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /**
      * Remove any pruned block & undo files that are still on disk.
      * This could happen on some systems if the file was still being read while unlinked,
      * or if we crash before unlinking.
      */
-    void ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void ScanAndUnlinkAlreadyPrunedFiles() LOCKS_EXCLUDED(g_block_index_mutex);
 
-    CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     /**
      * Record that the full data of a block was written at `pos`: its position, its number of transactions and
      * BLOCK_HAVE_DATA (with BLOCK_OPT_WITNESS if `opt_witness`), and raise its validity to BLOCK_VALID_TRANSACTIONS. This
-     * is a single operation, so nobody sees a block that has transactions but no data, or the reverse. The undo
-     * position is reset: this is also how a pruned block that is downloaded again is recorded.
+     * is a single operation that holds g_block_index_mutex until it is done: nobody sees a block that has
+     * transactions but no data, or the reverse, nor a flush that writes half of it. The undo position is reset: this
+     * is also how a pruned block that is downloaded again is recorded.
      *
      * This does not touch chain selection (sequence id, chain transaction count, unlinked blocks and candidates):
      * that is up to ChainstateManager::ReceivedBlockTransactions().
      */
-    void RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
     /** Create a new block index entry for a given block hash */
-    CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     //! Mark one block file as pruned (modify associated database entries)
-    void PruneOneBlockFile(int fileNumber) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void PruneOneBlockFile(int fileNumber) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
 
-    CBlockIndex* LookupBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    const CBlockIndex* LookupBlockIndex(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    CBlockIndex* LookupBlockIndex(const uint256& hash) LOCKS_EXCLUDED(g_block_index_mutex);
+    CBlockIndex* LookupBlockIndexLocked(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+    const CBlockIndex* LookupBlockIndex(const uint256& hash) const LOCKS_EXCLUDED(g_block_index_mutex);
+    const CBlockIndex* LookupBlockIndexLocked(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
-    /** Get block file info entry for one block file */
-    CBlockFileInfo* GetBlockFileInfo(size_t n) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Get block file info entry for one block file. The pointer is only valid while g_block_index_mutex is held. */
+    CBlockFileInfo* GetBlockFileInfo(size_t n) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
+    /** Write the undo data of a block, and record its position in the block's entry. Requires cs_main, see g_block_index_mutex. */
     bool WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationState& state, CBlockIndex& block)
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
 
-    /** Store block on disk and update block file statistics.
+    /** Store block on disk and update block file statistics. Requires cs_main, see g_block_index_mutex.
      *
      * @param[in]  block        the block to be stored
      * @param[in]  nHeight      the height of the block
@@ -403,15 +477,19 @@ public:
      * @returns in case of success, the position to which the block was written to
      *          in case of an error, an empty FlatFilePos
      */
-    FlatFilePos WriteBlock(const CBlock& block, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    FlatFilePos WriteBlock(const CBlock& block, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /** Update blockfile info while processing a block during reindex. The block must be available on disk.
+     * Requires cs_main, see g_block_index_mutex.
      *
      * @param[in]  block        the block being processed
      * @param[in]  nHeight      the height of the block
      * @param[in]  pos          the position of the serialized CBlock on disk
      */
-    void UpdateBlockInfo(const CBlock& block, unsigned int nHeight, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void UpdateBlockInfo(const CBlock& block, unsigned int nHeight, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+
+    /** Flush the block and undo file the chainstate with the given tip height is writing to. Requires cs_main, see g_block_index_mutex. */
+    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }
@@ -423,13 +501,13 @@ public:
     [[nodiscard]] bool LoadingBlocks() const { return m_importing || !m_blockfiles_indexed; }
 
     /** Calculate the amount of disk space the block & undo files currently use */
-    uint64_t CalculateCurrentUsage() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    uint64_t CalculateCurrentUsage() EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     //! Check if all blocks in the [upper_block, lower_block] range have data available as
     //! defined by the status mask.
     //! The caller is responsible for ensuring that lower_block is an ancestor of upper_block
     //! (part of the same chain).
-    bool CheckBlockDataAvailability(const CBlockIndex& upper_block, const CBlockIndex& lower_block, BlockStatus block_status = BLOCK_HAVE_DATA) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool CheckBlockDataAvailability(const CBlockIndex& upper_block, const CBlockIndex& lower_block, BlockStatus block_status = BLOCK_HAVE_DATA) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /**
      * @brief Returns the earliest block with specified `status_mask` flags set after
@@ -457,19 +535,24 @@ public:
         const CBlockIndex& upper_block LIFETIMEBOUND,
         uint32_t status_mask,
         const CBlockIndex* lower_block LIFETIMEBOUND = nullptr
-    ) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    ) const LOCKS_EXCLUDED(g_block_index_mutex);
+    const CBlockIndex& GetFirstBlockLocked(
+        const CBlockIndex& upper_block LIFETIMEBOUND,
+        uint32_t status_mask,
+        const CBlockIndex* lower_block LIFETIMEBOUND = nullptr
+    ) const EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     /** True if any block files have ever been pruned. */
-    bool m_have_pruned = false;
+    bool m_have_pruned GUARDED_BY(g_block_index_mutex) = false;
 
     //! Check whether the block associated with this index entry is pruned or not.
-    bool IsBlockPruned(const CBlockIndex& block) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsBlockPruned(const CBlockIndex& block) const LOCKS_EXCLUDED(g_block_index_mutex);
 
-    //! Create or update a prune lock identified by its name
-    void UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Create or update a prune lock identified by its name. Does not need cs_main.
+    void UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) LOCKS_EXCLUDED(g_block_index_mutex);
 
-    //! Delete a prune lock identified by its name. Returns true if the lock existed.
-    bool DeletePruneLock(const std::string& name) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Delete a prune lock identified by its name. Returns true if the lock existed. Does not need cs_main.
+    bool DeletePruneLock(const std::string& name) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /** Open a block file (blk?????.dat) */
     AutoFile OpenBlockFile(const FlatFilePos& pos, bool fReadOnly) const;
@@ -484,10 +567,10 @@ public:
 
     /** Functions for disk access for blocks */
     bool ReadBlock(CBlock& block, const FlatFilePos& pos, const std::optional<uint256>& expected_hash) const;
-    bool ReadBlock(CBlock& block, const CBlockIndex& index) const;
+    bool ReadBlock(CBlock& block, const CBlockIndex& index) const LOCKS_EXCLUDED(g_block_index_mutex);
     ReadRawBlockResult ReadRawBlock(const FlatFilePos& pos, std::optional<std::pair<size_t, size_t>> block_part = std::nullopt) const;
 
-    bool ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index) const;
+    bool ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index) const LOCKS_EXCLUDED(g_block_index_mutex);
 
     void CleanupBlockRevFiles() const;
 };

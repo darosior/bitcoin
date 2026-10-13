@@ -301,7 +301,7 @@ public:
     size_t getMempoolMaxUsage() override { return m_context->mempool ? m_context->mempool->m_opts.max_size_bytes : 0; }
     bool getHeaderTip(int& height, int64_t& block_time) override
     {
-        LOCK(::cs_main);
+        LOCK(g_block_index_mutex);
         auto best_header = chainman().m_best_header;
         if (best_header) {
             height = best_header->nHeight;
@@ -569,7 +569,9 @@ public:
     {
         LOCK(::cs_main);
         const CBlockIndex* block{chainman().ActiveChain()[height]};
-        return block && ((block->nStatus & BLOCK_HAVE_DATA) != 0) && block->nTx > 0;
+        if (!block) return false;
+        LOCK(g_block_index_mutex);
+        return ((block->nStatus & BLOCK_HAVE_DATA) != 0) && block->nTx > 0;
     }
     std::optional<int> findLocatorFork(const CBlockLocator& locator) override
     {
@@ -655,6 +657,7 @@ public:
         LOCK(::cs_main);
         if (const CBlockIndex* block = chainman().m_blockman.LookupBlockIndex(block_hash)) {
             if (max_height && block->nHeight >= *max_height) block = block->GetAncestor(*max_height);
+            LOCK(g_block_index_mutex);
             for (; block->nStatus & BLOCK_HAVE_DATA; block = block->pprev) {
                 // Check pprev to not segfault if min_height is too low
                 if (block->nHeight <= min_height || !block->pprev) return true;
@@ -765,7 +768,7 @@ public:
     }
     bool havePruned() override
     {
-        LOCK(::cs_main);
+        LOCK(g_block_index_mutex);
         return chainman().m_blockman.m_have_pruned;
     }
     std::optional<int> getPruneHeight() override

@@ -22,7 +22,7 @@ interfaces::BlockInfo MakeBlockInfo(const CBlockIndex* index, const CBlock* data
         info.prev_hash = index->pprev ? index->pprev->phashBlock : nullptr;
         info.height = index->nHeight;
         info.chain_time_max = index->GetBlockTimeMax();
-        LOCK(::cs_main);
+        LOCK(g_block_index_mutex);
         info.file_number = index->nFile;
         info.data_pos = index->nDataPos;
     }

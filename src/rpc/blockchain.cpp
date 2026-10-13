@@ -211,7 +211,7 @@ UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex
     result.pushKV("target", GetTarget(blockindex, pow_limit).GetHex());
     result.pushKV("difficulty", GetDifficulty(blockindex));
     result.pushKV("chainwork", blockindex.nChainWork.GetHex());
-    result.pushKV("nTx", blockindex.nTx);
+    result.pushKV("nTx", WITH_LOCK(g_block_index_mutex, return blockindex.nTx));
 
     if (blockindex.pprev)
         result.pushKV("previousblockhash", blockindex.pprev->GetBlockHash().GetHex());
@@ -263,7 +263,7 @@ UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIn
         case TxVerbosity::SHOW_DETAILS_AND_PREVOUT:
             CBlockUndo blockUndo;
             const bool is_not_pruned{WITH_LOCK(::cs_main, return !blockman.IsBlockPruned(blockindex))};
-            bool have_undo{is_not_pruned && WITH_LOCK(::cs_main, return blockindex.nStatus & BLOCK_HAVE_UNDO)};
+            bool have_undo{is_not_pruned && WITH_LOCK(g_block_index_mutex, return blockindex.nStatus & BLOCK_HAVE_UNDO)};
             if (have_undo && !blockman.ReadBlockUndo(blockUndo, blockindex)) {
                 throw JSONRPCError(RPC_INTERNAL_ERROR, "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event.");
             }
@@ -592,7 +592,7 @@ static RPCMethod getblockfrompeer()
         throw JSONRPCError(RPC_MISC_ERROR, "In prune mode, only blocks that the node has already synced previously can be fetched from a peer");
     }
 
-    const bool block_has_data = WITH_LOCK(::cs_main, return index->nStatus & BLOCK_HAVE_DATA);
+    const bool block_has_data = WITH_LOCK(g_block_index_mutex, return index->nStatus & BLOCK_HAVE_DATA);
     if (block_has_data) {
         throw JSONRPCError(RPC_MISC_ERROR, "Block already downloaded");
     }
@@ -711,7 +711,7 @@ void CheckBlockDataAvailability(BlockManager& blockman, const CBlockIndex& block
 {
     AssertLockHeld(cs_main);
     uint32_t flag = check_for_undo ? BLOCK_HAVE_UNDO : BLOCK_HAVE_DATA;
-    if (!(blockindex.nStatus & flag)) {
+    if (!WITH_LOCK(g_block_index_mutex, return blockindex.nStatus & flag)) {
         if (blockman.IsBlockPruned(blockindex)) {
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("%s not available (pruned data)", check_for_undo ? "Undo data" : "Block"));
         }
@@ -745,7 +745,7 @@ static std::vector<std::byte> GetRawBlockChecked(BlockManager& blockman, const C
     {
         LOCK(cs_main);
         CheckBlockDataAvailability(blockman, blockindex, /*check_for_undo=*/false);
-        pos = blockindex.GetBlockPos();
+        pos = WITH_LOCK(g_block_index_mutex, return blockindex.GetBlockPos());
     }
 
     if (auto data{blockman.ReadRawBlock(pos)}) return std::move(*data);
@@ -932,7 +932,7 @@ std::optional<int> GetPruneHeight(const BlockManager& blockman, const CChain& ch
     if (!first_block || !chain_tip) return std::nullopt;
 
     // If the chain tip is pruned, everything is pruned.
-    if ((chain_tip->nStatus & BLOCK_HAVE_MASK) != BLOCK_HAVE_MASK) return chain_tip->nHeight;
+    if ((WITH_LOCK(g_block_index_mutex, return chain_tip->nStatus) & BLOCK_HAVE_MASK) != BLOCK_HAVE_MASK) return chain_tip->nHeight;
 
     const auto& first_unpruned{blockman.GetFirstBlock(*chain_tip, /*status_mask=*/BLOCK_HAVE_MASK, first_block)};
     if (&first_unpruned == first_block) {
@@ -1454,7 +1454,8 @@ RPCMethod getblockchaininfo()
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
     obj.pushKV("blocks", height);
-    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    const CBlockIndex* const best_header{WITH_LOCK(g_block_index_mutex, return chainman.m_best_header)};
+    obj.pushKV("headers", best_header ? best_header->nHeight : -1);
     obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -1477,7 +1478,7 @@ RPCMethod getblockchaininfo()
         obj.pushKV("backgroundvalidation", std::move(background_validation));
     }
     obj.pushKV("chainwork", tip.nChainWork.GetHex());
-    obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
+    obj.pushKV("size_on_disk", WITH_LOCK(g_block_index_mutex, return chainman.m_blockman.CalculateCurrentUsage()));
     obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
     if (chainman.m_blockman.IsPruneMode()) {
         const auto prune_height{GetPruneHeight(chainman.m_blockman, active_chainstate.m_chain)};
@@ -1643,7 +1644,7 @@ static RPCMethod getchaintips()
     /*
      * Idea: The set of chain tips is the active chain tip, plus orphan blocks which do not have another orphan building off of them.
      * Algorithm:
-     *  - Make one pass through BlockIndex(), picking out the orphan blocks, and also storing a set of the orphan block's pprev pointers.
+     *  - Make one pass through the block index, picking out the orphan blocks, and also storing a set of the orphan block's pprev pointers.
      *  - Iterate through the orphan blocks. If the block isn't pointed to by another orphan, it is a chain tip.
      *  - Add the active chain tip
      */
@@ -1651,10 +1652,13 @@ static RPCMethod getchaintips()
     std::set<const CBlockIndex*> setOrphans;
     std::set<const CBlockIndex*> setPrevs;
 
-    for (const auto& [_, block_index] : chainman.BlockIndex()) {
-        if (!active_chain.Contains(block_index)) {
-            setOrphans.insert(&block_index);
-            setPrevs.insert(block_index.pprev);
+    {
+        LOCK(g_block_index_mutex);
+        for (const auto& [_, block_index] : chainman.m_blockman.m_block_index) {
+            if (!active_chain.Contains(block_index)) {
+                setOrphans.insert(&block_index);
+                setPrevs.insert(block_index.pprev);
+            }
         }
     }
 
@@ -1679,6 +1683,7 @@ static RPCMethod getchaintips()
         obj.pushKV("branchlen", branchLen);
 
         std::string status;
+        LOCK(g_block_index_mutex);
         if (active_chain.Contains(*block)) {
             // This block is part of the currently active chain.
             status = "active";
@@ -1807,7 +1812,6 @@ void ReconsiderBlock(ChainstateManager& chainman, uint256 block_hash) {
         }
 
         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
-        chainman.RecalculateBestHeader();
     }
 
     BlockValidationState state;
@@ -3041,7 +3045,7 @@ static RPCMethod getblockfilter()
         if (!block_index) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
-        block_was_connected = block_index->IsValid(BLOCK_VALID_SCRIPTS);
+        block_was_connected = WITH_LOCK(g_block_index_mutex, return block_index->IsValid(BLOCK_VALID_SCRIPTS));
     }
 
     bool index_ready = index->BlockUntilSyncedToCurrentChain();
@@ -3086,13 +3090,11 @@ class TemporaryPruneLock
 public:
     TemporaryPruneLock(BlockManager& blockman, int height) : m_blockman(blockman)
     {
-        LOCK(::cs_main);
         m_blockman.UpdatePruneLock(LOCK_NAME, {height});
         LogDebug(BCLog::PRUNE, "dumptxoutset: registered prune lock at height %d", height);
     }
     ~TemporaryPruneLock()
     {
-        LOCK(::cs_main);
         m_blockman.DeletePruneLock(LOCK_NAME);
         LogDebug(BCLog::PRUNE, "dumptxoutset: released prune lock");
     }
@@ -3655,7 +3657,8 @@ return RPCMethod{
         return data;
     };
 
-    obj.pushKV("headers", chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
+    const CBlockIndex* const best_header{WITH_LOCK(g_block_index_mutex, return chainman.m_best_header)};
+    obj.pushKV("headers", best_header ? best_header->nHeight : -1);
     UniValue obj_chainstates{UniValue::VARR};
     if (const Chainstate * cs{chainman.HistoricalChainstate()}) {
         obj_chainstates.push_back(make_chain_data(*cs));

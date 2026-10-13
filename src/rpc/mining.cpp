@@ -772,6 +772,7 @@ static RPCMethod getblocktemplate()
             LOCK(cs_main);
             const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(hash);
             if (pindex) {
+                LOCK(g_block_index_mutex);
                 if (pindex->IsValid(BLOCK_VALID_SCRIPTS))
                     return "duplicate";
                 if (pindex->nStatus & BLOCK_FAILED_VALID)

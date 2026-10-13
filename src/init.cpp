@@ -1504,7 +1504,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     auto [status, error] = catch_exceptions([&] { return LoadChainstate(chainman, cache_sizes, options); });
     if (status == node::ChainstateLoadStatus::SUCCESS) {
         uiInterface.InitMessage(_("Verifying blocks…"));
-        if (chainman.m_blockman.m_have_pruned && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
+        if (WITH_LOCK(g_block_index_mutex, return chainman.m_blockman.m_have_pruned) && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
             LogWarning("pruned datadir may not have more than %d blocks; only checking available blocks\n",
                        MIN_BLOCKS_TO_KEEP);
         }
@@ -1898,7 +1898,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     g_zmq_notification_interface = CZMQNotificationInterface::Create(
         [&chainman = node.chainman](std::vector<std::byte>& block, const CBlockIndex& index) {
             assert(chainman);
-            if (auto ret{chainman->m_blockman.ReadRawBlock(WITH_LOCK(cs_main, return index.GetBlockPos()))}) {
+            if (auto ret{chainman->m_blockman.ReadRawBlock(WITH_LOCK(g_block_index_mutex, return index.GetBlockPos()))}) {
                 block = std::move(*ret);
                 return true;
             }
@@ -2194,7 +2194,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     {
         LOCK(chainman.GetMutex());
         const auto& tip{*Assert(chainman.ActiveTip())};
-        LogInfo("block tree size = %u", chainman.BlockIndex().size());
+        LogInfo("block tree size = %u", WITH_LOCK(g_block_index_mutex, return chainman.BlockIndex().size()));
         chain_active_height = tip.nHeight;
         best_block_time = tip.GetBlockTime();
         if (tip_info) {
@@ -2202,9 +2202,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             tip_info->block_time = best_block_time;
             tip_info->verification_progress = chainman.GuessVerificationProgress(&tip);
         }
-        if (tip_info && chainman.m_best_header) {
-            tip_info->header_height = chainman.m_best_header->nHeight;
-            tip_info->header_time = chainman.m_best_header->GetBlockTime();
+        const CBlockIndex* best_header{WITH_LOCK(g_block_index_mutex, return chainman.m_best_header)};
+        if (tip_info && best_header) {
+            tip_info->header_height = best_header->nHeight;
+            tip_info->header_time = best_header->GetBlockTime();
         }
     }
     LogInfo("nBestHeight = %d", chain_active_height);
