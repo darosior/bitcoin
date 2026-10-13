@@ -19,14 +19,18 @@ void ValidationJobs::Submit(Job job) const
             m_chainman.ActivateNewBlock(job.block);
             m_post_result(StoredBlockProcessed{job.from, job.block->GetHash(), job.new_block});
         },
-        [&](const ProcessTransaction& job) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-            AssertLockHeld(::cs_main);
+        // The results of the jobs for the mempool are posted with cs_main held: a tip change is notified under it, so
+        // that their order in the queue is the order of the changes of the chain and of the decisions of the mempool.
+        [&](const ProcessTransaction& job) {
+            AssertLockNotHeld(::cs_main);
+            LOCK(::cs_main);
             m_post_result(TxProcessed{job.from, job.tx, m_chainman.ProcessTransaction(job.tx)});
         },
-        [&](const ReconsiderOrphans& job) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-            AssertLockHeld(::cs_main);
+        [&](const ReconsiderOrphans& job) {
+            AssertLockNotHeld(::cs_main);
             // The orphans are tried in order until one has a result other than missing inputs, with cs_main held
             // across the loop, as the loop of the message handler always did.
+            LOCK(::cs_main);
             std::optional<MempoolAcceptResult> last;
             size_t num_tried{0};
             for (const CTransactionRef& tx : job.txs) {
@@ -37,8 +41,9 @@ void ValidationJobs::Submit(Job job) const
             }
             m_post_result(OrphansReconsidered{job.from, job.txs, num_tried, Assert(std::move(last)).value()});
         },
-        [&](const ProcessPackage& job) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-            AssertLockHeld(::cs_main);
+        [&](const ProcessPackage& job) {
+            AssertLockNotHeld(::cs_main);
+            LOCK(::cs_main);
             m_post_result(PackageProcessed{job.from, job.package, ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, job.package.m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)});
         },
         [&](const TestAcceptTransactions& job) {
