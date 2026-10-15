@@ -67,6 +67,14 @@ std::pair<bool, std::optional<PackageToValidate>> TxDownloadManager::ReceivedTx(
 {
     return m_impl->ReceivedTx(nodeid, ptx);
 }
+void TxDownloadManager::ValidationPending(NodeId nodeid, const Wtxid& wtxid)
+{
+    m_impl->ValidationPending(nodeid, wtxid);
+}
+void TxDownloadManager::ValidationDone(const Wtxid& wtxid)
+{
+    m_impl->ValidationDone(wtxid);
+}
 bool TxDownloadManager::HaveMoreWork(NodeId nodeid) const
 {
     return m_impl->HaveMoreWork(nodeid);
@@ -162,6 +170,7 @@ void TxDownloadManagerImpl::DisconnectedPeer(NodeId nodeid)
 {
     m_orphanage->EraseForPeer(nodeid);
     m_txrequest.DisconnectedPeer(nodeid);
+    std::erase_if(m_validation_pending, [nodeid](const auto& pending) { return pending.second == nodeid; });
 
     if (auto it = m_peer_info.find(nodeid); it != m_peer_info.end()) {
         if (it->second.m_connection_info.m_wtxid_relay) m_num_wtxid_peers -= 1;
@@ -274,6 +283,12 @@ std::vector<GenTxid> TxDownloadManagerImpl::GetRequestsToSend(NodeId nodeid, std
                  gtxid.ToUint256().ToString(), expired_nodeid);
     }
     for (const GenTxid& gtxid : requestable) {
+        // A transaction that waits for validation is neither requested nor forgotten: the announcements of the other
+        // peers are what orphan resolution needs, if it is an orphan, and they are forgotten once the result is
+        // handled otherwise. Only the announcements by wtxid, and those of transactions without a witness, are
+        // found: a transaction with a witness that is announced by txid (by a peer that does not relay by wtxid) is
+        // requested, and the copy is dropped by ReceivedTx(), which costs bandwidth and nothing else.
+        if (m_validation_pending.contains(Wtxid::FromUint256(gtxid.ToUint256()))) continue;
         if (!AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false)) {
             LogDebug(BCLog::NET, "Requesting %s %s peer=%d\n", gtxid.IsWtxid() ? "wtx" : "tx",
                      gtxid.ToUint256().ToString(), nodeid);
@@ -514,6 +529,9 @@ std::pair<bool, std::optional<PackageToValidate>> TxDownloadManagerImpl::Receive
     m_txrequest.ReceivedResponse(nodeid, txid.ToUint256());
     if (ptx->HasWitness()) m_txrequest.ReceivedResponse(nodeid, wtxid.ToUint256());
 
+    // A copy of a transaction that waits for validation is dropped, like one that is validated and rejected.
+    if (m_validation_pending.contains(wtxid)) return {false, std::nullopt};
+
     // First check if we should drop this tx.
     // We do the AlreadyHaveTx() check using wtxid, rather than txid - in the
     // absence of witness malleation, this is strictly better, because the
@@ -557,6 +575,16 @@ std::pair<bool, std::optional<PackageToValidate>> TxDownloadManagerImpl::Receive
     return {true, std::nullopt};
 }
 
+void TxDownloadManagerImpl::ValidationPending(NodeId nodeid, const Wtxid& wtxid)
+{
+    m_validation_pending.try_emplace(wtxid, nodeid);
+}
+
+void TxDownloadManagerImpl::ValidationDone(const Wtxid& wtxid)
+{
+    m_validation_pending.erase(wtxid);
+}
+
 bool TxDownloadManagerImpl::HaveMoreWork(NodeId nodeid)
 {
     return m_orphanage->HaveTxToReconsider(nodeid);
@@ -577,6 +605,7 @@ void TxDownloadManagerImpl::CheckIsEmpty()
     assert(m_orphanage->TotalOrphanUsage() == 0);
     assert(m_orphanage->CountUniqueOrphans() == 0);
     assert(m_txrequest.Size() == 0);
+    assert(m_validation_pending.empty());
     assert(m_num_wtxid_peers == 0);
 }
 std::vector<TxOrphanage::OrphanInfo> TxDownloadManagerImpl::GetOrphanTransactions() const
