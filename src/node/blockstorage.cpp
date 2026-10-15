@@ -272,8 +272,13 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
 
 void BlockManager::RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness)
 {
-    AssertLockHeld(::cs_main);
     LOCK(g_block_index_mutex);
+    RecordBlockDataLocked(index, num_tx, pos, opt_witness);
+}
+
+void BlockManager::RecordBlockDataLocked(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness)
+{
+    AssertLockHeld(g_block_index_mutex);
     index.nTx = num_tx;
     index.nFile = pos.nFile;
     index.nDataPos = pos.nPos;
@@ -286,7 +291,6 @@ void BlockManager::RecordBlockData(CBlockIndex& index, unsigned int num_tx, cons
 
 void BlockManager::MarkDirty(CBlockIndex& index)
 {
-    AssertLockHeld(::cs_main);
     AssertLockHeld(g_block_index_mutex);
     m_dirty_blockindex.insert(&index);
 }
@@ -331,6 +335,15 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
                     m_blocks_unlinked.erase(_it);
                 }
             }
+        }
+    }
+
+    // Blocks are written without cs_main: keep them from being written to a file that is about to be unlinked
+    // (writing to it would recreate it). The cursor moves on to a new file, as it does when a file is full.
+    for (auto& cursor : m_blockfile_cursors) {
+        if (cursor && cursor->file_num == fileNumber) {
+            cursor = BlockfileCursor{this->MaxBlockfileNum() + 1};
+            m_blockfile_info.resize(cursor->file_num + 1);
         }
     }
 
@@ -577,16 +590,25 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
 
 void BlockManager::WriteBlockIndexDB()
 {
-    AssertLockHeld(::cs_main);
     // The batch is built while holding g_block_index_mutex, since the entries are live objects, and written after
     // releasing it: the synced write waits for the disk, and nobody who needs the block index should wait for it.
-    // This is safe because every change to an existing entry holds cs_main, which the caller holds throughout:
-    // an entry cannot change between the capture below and the write. An entry that is inserted meanwhile is
-    // not captured, and stays dirty for the next flush. The database handle does not change after construction,
-    // and the only writer of batches is the flush.
+    // An entry that changes or is inserted meanwhile is not captured, and stays dirty for the next flush. The
+    // database handle does not change after construction, and the only writer of batches is the flush.
     CDBBatch batch{*m_block_tree_db};
     {
+        DeferredNotifications notifications{*this};
         LOCK(g_block_index_mutex);
+        // First make sure that all block and undo data that the entries refer to is flushed to disk: it was
+        // written and recorded in one hold of the mutex, so what was recorded before this hold is in a file that
+        // is the one of a cursor, or was flushed when the cursor left it. A cursor does not exist if an
+        // assumeutxo snapshot is loaded, but no blocks past the snapshot height have been written yet.
+        // TODO: Handle return error, or add detailed comment why it is
+        // safe to not return an error upon failure.
+        for (const auto& cursor : m_blockfile_cursors) {
+            if (cursor && !FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false, notifications)) {
+                LogWarning("%s: Failed to flush block file.\n", __func__);
+            }
+        }
         std::vector<std::pair<int, const CBlockFileInfo*>> vFiles;
         vFiles.reserve(m_dirty_fileinfo.size());
         for (std::set<int>::iterator it = m_dirty_fileinfo.begin(); it != m_dirty_fileinfo.end();) {
@@ -877,21 +899,6 @@ BlockfileType BlockManager::BlockfileTypeForHeight(int height)
     return (height >= *m_snapshot_height) ? BlockfileType::ASSUMED : BlockfileType::NORMAL;
 }
 
-bool BlockManager::FlushChainstateBlockFile(int tip_height)
-{
-    AssertLockHeld(::cs_main);
-    DeferredNotifications notifications{*this};
-    LOCK(g_block_index_mutex);
-    auto& cursor = m_blockfile_cursors[BlockfileTypeForHeight(tip_height)];
-    // If the cursor does not exist, it means an assumeutxo snapshot is loaded,
-    // but no blocks past the snapshot height have been written yet, so there
-    // is no data associated with the chainstate, and it is safe not to flush.
-    if (cursor) {
-        return FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false, notifications);
-    }
-    // No need to log warnings in this case.
-    return true;
-}
 
 uint64_t BlockManager::CalculateCurrentUsage()
 {
@@ -1023,8 +1030,13 @@ FlatFilePos BlockManager::FindNextBlockPos(unsigned int nAddSize, unsigned int n
 
 void BlockManager::UpdateBlockInfo(const CBlock& block, unsigned int nHeight, const FlatFilePos& pos)
 {
-    AssertLockHeld(::cs_main);
     LOCK(g_block_index_mutex);
+    UpdateBlockInfoLocked(block, nHeight, pos);
+}
+
+void BlockManager::UpdateBlockInfoLocked(const CBlock& block, unsigned int nHeight, const FlatFilePos& pos)
+{
+    AssertLockHeld(g_block_index_mutex);
     // Update the cursor so it points to the last file.
     const BlockfileType chain_type{BlockfileTypeForHeight(nHeight)};
     auto& cursor{m_blockfile_cursors[chain_type]};
@@ -1238,9 +1250,30 @@ BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& p
 
 FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
 {
-    AssertLockHeld(::cs_main);
     DeferredNotifications notifications{*this};
     LOCK(g_block_index_mutex);
+    return WriteBlockLocked(block, nHeight, notifications);
+}
+
+FlatFilePos BlockManager::StoreBlock(const CBlock& block, CBlockIndex& index, bool opt_witness, const FlatFilePos* dbp)
+{
+    DeferredNotifications notifications{*this};
+    LOCK(g_block_index_mutex);
+    FlatFilePos pos;
+    if (dbp) {
+        pos = *dbp;
+        UpdateBlockInfoLocked(block, index.nHeight, pos);
+    } else {
+        pos = WriteBlockLocked(block, index.nHeight, notifications);
+        if (pos.IsNull()) return pos;
+    }
+    RecordBlockDataLocked(index, block.vtx.size(), pos, opt_witness);
+    return pos;
+}
+
+FlatFilePos BlockManager::WriteBlockLocked(const CBlock& block, int nHeight, DeferredNotifications& notifications)
+{
+    AssertLockHeld(g_block_index_mutex);
     const unsigned int block_size{static_cast<unsigned int>(GetSerializeSize(TX_WITH_WITNESS(block)))};
     FlatFilePos pos{FindNextBlockPos(block_size + STORAGE_HEADER_BYTES, nHeight, block.GetBlockTime(), notifications)};
     if (pos.IsNull()) {

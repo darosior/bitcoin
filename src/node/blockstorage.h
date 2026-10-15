@@ -261,6 +261,9 @@ private:
      */
     [[nodiscard]] FlatFilePos FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime, DeferredNotifications& notifications) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
     [[nodiscard]] bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize, DeferredNotifications& notifications) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+    //! What WriteBlock() and UpdateBlockInfo() do, for callers that hold g_block_index_mutex already.
+    FlatFilePos WriteBlockLocked(const CBlock& block, int nHeight, DeferredNotifications& notifications) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+    void UpdateBlockInfoLocked(const CBlock& block, unsigned int nHeight, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     AutoFile OpenUndoFile(const FlatFilePos& pos, bool fReadOnly = false) const;
 
@@ -357,10 +360,9 @@ protected:
      * Dirty block index entries. An entry is marked dirty in the same critical section of g_block_index_mutex as
      * the change, so that a flush that holds the mutex always writes a consistent entry.
      *
-     * This is where "every change to an existing entry also holds cs_main" is enforced. The fields of the entries
-     * are public, so the compiler cannot require cs_main on each write, but a change that is not flagged is not
-     * written, and flagging requires cs_main (MarkDirty()). The flush relies on it: it holds cs_main from the
-     * capture of the entries to the write, so none changes in between.
+     * The fields of the entries are public, so the compiler cannot require the mutex on each write, but a change
+     * that is not flagged is not written (MarkDirty()). An entry that changes after the flush captured it is
+     * flagged again, and written by the next flush.
      */
     std::set<CBlockIndex*> m_dirty_blockindex GUARDED_BY(g_block_index_mutex);
 
@@ -403,10 +405,9 @@ public:
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     //! Flag an entry that changed, so that the next flush writes it. Every change to an existing entry has to be
-    //! flagged, and this requires cs_main in addition to g_block_index_mutex, which is how it is enforced that
-    //! every writer of an existing entry holds cs_main (see the comment at g_block_index_mutex). The entries that
-    //! are inserted are the exception: nobody else can see them yet.
-    void MarkDirty(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
+    //! flagged, in the same hold of g_block_index_mutex as the change. The entries that are inserted are the
+    //! exception: nobody else can see them yet.
+    void MarkDirty(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.
@@ -419,15 +420,16 @@ public:
     const std::unique_ptr<BlockTreeDB> m_block_tree_db;
 
     /**
-     * Write the dirty block index entries and block file info to the block tree database, in a synced write.
+     * Flush the block and undo files that are being written to, then write the dirty block index entries and block
+     * file info to the block tree database, in a synced write.
      *
-     * The batch is built while holding g_block_index_mutex, since the entries are live objects, and the
-     * synced write happens after it is released, so that nobody who needs the block index waits for the disk.
-     * The caller must hold cs_main for the whole of FlushStateToDisk(): every change to an existing entry holds
-     * it too, so nothing can change an entry between the capture and the write. Entries that are inserted in the
-     * meantime stay dirty, and are written by the next flush.
+     * The files are flushed and the batch is built in one hold of g_block_index_mutex, since the entries are live
+     * objects, and blocks are written and recorded by whoever has the mutex: the batch cannot refer to data that
+     * was not flushed. The synced write happens after the mutex is released, so that nobody who needs the block
+     * index waits for the disk. Whatever is changed or inserted in the meantime stays dirty, and is written by the
+     * next flush. Flushes are serialized by the caller.
      */
-    void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+    void WriteBlockIndexDB() LOCKS_EXCLUDED(g_block_index_mutex);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
 
@@ -450,11 +452,13 @@ public:
      * This does not touch chain selection (sequence id, chain transaction count, unlinked blocks and candidates):
      * that is up to ChainstateManager::ReceivedBlockTransactions().
      */
-    void RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+    void RecordBlockData(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness) LOCKS_EXCLUDED(g_block_index_mutex);
+    void RecordBlockDataLocked(CBlockIndex& index, unsigned int num_tx, const FlatFilePos& pos, bool opt_witness) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
     /** Create a new block index entry for a given block hash */
     CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
 
-    //! Mark one block file as pruned (modify associated database entries)
+    //! Mark one block file as pruned (modify associated database entries). A cursor that points to the file is
+    //! moved to a new one, so that no block is written to it after this.
     void PruneOneBlockFile(int fileNumber) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
 
     CBlockIndex* LookupBlockIndex(const uint256& hash) LOCKS_EXCLUDED(g_block_index_mutex);
@@ -469,7 +473,7 @@ public:
     bool WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationState& state, CBlockIndex& block)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
 
-    /** Store block on disk and update block file statistics. Requires cs_main, see g_block_index_mutex.
+    /** Store block on disk and update block file statistics.
      *
      * @param[in]  block        the block to be stored
      * @param[in]  nHeight      the height of the block
@@ -477,19 +481,26 @@ public:
      * @returns in case of success, the position to which the block was written to
      *          in case of an error, an empty FlatFilePos
      */
-    FlatFilePos WriteBlock(const CBlock& block, int nHeight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+    FlatFilePos WriteBlock(const CBlock& block, int nHeight) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /** Update blockfile info while processing a block during reindex. The block must be available on disk.
-     * Requires cs_main, see g_block_index_mutex.
      *
      * @param[in]  block        the block being processed
      * @param[in]  nHeight      the height of the block
      * @param[in]  pos          the position of the serialized CBlock on disk
      */
-    void UpdateBlockInfo(const CBlock& block, unsigned int nHeight, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+    void UpdateBlockInfo(const CBlock& block, unsigned int nHeight, const FlatFilePos& pos) LOCKS_EXCLUDED(g_block_index_mutex);
 
-    /** Flush the block and undo file the chainstate with the given tip height is writing to. Requires cs_main, see g_block_index_mutex. */
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
+    /**
+     * Write a block of the entry `index`, or if `dbp` is set (during a reindex or the import of a block file) take
+     * its position as the one of the block, which must be on disk already, and record it in the entry (see
+     * RecordBlockData()). All of it is one hold of g_block_index_mutex: nobody sees a block that is written but not
+     * recorded, a flush captures either all of it or none, and a second delivery of the block sees the data.
+     * Can be called without any other lock.
+     *
+     * @returns the position of the block, or an empty FlatFilePos if it could not be written
+     */
+    FlatFilePos StoreBlock(const CBlock& block, CBlockIndex& index, bool opt_witness, const FlatFilePos* dbp) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }
