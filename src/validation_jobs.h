@@ -38,32 +38,21 @@ class CTxMemPool;
 class ValidationJobs
 {
 public:
-    /** Check a block, add its header and store it (the first half of ChainstateManager::ProcessNewBlock()). */
-    struct AcceptBlock {
+    /**
+     * Validation's half of the processing of a block that was accepted and stored by whoever received it (see
+     * ChainstateManager::AcceptNewBlock()): if the block is new, its chain selection bookkeeping, then the activation of
+     * the best chain (the second half of ChainstateManager::ProcessNewBlock()).
+     */
+    struct ProcessStoredBlock {
         NodeId from;
         std::shared_ptr<const CBlock> block;
-        bool force_processing;
-        bool min_pow_checked;
-    };
-    /** What became of a block that was given to AcceptBlock. */
-    struct BlockAccepted {
-        NodeId from;
-        std::shared_ptr<const CBlock> block;
-        //! False if the block was rejected. BlockChecked has been sent with the reason.
-        bool accepted;
-        //! Whether the block was first received, and stored, by this job.
+        //! The entry of the block.
+        CBlockIndex* pindex;
+        //! Whether the block was first received, and stored, by whoever received it.
         bool new_block;
     };
-
-    /** Activate the best chain after a block was accepted (the second half of ChainstateManager::ProcessNewBlock()). */
-    struct ActivateBlock {
-        NodeId from;
-        std::shared_ptr<const CBlock> block;
-        //! From the result of AcceptBlock, for the handler of the result of this job.
-        bool new_block;
-    };
-    /** A block was activated, or the activation failed and was logged. */
-    struct BlockActivated {
+    /** A stored block was processed, or the activation failed and was logged. */
+    struct StoredBlockProcessed {
         NodeId from;
         uint256 block_hash;
         bool new_block;
@@ -112,8 +101,8 @@ public:
         PackageMempoolAcceptResult result;
     };
 
-    using Job = std::variant<AcceptBlock, ActivateBlock, ActivateBestChain, ProcessTransaction, ReconsiderOrphan, ProcessPackage>;
-    using Result = std::variant<BlockAccepted, BlockActivated, ChainActivated, TxProcessed, OrphanReconsidered, PackageProcessed>;
+    using Job = std::variant<ProcessStoredBlock, ActivateBestChain, ProcessTransaction, ReconsiderOrphan, ProcessPackage>;
+    using Result = std::variant<StoredBlockProcessed, ChainActivated, TxProcessed, OrphanReconsidered, PackageProcessed>;
 
     /** `post_result` is called with the result of every job. */
     ValidationJobs(ChainstateManager& chainman, CTxMemPool& mempool, std::function<void(Result&&)> post_result)

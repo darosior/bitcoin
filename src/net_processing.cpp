@@ -404,6 +404,12 @@ struct Peer {
     /** Whether the last orphan of this peer that was reconsidered had a result other than missing inputs. */
     bool m_orphan_resolved GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
 
+    /** Whether a job that a message of this peer caused was submitted to validation, and its result was not handled
+     * yet. The messages of a peer are processed in order, each one finished before the next: while the job is in
+     * flight, ProcessMessages() does not take the next message of the peer. The handler of the result clears it, and
+     * the event wakes up the message handler. */
+    bool m_job_in_flight GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+
     /** Protects m_headers_sync **/
     Mutex m_headers_sync_mutex;
     /** Headers-sync state for this peer (eg for initial sync, or syncing large
@@ -908,12 +914,13 @@ private:
      * Lock order: g_msgproc_mutex -> cs_main -> m_net_state_mutex ->
      *     { m_peer_mutex, the mutexes inside Peer, m_most_recent_block_mutex, CConnman::m_nodes_mutex
      *       (through ForNode() and ForEachNode()), g_block_index_mutex, m_tx_download_mutex -> m_mempool.cs }
-     * The edge from cs_main is there only because NewPoWValidBlock() is called while the block is being
-     * accepted, with cs_main held; it goes away when acceptance does not hold cs_main anymore.
+     * The edge from cs_main is there because NewPoWValidBlock() is called by AcceptBlock(), which holds cs_main (the
+     * import of block files calls it): the acceptance of the blocks that net receives, AcceptNewBlock(), does not.
      *
-     * It must never be held while calling validation (the jobs of ValidationJobs, ProcessNewBlockHeaders(),
-     * anything that takes cs_main), as validation calls NewPoWValidBlock() with cs_main held: the functions that
-     * do are annotated with !m_net_state_mutex.
+     * It must never be held while calling validation (AcceptNewBlock(), the jobs of ValidationJobs,
+     * ProcessNewBlockHeaders(), anything that takes cs_main), as validation calls NewPoWValidBlock(), which takes it,
+     * and some of the callers hold cs_main: the functions that call validation are annotated with
+     * !m_net_state_mutex.
      *
      * The callbacks of ForNode() and ForEachNode() do not take it: they run with it held by their caller, and
      * assert it.
@@ -1104,7 +1111,7 @@ private:
         LOCKS_EXCLUDED(::cs_main);
 
     /** Process a new block. Perform any post-processing housekeeping */
-    void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
+    void ProcessBlock(CNode& node, Peer& peer, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
         EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
     //! What validation tells us, queued by the callbacks of CValidationInterface and processed in the order they came
     //! in by the message handler thread, in ProcessPendingEvents(). They hold the arguments of the callbacks: the
@@ -1129,7 +1136,7 @@ private:
     //! The results of the jobs that were submitted to validation are events as well, so that they are processed in the
     //! order that validation produced them in, together with what it notified while it worked.
     using ValidationEvent = std::variant<ActiveTipChangeEvent, UpdatedBlockTipEvent, BlockCheckedEvent,
-                                         ValidationJobs::BlockAccepted, ValidationJobs::BlockActivated, ValidationJobs::ChainActivated,
+                                         ValidationJobs::StoredBlockProcessed, ValidationJobs::ChainActivated,
                                          ValidationJobs::TxProcessed, ValidationJobs::OrphanReconsidered, ValidationJobs::PackageProcessed>;
 
     //! Events that were not processed when the PeerManager is destroyed are dropped with it. Nothing is done with
@@ -1153,8 +1160,7 @@ private:
     void OnUpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void OnBlockChecked(const uint256& hash, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_net_state_mutex);
     /** The results of the jobs that process a block: the block was accepted, then activated. */
-    void OnBlockAccepted(const ValidationJobs::BlockAccepted& accepted) EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex) LOCKS_EXCLUDED(::cs_main);
-    void OnBlockActivated(const ValidationJobs::BlockActivated& activated) EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex) LOCKS_EXCLUDED(::cs_main);
+    void OnStoredBlockProcessed(const ValidationJobs::StoredBlockProcessed& processed) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, NetEventsInterface::g_msgproc_mutex, !m_net_state_mutex) LOCKS_EXCLUDED(::cs_main);
     /** What is done once a block was processed, whether or not it was accepted. */
     void OnBlockProcessed(NodeId from, const uint256& block_hash, bool new_block) EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex) LOCKS_EXCLUDED(::cs_main);
 
@@ -2364,8 +2370,7 @@ void PeerManagerImpl::ProcessPendingEvents()
                 [&](const ActiveTipChangeEvent& e) { OnActiveTipChange(*e.new_tip, e.is_ibd); },
                 [&](const UpdatedBlockTipEvent& e) { OnUpdatedBlockTip(e.new_tip, e.fork, e.is_ibd); },
                 [&](const BlockCheckedEvent& e) { OnBlockChecked(e.block_hash, e.state); },
-                [&](const ValidationJobs::BlockAccepted& e) { OnBlockAccepted(e); },
-                [&](const ValidationJobs::BlockActivated& e) { OnBlockActivated(e); },
+                [&](const ValidationJobs::StoredBlockProcessed& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnStoredBlockProcessed(e); },
                 // Nothing waits for the chain to be activated: whoever submitted the job processes the events right
                 // after, and what follows needs nothing from the result.
                 [&](const ValidationJobs::ChainActivated&) {},
@@ -2445,8 +2450,9 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
  * Maintain state about the best-seen block and fast-announce a compact block
  * to compatible peers.
  *
- * Validation calls this while it accepts a block, with cs_main held, between the checks of the block and the write of
- * its data. It takes m_net_state_mutex with cs_main held, which is why that mutex is never held when cs_main is taken.
+ * Validation calls this while it accepts a block, between the checks of the block and the write of its data, on the
+ * thread that received the block, which holds cs_main only if it is the import of block files. It takes
+ * m_net_state_mutex, which is why that mutex is never held when validation is called.
  */
 void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock)
 {
@@ -3967,33 +3973,34 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
               headers);
 }
 
-void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
+void PeerManagerImpl::ProcessBlock(CNode& node, Peer& peer, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
 {
-    // Accepting a block announces it with NewPoWValidBlock(), which takes m_net_state_mutex with cs_main held.
+    // Accepting a block announces it with NewPoWValidBlock(), which takes m_net_state_mutex.
     AssertLockNotHeld(m_net_state_mutex);
 
-    // First accept and store the block, then activate the best chain, as ProcessNewBlock() does: the result of the
-    // first job is what submits the second one, and the result of the second one is what handles the outcome.
+    // First accept and store the block: this is done here, by the thread that received it, which does not wait for
+    // validation. Then validation does its half, and activates the best chain, as ProcessNewBlock() does; the result
+    // of that job is what handles the outcome. The peer is not asked for its next message until then.
     //
     // The events that validation produced while it worked (BlockChecked, which punishes the peer that sent an invalid
     // block, ActiveTipChange, which resets the filters of rejected transactions, and the others) come before the result
     // of the job that caused them, so they take effect before the outcome is handled and before the next message is.
-    m_validation.Submit(ValidationJobs::AcceptBlock{node.GetId(), block, force_processing, min_pow_checked});
+    const auto accepted{m_chainman.AcceptNewBlock(block, force_processing, min_pow_checked)};
+    ProcessPendingEvents();
+    if (!accepted.accepted) {
+        OnBlockProcessed(node.GetId(), block->GetHash(), accepted.new_block);
+        return;
+    }
+    peer.m_job_in_flight = true;
+    m_validation.Submit(ValidationJobs::ProcessStoredBlock{node.GetId(), block, accepted.pindex, accepted.new_block});
     ProcessPendingEvents();
 }
 
-void PeerManagerImpl::OnBlockAccepted(const ValidationJobs::BlockAccepted& accepted)
+void PeerManagerImpl::OnStoredBlockProcessed(const ValidationJobs::StoredBlockProcessed& processed)
 {
-    if (!accepted.accepted) {
-        OnBlockProcessed(accepted.from, accepted.block->GetHash(), accepted.new_block);
-        return;
-    }
-    m_validation.Submit(ValidationJobs::ActivateBlock{accepted.from, accepted.block, accepted.new_block});
-}
-
-void PeerManagerImpl::OnBlockActivated(const ValidationJobs::BlockActivated& activated)
-{
-    OnBlockProcessed(activated.from, activated.block_hash, activated.new_block);
+    // The peer may be gone by now.
+    if (const PeerRef peer{GetPeerRef(processed.from)}) peer->m_job_in_flight = false;
+    OnBlockProcessed(processed.from, processed.block_hash, processed.new_block);
 }
 
 void PeerManagerImpl::OnBlockProcessed(NodeId from, const uint256& block_hash, bool new_block)
@@ -4097,7 +4104,7 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         // disk-space attacks), but this should be safe due to the
         // protections in the compact block handler -- see related comment
         // in compact block optimistic reconstruction handling.
-        ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
+        ProcessBlock(pfrom, peer, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
     }
     return;
 }
@@ -5352,7 +5359,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             // we have a chain with at least the minimum chain work), and we ignore
             // compact blocks with less work than our tip, it is safe to treat
             // reconstructed compact blocks as having been requested.
-            ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
+            ProcessBlock(pfrom, peer, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
             if (WITH_LOCK(g_block_index_mutex, return pindex->IsValid(BLOCK_VALID_TRANSACTIONS))) {
                 // Clear download state for this block, which is in
                 // process from some other peer.  We do this after calling
@@ -5464,7 +5471,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 min_pow_checked = true;
             }
         }
-        ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked);
+        ProcessBlock(pfrom, peer, pblock, forceProcessing, min_pow_checked);
         return;
     }
 
@@ -5769,6 +5776,10 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
         LOCK(peer.m_getdata_requests_mutex);
         if (!peer.m_getdata_requests.empty()) return true;
     }
+
+    // The next message waits for the result of the job that the last one caused: its replies and its punishment come
+    // before. The result wakes up the message handler.
+    if (peer.m_job_in_flight) return false;
 
     // Don't bother if send buffer is too full to respond anyway
     if (node.fPauseSend) return false;
