@@ -404,9 +404,6 @@ struct Peer {
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
 
-    /** Whether the last orphan of this peer that was reconsidered had a result other than missing inputs. */
-    bool m_orphan_resolved GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
-
     /** Whether a job that a message of this peer caused was submitted to validation, and its result was not handled
      * yet. The messages of a peer are processed in order, each one finished before the next: while the job is in
      * flight, ProcessMessages() does not take the next message of the peer. The handler of the result clears it, and
@@ -729,7 +726,8 @@ private:
     void OnTxProcessed(const ValidationJobs::TxProcessed& processed)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_net_state_mutex);
 
-    /** Handle the result of the validation of an orphan transaction: tell if its inputs are still missing. */
+    /** Handle the result of the validation of an orphan transaction: calls ProcessValidTx or ProcessInvalidTx, unless
+     * its inputs are still missing. */
     void OnOrphanReconsidered(const ValidationJobs::OrphanReconsidered& reconsidered)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
 
@@ -747,12 +745,12 @@ private:
      * Reconsider orphan transactions after a parent has been accepted to the mempool.
      *
      * @peer[in]  peer     The peer whose orphan transactions we will reconsider. Generally only
-     *                     one orphan will be reconsidered on each call of this function. If an
-     *                     accepted orphan has orphaned children, those will need to be
-     *                     reconsidered, creating more work, possibly for other peers.
-     * @return             True if meaningful work was done (an orphan was accepted/rejected).
-     *                     If no meaningful work was done, then the work set for this peer
-     *                     will be empty.
+     *                     one orphan will be reconsidered on each call of this function, as a job, and
+     *                     none while a job of the peer is in flight. If an accepted orphan has orphaned
+     *                     children, those will need to be reconsidered, creating more work, possibly for
+     *                     other peers.
+     * @return             True if a job was submitted. If not, then the work set for this peer is
+     *                     empty, or a job of the peer is in flight.
      */
     bool ProcessOrphanTx(Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex, !m_net_state_mutex);
@@ -3764,14 +3762,13 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
     AssertLockHeld(g_msgproc_mutex);
     AssertLockNotHeld(m_net_state_mutex);
 
-    while (CTransactionRef porphanTx = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetTxToReconsider(peer.m_id))) {
-        // The orphan is reconsidered until one of them has a result other than missing inputs, which the handler of
-        // the result tells us. This relies on the job being done as it is submitted: its result is processed by the
-        // time we look at it.
-        peer.m_orphan_resolved = false;
+    if (peer.m_job_in_flight) return false;
+
+    // One orphan on each call, and the next one once the result of this one was handled.
+    if (CTransactionRef porphanTx = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetTxToReconsider(peer.m_id))) {
+        peer.m_job_in_flight = true;
         m_validation.Submit(ValidationJobs::ReconsiderOrphan{peer.m_id, porphanTx});
-        ProcessPendingEvents();
-        if (peer.m_orphan_resolved) return true;
+        return true;
     }
 
     return false;
@@ -3789,13 +3786,14 @@ void PeerManagerImpl::OnOrphanReconsidered(const ValidationJobs::OrphanReconside
     const Txid& orphanHash = porphanTx->GetHash();
     const Wtxid& orphan_wtxid = porphanTx->GetWitnessHash();
 
-    bool resolved{false};
+    // The peer may be gone by now.
+    if (const PeerRef peer{GetPeerRef(peer_id)}) peer->m_job_in_flight = false;
+
     {
         LOCK(m_tx_download_mutex);
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             LogDebug(BCLog::TXPACKAGES, "   accepted orphan tx %s (wtxid=%s)\n", orphanHash.ToString(), orphan_wtxid.ToString());
             ProcessValidTx(peer_id, porphanTx, result.m_replaced_transactions);
-            resolved = true;
         } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
             LogDebug(BCLog::TXPACKAGES, "   invalid orphan tx %s (wtxid=%s) from peer=%d. %s\n",
                 orphanHash.ToString(),
@@ -3809,11 +3807,8 @@ void PeerManagerImpl::OnOrphanReconsidered(const ValidationJobs::OrphanReconside
                        state.GetResult() != TxValidationResult::TX_RESULT_UNSET)) {
                 ProcessInvalidTx(peer_id, porphanTx, state, /*first_time_failure=*/false);
             }
-            resolved = true;
         }
     }
-    // The peer may be gone by now.
-    if (const PeerRef peer{GetPeerRef(peer_id)}) peer->m_orphan_resolved = resolved;
 }
 
 // The reject filters (m_lazy_recent_rejects and its siblings) depend on the tip, and ActiveTipChange resets them.
@@ -3830,6 +3825,9 @@ void PeerManagerImpl::OnTxProcessed(const ValidationJobs::TxProcessed& processed
     const MempoolAcceptResult& result{processed.result};
     const TxValidationState& state = result.m_state;
 
+    // The peer may be gone by now.
+    const PeerRef peer{GetPeerRef(processed.from)};
+
     std::optional<node::PackageToValidate> package_to_validate;
     {
         LOCK(m_tx_download_mutex);
@@ -3839,6 +3837,7 @@ void PeerManagerImpl::OnTxProcessed(const ValidationJobs::TxProcessed& processed
         if (state.IsInvalid()) {
             package_to_validate = ProcessInvalidTx(processed.from, processed.tx, state, /*first_time_failure=*/true);
         }
+        m_txdownloadman.ValidationDone(processed.tx->GetWitnessHash());
     }
     if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
         // The peer may be gone by now.
@@ -3847,8 +3846,13 @@ void PeerManagerImpl::OnTxProcessed(const ValidationJobs::TxProcessed& processed
             return true;
         });
     }
+    // Nothing to validate for a peer that is gone: nobody would hear of the result.
+    if (!peer) return;
     if (package_to_validate) {
+        // The peer stays paused: the package is part of the handling of its message.
         m_validation.Submit(ValidationJobs::ProcessPackage{processed.from, *package_to_validate});
+    } else {
+        peer->m_job_in_flight = false;
     }
 }
 
@@ -3856,6 +3860,9 @@ void PeerManagerImpl::OnPackageProcessed(const ValidationJobs::PackageProcessed&
 {
     AssertLockHeld(g_msgproc_mutex);
     AssertLockNotHeld(m_tx_download_mutex);
+
+    // The peer may be gone by now.
+    if (const PeerRef peer{GetPeerRef(processed.from)}) peer->m_job_in_flight = false;
 
     LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", processed.package.ToString(),
              processed.result.m_state.IsValid() ? "package accepted" : "package rejected");
@@ -5128,6 +5135,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             }
 
             if (package_to_validate) {
+                peer.m_job_in_flight = true;
                 m_validation.Submit(ValidationJobs::ProcessPackage{pfrom.GetId(), *package_to_validate});
                 ProcessPendingEvents();
             }
@@ -5137,6 +5145,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // ReceivedTx should not be telling us to validate the tx and a package.
         Assume(!package_to_validate.has_value());
 
+        WITH_LOCK(m_tx_download_mutex, m_txdownloadman.ValidationPending(pfrom.GetId(), wtxid));
+        peer.m_job_in_flight = true;
         m_validation.Submit(ValidationJobs::ProcessTransaction{pfrom.GetId(), ptx});
         ProcessPendingEvents();
 
@@ -5801,6 +5811,7 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     }
 
     const bool processed_orphan = ProcessOrphanTx(peer);
+    if (processed_orphan) ProcessPendingEvents();
 
     if (node.fDisconnect)
         return false;

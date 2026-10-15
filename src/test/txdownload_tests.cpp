@@ -337,4 +337,48 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(validation_pending, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    node::TxDownloadOptions DEFAULT_OPTS{.m_mempool = pool, .m_deterministic_txrequest = true};
+    node::TxDownloadConnectionInfo DEFAULT_CONN{/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true};
+    const NodeId node1{1}, node2{2};
+
+    CKey key = GenerateRandomKey();
+    CScript destination = GetScriptForDestination(PKHash(key.GetPubKey()));
+    const auto tx = MakeTransactionRef(CreateValidMempoolTransaction(m_coinbase_txns[0], /*input_vout=*/0, /*input_height=*/0, coinbaseKey, destination, 50 * COIN - 1000, /*submit=*/false));
+
+    node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
+    txdownload_impl.ConnectedPeer(node1, DEFAULT_CONN);
+    txdownload_impl.ConnectedPeer(node2, DEFAULT_CONN);
+
+    const auto later{GetTime<std::chrono::microseconds>() + 1h};
+    const GenTxid wtxid{tx->GetWitnessHash()};
+
+    // While a transaction waits for validation, the copies that other peers send are dropped, and it is not
+    // requested from a peer that announces it, but the announcement is kept.
+    BOOST_CHECK(txdownload_impl.ReceivedTx(node1, tx).first);
+    txdownload_impl.ValidationPending(node1, tx->GetWitnessHash());
+    BOOST_CHECK(!txdownload_impl.AddTxAnnouncement(node2, wtxid, GetTime<std::chrono::microseconds>()));
+    BOOST_CHECK(txdownload_impl.GetRequestsToSend(node2, later).empty());
+
+    // Until the result is handled.
+    txdownload_impl.ValidationDone(tx->GetWitnessHash());
+    BOOST_CHECK_EQUAL(txdownload_impl.GetRequestsToSend(node2, later).size(), 1U);
+    txdownload_impl.ValidationPending(node1, tx->GetWitnessHash());
+    BOOST_CHECK(!txdownload_impl.ReceivedTx(node2, tx).first);
+    txdownload_impl.ValidationDone(tx->GetWitnessHash());
+    BOOST_CHECK(txdownload_impl.ReceivedTx(node2, tx).first);
+
+    // Or until the peer that sent it is gone, which forgets what it had pending but not what other peers have.
+    BOOST_CHECK(txdownload_impl.ReceivedTx(node1, tx).first);
+    txdownload_impl.ValidationPending(node1, tx->GetWitnessHash());
+    txdownload_impl.DisconnectedPeer(node2);
+    BOOST_CHECK(!txdownload_impl.ReceivedTx(node1, tx).first);
+    txdownload_impl.DisconnectedPeer(node1);
+    BOOST_CHECK(txdownload_impl.ReceivedTx(node1, tx).first);
+    txdownload_impl.DisconnectedPeer(node1);
+    txdownload_impl.CheckIsEmpty();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
