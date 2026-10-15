@@ -14,8 +14,11 @@
 #include <sync.h>
 #include <validation.h>
 
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <variant>
 
 class CTxMemPool;
@@ -30,10 +33,11 @@ class CTxMemPool;
  * can be looked at: to give some priority over others, or to drop those of a peer that is gone. Results carry a
  * NodeId, never a CNode&, since the peer can be gone by the time the result is handled.
  *
- * For now Submit() does the work right away, on the thread that calls it, and the result is posted before it
- * returns. Callers rely on nothing of that but the order of the results: those of a job are posted after the
- * results of the notifications that the work caused, in the order they were made. The point is that they do not
- * need to know which thread does the work, so that it can later be done by another one.
+ * The jobs are done by a thread of their own once Start() was called, in the order they were submitted, except that
+ * the jobs for blocks go before those for transactions. Without it (the fuzz targets and the unit tests that do not
+ * start it, to be deterministic) Submit() does the work right away, on the thread that calls it, and the result is
+ * posted before it returns. Callers rely on nothing of that but the order of the results: those of a job are posted
+ * after the results of the notifications that the work caused, in the order they were made.
  */
 class ValidationJobs
 {
@@ -51,7 +55,8 @@ public:
         //! Whether the block was first received, and stored, by whoever received it.
         bool new_block;
     };
-    /** A stored block was processed, or the activation failed and was logged. */
+    /** A stored block was processed, or the activation failed and was logged. Network processing posts it as well for
+     * a block it rejected, which has no job: the outcome of a block is handled once, in the order of the events. */
     struct StoredBlockProcessed {
         NodeId from;
         uint256 block_hash;
@@ -94,21 +99,54 @@ public:
     using Job = std::variant<ProcessStoredBlock, ProcessTransaction, ReconsiderOrphan, ProcessPackage>;
     using Result = std::variant<StoredBlockProcessed, TxProcessed, OrphanReconsidered, PackageProcessed>;
 
-    /** `post_result` is called with the result of every job. */
+    /** `post_result` is called with the result of every job, on the thread that does it. */
     ValidationJobs(ChainstateManager& chainman, CTxMemPool& mempool, std::function<void(Result&&)> post_result)
         : m_chainman{chainman}, m_mempool{mempool}, m_post_result{std::move(post_result)} {}
+    ~ValidationJobs();
+
+    /** Start the thread that does the jobs. The jobs submitted before were done by their submitters. */
+    void Start() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
-     * Do the work of a job, and post its result. Jobs are submitted without cs_main, and take it themselves. The
-     * results of the jobs for the mempool are posted with it held, so that they are in the queue where the changes of
-     * the chain that came before the decision of the mempool are before them, and the later ones are after.
+     * Stop the thread, and drop the jobs that were not started. The job that is being done is not interrupted, which
+     * the interrupt of the ChainstateManager does. Nothing is done by submitted jobs after this.
      */
-    void Submit(Job job) const LOCKS_EXCLUDED(::cs_main);
+    void Stop() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Have the work of a job done, and its result posted. Jobs are submitted without cs_main, and take it themselves.
+     * The results of the jobs for the mempool are posted with it held, so that they are in the queue where the
+     * changes of the chain that came before the decision of the mempool are before them, and the later ones are after.
+     */
+    void Submit(Job job) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex) LOCKS_EXCLUDED(::cs_main);
+
+    /**
+     * Drop the jobs for transactions of a peer that did not start. The jobs for blocks stay, whoever sent the block:
+     * validation has to learn of it.
+     * @returns How many jobs were dropped, which will not post a result.
+     */
+    size_t Drop(NodeId from) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Whether no job is waiting or being done. Its result is posted by then. */
+    bool IsIdle() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
+    /** Do the work of a job, and post its result. */
+    void Do(const Job& job) const LOCKS_EXCLUDED(::cs_main);
+    void ThreadMain() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     const std::function<void(Result&&)> m_post_result;
+
+    mutable Mutex m_mutex;
+    std::condition_variable m_cv;
+    //! The jobs that wait, for blocks and for the others, which go after them.
+    std::deque<Job> m_block_jobs GUARDED_BY(m_mutex);
+    std::deque<Job> m_tx_jobs GUARDED_BY(m_mutex);
+    bool m_running GUARDED_BY(m_mutex){false};
+    bool m_stopped GUARDED_BY(m_mutex){false};
+    std::thread m_thread;
 };
 
 #endif // BITCOIN_VALIDATION_JOBS_H

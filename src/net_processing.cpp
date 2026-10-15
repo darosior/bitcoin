@@ -60,6 +60,7 @@
 #include <util/hasher.h>
 #include <util/strencodings.h>
 #include <util/overloaded.h>
+#include <util/signalinterrupt.h>
 #include <util/time.h>
 #include <util/tokenbucket.h>
 #include <util/trace.h>
@@ -584,6 +585,8 @@ public:
     PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     BanMan* banman, ChainstateManager& chainman,
                     CTxMemPool& pool, node::Warnings& warnings, Options opts);
+    //! The thread of validation posts to the members that are declared after it.
+    ~PeerManagerImpl() override { m_validation.Stop(); }
 
     /** Overridden from CValidationInterface.
      * ActiveTipChange, UpdatedBlockTip and BlockChecked only queue an event, which is processed by the message
@@ -604,7 +607,7 @@ public:
 
     /** Implement NetEventsInterface */
     void ProcessPendingEvents() override
-        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_validation_idle_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
     void InitializeNode(const CNode& node, ServiceFlags our_services) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_tx_download_mutex, !m_net_state_mutex);
     void FinalizeNode(const CNode& node) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, !m_tx_download_mutex, !m_net_state_mutex);
     bool HasAllDesirableServiceFlags(ServiceFlags services) const override;
@@ -633,7 +636,9 @@ public:
     };
     void UnitTestMisbehaving(NodeId peer_id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), ""); };
     void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) override EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex);
-    uint64_t WaitForValidationWork() override EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
+    void StartValidationThread() override { m_validation.Start(); }
+    void StopValidationThread() override { m_validation.Stop(); }
+    uint64_t WaitForValidationWork() override EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex, !m_validation_idle_mutex);
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
 
 private:
@@ -887,7 +892,7 @@ private:
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     //! The work net_processing asks validation to do, see ValidationJobs. The results are events, see ValidationEvent.
-    const ValidationJobs m_validation;
+    ValidationJobs m_validation;
 
     /** Synchronizes tx download including TxRequestTracker, rejection filters, and TxOrphanage.
      * Lock invariants:
@@ -1161,11 +1166,19 @@ private:
     //! before that, so none is added anymore.
     Mutex m_validation_events_mutex;
     std::deque<ValidationEvent> m_validation_events GUARDED_BY(m_validation_events_mutex);
-    //! How many events were queued, and how many of them were not processed yet, including those that are being. The
-    //! condition variable is notified when the latter reaches zero.
+    //! How many events were queued.
     uint64_t m_events_queued GUARDED_BY(m_validation_events_mutex){0};
-    uint64_t m_events_pending GUARDED_BY(m_validation_events_mutex){0};
-    std::condition_variable m_events_pending_cv;
+
+    //! For WaitForValidationWork(), which asks the message handler thread, the only one that can tell, to look for
+    //! work that is left each time it processes the events. `m_idle_wanted` is the number of callers that wait for it,
+    //! `m_idle_count` how many times it found none while there were.
+    Mutex m_validation_idle_mutex;
+    uint64_t m_idle_wanted GUARDED_BY(m_validation_idle_mutex){0};
+    uint64_t m_idle_count GUARDED_BY(m_validation_idle_mutex){0};
+    std::condition_variable m_idle_cv;
+
+    /** Whether any work that came from the messages we handled is left, see WaitForValidationWork(). */
+    bool HasValidationWork() EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex);
 
     /** Queue an event, and wake up the message handler thread, which processes it. Called from any thread. */
     void QueueValidationEvent(ValidationEvent event) EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
@@ -1968,6 +1981,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         LOCK(m_tx_download_mutex);
         m_txdownloadman.DisconnectedPeer(nodeid);
     }
+    m_validation.Drop(nodeid);
     if (m_txreconciliation) m_txreconciliation->ForgetPeer(nodeid);
     m_num_preferred_download_peers -= state->fPreferredDownload;
     m_peers_downloading_from -= (!state->vBlocksInFlight.empty());
@@ -2337,21 +2351,43 @@ void PeerManagerImpl::QueueValidationEvent(ValidationEvent event)
         LOCK(m_validation_events_mutex);
         m_validation_events.push_back(std::move(event));
         ++m_events_queued;
-        ++m_events_pending;
     }
     m_connman.WakeMessageHandler();
 }
 
 uint64_t PeerManagerImpl::WaitForValidationWork()
 {
-    WAIT_LOCK(m_validation_events_mutex, lock);
-    while (m_events_pending > 0) {
-        lock.unlock();
-        m_connman.WakeMessageHandler();
-        lock.lock();
-        m_events_pending_cv.wait_for(lock, 100ms, [&]() EXCLUSIVE_LOCKS_REQUIRED(m_validation_events_mutex) { return m_events_pending == 0; });
+    {
+        WAIT_LOCK(m_validation_idle_mutex, lock);
+        const uint64_t idle_count{m_idle_count};
+        ++m_idle_wanted;
+        while (m_idle_count == idle_count) {
+            if (m_chainman.m_interrupt) break;
+            lock.unlock();
+            m_connman.WakeMessageHandler();
+            lock.lock();
+            m_idle_cv.wait_for(lock, 100ms, [&]() EXCLUSIVE_LOCKS_REQUIRED(m_validation_idle_mutex) { return m_idle_count != idle_count; });
+        }
+        --m_idle_wanted;
     }
-    return m_events_queued;
+    return WITH_LOCK(m_validation_events_mutex, return m_events_queued);
+}
+
+bool PeerManagerImpl::HasValidationWork()
+{
+    AssertLockHeld(g_msgproc_mutex);
+
+    // A job posts its result before it is done, and that is queued before the handler of the job that came before it
+    // is done, so each of these is looked at before the one that can make it work again.
+    if (!m_validation.IsIdle()) return true;
+    if (WITH_LOCK(m_validation_events_mutex, return !m_validation_events.empty())) return true;
+
+    // The jobs of the messages of a peer are done when its pong comes, and a request that waits for validation holds
+    // the pong back. What is left are the orphans that the messages of other peers made ready to reconsider.
+    for (const PeerRef& peer : GetAllPeers()) {
+        if (WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.HaveMoreWork(peer->m_id))) return true;
+    }
+    return false;
 }
 
 void PeerManagerImpl::PostValidationResult(ValidationJobs::Result&& result)
@@ -2389,7 +2425,16 @@ void PeerManagerImpl::ProcessPendingEvents()
             LOCK(m_validation_events_mutex);
             events.swap(m_validation_events);
         }
-        if (events.empty()) return;
+        if (events.empty()) {
+            // This is a point where nothing that the messages we handled caused is half done, which is what
+            // WaitForValidationWork() waits for.
+            if (WITH_LOCK(m_validation_idle_mutex, return m_idle_wanted > 0) && !HasValidationWork()) {
+                LOCK(m_validation_idle_mutex);
+                ++m_idle_count;
+                m_idle_cv.notify_all();
+            }
+            return;
+        }
         for (const ValidationEvent& event : events) {
             std::visit(util::Overloaded{
                 [&](const ActiveTipChangeEvent& e) { OnActiveTipChange(*e.new_tip, e.is_ibd); },
@@ -2400,9 +2445,6 @@ void PeerManagerImpl::ProcessPendingEvents()
                 [&](const ValidationJobs::OrphanReconsidered& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnOrphanReconsidered(e); },
                 [&](const ValidationJobs::PackageProcessed& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnPackageProcessed(e); },
             }, event);
-            // Only now is the event done with: what its handler submitted is queued already, if any.
-            LOCK(m_validation_events_mutex);
-            if (--m_events_pending == 0) m_events_pending_cv.notify_all();
         }
     }
 }
@@ -4062,20 +4104,19 @@ void PeerManagerImpl::ProcessBlock(CNode& node, Peer& peer, const std::shared_pt
 
     // First accept and store the block: this is done here, by the thread that received it, which does not wait for
     // validation. Then validation does its half, and activates the best chain, as ProcessNewBlock() does; the result
-    // of that job is what handles the outcome. The peer is not asked for its next message until then.
+    // of that job is what handles the outcome, and so is the event that stands for it if the block was rejected. The
+    // peer is not asked for its next message until then.
     //
     // The events that validation produced while it worked (BlockChecked, which punishes the peer that sent an invalid
     // block, ActiveTipChange, which resets the filters of rejected transactions, and the others) come before the result
-    // of the job that caused them, so they take effect before the outcome is handled and before the next message is.
+    // of the job that caused them, so they take effect before the outcome is handled.
     const auto accepted{m_chainman.AcceptNewBlock(block, force_processing, min_pow_checked)};
-    ProcessPendingEvents();
+    peer.m_job_in_flight = true;
     if (!accepted.accepted) {
-        OnBlockProcessed(node.GetId(), block->GetHash(), accepted.new_block);
+        QueueValidationEvent(ValidationJobs::StoredBlockProcessed{node.GetId(), block->GetHash(), accepted.new_block});
         return;
     }
-    peer.m_job_in_flight = true;
     m_validation.Submit(ValidationJobs::ProcessStoredBlock{node.GetId(), block, accepted.pindex, accepted.new_block});
-    ProcessPendingEvents();
 }
 
 void PeerManagerImpl::OnStoredBlockProcessed(const ValidationJobs::StoredBlockProcessed& processed)
@@ -5161,7 +5202,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             if (package_to_validate) {
                 peer.m_job_in_flight = true;
                 m_validation.Submit(ValidationJobs::ProcessPackage{pfrom.GetId(), *package_to_validate});
-                ProcessPendingEvents();
             }
             return;
         }
@@ -5172,7 +5212,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         WITH_LOCK(m_tx_download_mutex, m_txdownloadman.ValidationPending(pfrom.GetId(), wtxid));
         peer.m_job_in_flight = true;
         m_validation.Submit(ValidationJobs::ProcessTransaction{pfrom.GetId(), ptx});
-        ProcessPendingEvents();
 
         return;
     }
@@ -5835,12 +5874,11 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     }
 
     const bool processed_orphan = ProcessOrphanTx(peer);
-    if (processed_orphan) ProcessPendingEvents();
 
     if (node.fDisconnect)
         return false;
 
-    if (processed_orphan) return true;
+    if (processed_orphan) return !peer.m_job_in_flight;
 
     // this maintains the order of responses
     // and prevents m_getdata_requests to grow unbounded
@@ -5899,6 +5937,9 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     } catch (...) {
         LogDebug(BCLog::NET, "%s(%s, %u bytes): Unknown exception caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size);
     }
+
+    // A peer whose job is with validation is not asked for more: the result wakes up the message handler.
+    if (peer.m_job_in_flight) fMoreWork = false;
 
     return fMoreWork;
 }
