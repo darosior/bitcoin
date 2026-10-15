@@ -11,6 +11,7 @@
 #include <uint256.h>
 #include <util/time.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -70,6 +71,27 @@ public:
 };
 
 
+/**
+ * A memory-only flag that caches the result of a check of a block. Several threads can read and set it: the block
+ * does not change after it was received, so a flag that is set was set by a check of the same contents, in
+ * whichever order the threads run. It is copied with the value it has.
+ */
+class CheckedFlag
+{
+    std::atomic<bool> m_value{false};
+
+public:
+    CheckedFlag() = default;
+    CheckedFlag(const CheckedFlag& other) : m_value{other.m_value.load(std::memory_order_relaxed)} {}
+    CheckedFlag& operator=(const CheckedFlag& other) { return *this = other.m_value.load(std::memory_order_relaxed); }
+    CheckedFlag& operator=(bool value)
+    {
+        m_value.store(value, std::memory_order_relaxed);
+        return *this;
+    }
+    operator bool() const { return m_value.load(std::memory_order_relaxed); }
+};
+
 class CBlock : public CBlockHeader
 {
 public:
@@ -77,9 +99,9 @@ public:
     std::vector<CTransactionRef> vtx;
 
     // Memory-only flags for caching expensive checks
-    mutable bool fChecked;                            // CheckBlock()
-    mutable bool m_checked_witness_commitment{false}; // CheckWitnessCommitment()
-    mutable bool m_checked_merkle_root{false};        // CheckMerkleRoot()
+    mutable CheckedFlag fChecked;                     // CheckBlock()
+    mutable CheckedFlag m_checked_witness_commitment; // CheckWitnessCommitment()
+    mutable CheckedFlag m_checked_merkle_root;        // CheckMerkleRoot()
 
     CBlock()
     {

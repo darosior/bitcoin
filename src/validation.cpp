@@ -4419,8 +4419,6 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         if (new_block) *new_block = false;
         BlockValidationState state;
 
-        // CheckBlock() does not support multi-threaded block validation because CBlock::fChecked can cause data race.
-        // Therefore, the following critical section must include the CheckBlock() call as well.
         LOCK(cs_main);
 
         // Skipping AcceptBlock() for CheckBlock() failures means that we will never mark a block as invalid if
@@ -4481,9 +4479,8 @@ BlockValidationState TestBlockValidity(
     const bool check_pow,
     const bool check_merkle_root)
 {
-    // Lock must be held throughout this function for two reasons:
-    // 1. We don't want the tip to change during several of the validation steps
-    // 2. To prevent a CheckBlock() race condition for fChecked, see ProcessNewBlock()
+    // Lock must be held throughout this function because we don't want the tip to change during several of the
+    // validation steps
     AssertLockHeld(chainstate.m_chainman.GetMutex());
 
     BlockValidationState state;
