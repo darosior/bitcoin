@@ -1334,14 +1334,20 @@ public:
         bool accepted{false};
         //! True if the block was stored by this call, i.e. it was first received here.
         bool new_block{false};
+        //! The entry of the block, if it was accepted. If it is a new block, validation has yet to learn of it, see
+        //! BlockStored().
+        CBlockIndex* pindex{nullptr};
     };
 
     /**
      * The first half of ProcessNewBlock(): check the block, add its header to the block index, and store it. This
-     * announces the block as a new PoW-valid block and writes it to disk, but does not connect it to the chain.
+     * announces the block as a new PoW-valid block and writes it to disk, but does not connect it to the chain,
+     * nor lets chain selection know of it. The caller of this is whoever received the block, which does not
+     * wait for validation: no cs_main is needed. For a new block, it is expected to tell validation with
+     * BlockStored(), and then to call ActivateNewBlock().
      *
      * If the block is rejected, BlockChecked is signalled with the reason, before this returns.
-     * Otherwise the header tip notification is sent, and the caller is expected to call ActivateNewBlock().
+     * Otherwise the header tip notification is sent.
      *
      * May not be called in a validationinterface callback. Parameters are as for ProcessNewBlock().
      */
@@ -1375,7 +1381,9 @@ public:
     bool ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex = nullptr) LOCKS_EXCLUDED(cs_main);
 
     /**
-     * Sufficiently validate a block for disk storage (and store on disk).
+     * Sufficiently validate a block for disk storage (and store on disk), and let chain selection know of it if it
+     * is new (BlockStored(), which takes cs_main for that only). This is for whoever stores a block and has no
+     * job to give to validation: the import of block files, and tests.
      *
      * @param[in]   pblock          The block we want to process.
      * @param[in]   fRequested      Whether we requested this block from a
@@ -1393,7 +1401,24 @@ public:
      *
      * @returns   False if the block or header is invalid, or if saving to disk fails (likely a fatal error); true otherwise.
      */
-    bool AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked) LOCKS_EXCLUDED(cs_main);
+
+    /**
+     * What AcceptBlock() does, but for the chain selection bookkeeping of a new block: the header, the checks that
+     * a block must pass to be stored, and the storage, which need no cs_main. A block that is new has to be given
+     * to BlockStored() afterwards. The tip that the anti-DoS checks compare with is the published one, which can be
+     * behind the active chain.
+     */
+    bool AcceptAndStoreBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked) LOCKS_EXCLUDED(g_block_index_mutex);
+
+    /**
+     * Validation's half of the acceptance of a new block, once it is stored: its chain selection bookkeeping (see
+     * ReceivedBlockTransactions()), and the flush that its storage may call for. Any order works: a block whose parent
+     * is not processed yet is unlinked until it is. What depends on the order is the sequence id, which ties between
+     * blocks of the same work, so the blocks that net stores are given to this in the order they were stored (they are
+     * jobs, done in order), and the callers of ProcessNewBlock() may come in between.
+     */
+    void BlockStored(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**
      * Chain selection bookkeeping for a block whose data was recorded with BlockManager::RecordBlockData(): assign

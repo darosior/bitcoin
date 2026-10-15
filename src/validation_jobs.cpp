@@ -12,15 +12,11 @@
 void ValidationJobs::Submit(Job job) const
 {
     std::visit(util::Overloaded{
-        [&](const AcceptBlock& job) {
+        [&](const ProcessStoredBlock& job) {
             AssertLockNotHeld(::cs_main);
-            const auto result{m_chainman.AcceptNewBlock(job.block, job.force_processing, job.min_pow_checked)};
-            m_post_result(BlockAccepted{job.from, job.block, result.accepted, result.new_block});
-        },
-        [&](const ActivateBlock& job) {
-            AssertLockNotHeld(::cs_main);
+            if (job.new_block) WITH_LOCK(::cs_main, m_chainman.BlockStored(job.pindex));
             m_chainman.ActivateNewBlock(job.block);
-            m_post_result(BlockActivated{job.from, job.block->GetHash(), job.new_block});
+            m_post_result(StoredBlockProcessed{job.from, job.block->GetHash(), job.new_block});
         },
         [&](const ActivateBestChain& job) {
             AssertLockNotHeld(::cs_main);

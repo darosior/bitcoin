@@ -1255,20 +1255,31 @@ FlatFilePos BlockManager::WriteBlock(const CBlock& block, int nHeight)
     return WriteBlockLocked(block, nHeight, notifications);
 }
 
-FlatFilePos BlockManager::StoreBlock(const CBlock& block, CBlockIndex& index, bool opt_witness, const FlatFilePos* dbp)
+BlockManager::StoreResult BlockManager::StoreBlock(const CBlock& block, CBlockIndex& index, bool opt_witness, const FlatFilePos* dbp)
 {
     DeferredNotifications notifications{*this};
     LOCK(g_block_index_mutex);
+    if (index.nStatus & BLOCK_HAVE_DATA) return StoreResult::ALREADY_STORED;
+    // Flagged as failed since the caller looked, as a descendant of an invalid block by the thread that connected it.
+    // Recording the data would leave transactions without the validity that goes with them.
+    if (index.nStatus & BLOCK_FAILED_VALID) return StoreResult::MARKED_FAILED;
     FlatFilePos pos;
     if (dbp) {
         pos = *dbp;
         UpdateBlockInfoLocked(block, index.nHeight, pos);
     } else {
         pos = WriteBlockLocked(block, index.nHeight, notifications);
-        if (pos.IsNull()) return pos;
+        if (pos.IsNull()) return StoreResult::FAILED;
     }
     RecordBlockDataLocked(index, block.vtx.size(), pos, opt_witness);
-    return pos;
+    m_unprocessed_blocks.insert(&index);
+    return StoreResult::STORED;
+}
+
+void BlockManager::MarkBlockProcessed(const CBlockIndex& index)
+{
+    LOCK(g_block_index_mutex);
+    m_unprocessed_blocks.erase(&index);
 }
 
 FlatFilePos BlockManager::WriteBlockLocked(const CBlock& block, int nHeight, DeferredNotifications& notifications)

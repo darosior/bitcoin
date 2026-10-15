@@ -32,28 +32,24 @@ BOOST_AUTO_TEST_CASE(block_jobs_post_one_result_with_the_node_id)
     constexpr NodeId PEER{42};
 
     const auto block{std::make_shared<const CBlock>(CreateBlock({}, CScript{} << OP_TRUE))};
-    jobs.Submit(ValidationJobs::AcceptBlock{PEER, block, /*force_processing=*/true, /*min_pow_checked=*/true});
-    BOOST_REQUIRE_EQUAL(results.size(), 1U);
-    const auto* accepted{std::get_if<ValidationJobs::BlockAccepted>(&results.back())};
-    BOOST_REQUIRE(accepted);
-    BOOST_CHECK_EQUAL(accepted->from, PEER);
-    BOOST_CHECK(accepted->block->GetHash() == block->GetHash());
-    BOOST_CHECK(accepted->accepted);
-    BOOST_CHECK(accepted->new_block);
-    // The block is stored, and not connected before it is activated.
+    // Whoever received the block accepts and stores it, with no job. The block is not connected before validation
+    // processes it.
+    const auto accepted{chainman.AcceptNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true)};
+    BOOST_REQUIRE(accepted.accepted);
+    BOOST_REQUIRE(accepted.new_block);
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash() == block->hashPrevBlock));
 
-    jobs.Submit(ValidationJobs::ActivateBlock{PEER, block, accepted->new_block});
-    BOOST_REQUIRE_EQUAL(results.size(), 2U);
-    const auto* activated{std::get_if<ValidationJobs::BlockActivated>(&results.back())};
-    BOOST_REQUIRE(activated);
-    BOOST_CHECK_EQUAL(activated->from, PEER);
-    BOOST_CHECK(activated->block_hash == block->GetHash());
-    BOOST_CHECK(activated->new_block);
+    jobs.Submit(ValidationJobs::ProcessStoredBlock{PEER, block, accepted.pindex, accepted.new_block});
+    BOOST_REQUIRE_EQUAL(results.size(), 1U);
+    const auto* processed{std::get_if<ValidationJobs::StoredBlockProcessed>(&results.back())};
+    BOOST_REQUIRE(processed);
+    BOOST_CHECK_EQUAL(processed->from, PEER);
+    BOOST_CHECK(processed->block_hash == block->GetHash());
+    BOOST_CHECK(processed->new_block);
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash()) == block->GetHash());
 
     jobs.Submit(ValidationJobs::ActivateBestChain{block});
-    BOOST_REQUIRE_EQUAL(results.size(), 3U);
+    BOOST_REQUIRE_EQUAL(results.size(), 2U);
     BOOST_CHECK(std::holds_alternative<ValidationJobs::ChainActivated>(results.back()));
 }
 

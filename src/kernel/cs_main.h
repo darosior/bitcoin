@@ -68,8 +68,8 @@ extern RecursiveMutex cs_main;
  * a batch is built while holding it, see BlockManager::WriteBlockIndexDB().
  *
  * A block is written and recorded in its entry (BlockManager::StoreBlock()) in one hold of this lock, which does
- * not need cs_main (AcceptBlock() holds it when it calls it, for now). Everything else that changes an existing
- * entry also holds cs_main. A change has to be flagged as dirty in the same hold (BlockManager::MarkDirty()), or it
+ * not need cs_main: the blocks that net receives and the import of block files are written without it. Everything
+ * else that changes an existing entry also holds cs_main. A change has to be flagged as dirty in the same hold (BlockManager::MarkDirty()), or it
  * is not written to disk.
  *
  * The flush (BlockManager::WriteBlockIndexDB()) flushes the files that blocks are written to and captures the
