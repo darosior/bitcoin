@@ -1035,6 +1035,22 @@ private:
     /** Height of the highest block announced using BIP 152 high-bandwidth mode. */
     int m_highest_fast_announce GUARDED_BY(m_net_state_mutex){0};
 
+    /**
+     * The block to announce using BIP 152 high-bandwidth mode when the tip becomes its parent, if it is not connected
+     * by then: it was received while its parent was stored, but not connected yet. BIP 152 does not allow to announce
+     * a block on top of one that was not validated. There is one, the one with the greatest height.
+     */
+    struct PendingFastAnnounce {
+        const CBlockIndex* index{nullptr};
+        std::shared_ptr<const CBlock> block;
+        std::shared_ptr<const CBlockHeaderAndShortTxIDs> compact_block;
+    };
+    PendingFastAnnounce m_pending_fast_announce GUARDED_BY(m_net_state_mutex);
+
+    /** Announce a block that builds on the tip to the peers that want it, using BIP 152 high-bandwidth mode. */
+    void AnnounceCompactBlock(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block, std::shared_ptr<const CBlockHeaderAndShortTxIDs> compact_block)
+        EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex, !m_most_recent_block_mutex);
+
     /** Have we requested this block from a peer */
     bool IsBlockRequested(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex);
 
@@ -1156,7 +1172,7 @@ private:
     void PostValidationResult(ValidationJobs::Result&& result) EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
 
     /** Processing of the events. They are what the callbacks of CValidationInterface used to do on the spot. */
-    void OnActiveTipChange(const CBlockIndex& new_tip, bool is_ibd) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
+    void OnActiveTipChange(const CBlockIndex& new_tip, bool is_ibd) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex, !m_net_state_mutex, !m_most_recent_block_mutex);
     void OnUpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void OnBlockChecked(const uint256& hash, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_net_state_mutex);
     /** The results of the jobs that process a block: the block was accepted, then activated. */
@@ -2393,11 +2409,29 @@ void PeerManagerImpl::OnActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     AssertLockNotHeld(m_tx_download_mutex);
 
     if (!is_ibd) {
-        LOCK(m_tx_download_mutex);
-        // If the chain tip has changed, previously rejected transactions might now be valid, e.g. due
-        // to a timelock. Reset the rejection filters to give those transactions another chance if we
-        // see them again.
-        m_txdownloadman.ActiveTipChange();
+        {
+            LOCK(m_tx_download_mutex);
+            // If the chain tip has changed, previously rejected transactions might now be valid, e.g. due
+            // to a timelock. Reset the rejection filters to give those transactions another chance if we
+            // see them again.
+            m_txdownloadman.ActiveTipChange();
+        }
+
+        // The block that was waiting for its parent to be connected is announced now, if it is not connected itself
+        // (if it is, it is relayed as any other) and was not found invalid since: its parent and it can have been
+        // connected by one activation, which failed on it.
+        LOCK(m_net_state_mutex);
+        if (const CBlockIndex* const pending{m_pending_fast_announce.index}) {
+            if (pending->pprev == &new_tip) {
+                const auto announce{std::exchange(m_pending_fast_announce, {})};
+                if (!ChainContains(m_chainman.PublishedTip(), *pending) && !WITH_LOCK(g_block_index_mutex, return pending->nStatus & BLOCK_FAILED_VALID)) {
+                    AnnounceCompactBlock(pending, announce.block, announce.compact_block);
+                }
+            } else if (pending->nHeight <= new_tip.nHeight) {
+                // The tip is past the block: it cannot be announced anymore.
+                m_pending_fast_announce = {};
+            }
+        }
     }
 }
 
@@ -2459,6 +2493,23 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
     auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock, FastRandomContext().rand64());
 
     LOCK(m_net_state_mutex);
+
+    // The tip is the published one, which can be behind. A block that builds on the tip is announced at once. A block
+    // that builds on one that is not connected yet is announced when it is, if it is not by then. The tip is read
+    // with the mutex held, as the event of the tip change is processed: the tip is published before the event is
+    // queued, so that either the tip read here is the new one, or the event is processed after the block is kept.
+    if (pindex->pprev != m_chainman.PublishedTip()) {
+        if (!m_pending_fast_announce.index || m_pending_fast_announce.index->nHeight <= pindex->nHeight) {
+            m_pending_fast_announce = {pindex, pblock, std::move(pcmpctblock)};
+        }
+        return;
+    }
+    AnnounceCompactBlock(pindex, pblock, std::move(pcmpctblock));
+}
+
+void PeerManagerImpl::AnnounceCompactBlock(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& pblock, std::shared_ptr<const CBlockHeaderAndShortTxIDs> pcmpctblock)
+{
+    AssertLockHeld(m_net_state_mutex);
 
     if (pindex->nHeight <= m_highest_fast_announce)
         return;

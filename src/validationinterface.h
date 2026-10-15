@@ -157,8 +157,10 @@ protected:
      */
     virtual void BlockChecked(const std::shared_ptr<const CBlock>&, const BlockValidationState&) {}
     /**
-     * Notifies listeners that a block which builds directly on our current tip
-     * has been received and connected to the headers tree, though not validated yet.
+     * Notifies listeners that a block which builds directly on our current tip, or on a block that is stored and
+     * not connected yet, has been received and connected to the headers tree, though not validated yet. Listeners
+     * can tell which by comparing the parent of the block to the tip, which is the one that is published (see
+     * ChainstateManager::PublishedTip()).
      */
     virtual void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& block) {};
     friend class ValidationSignals;
