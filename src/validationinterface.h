@@ -163,6 +163,12 @@ protected:
      * ChainstateManager::PublishedTip()).
      */
     virtual void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& block) {};
+    /**
+     * Called where validation limits how far it runs ahead of its subscribers, with no lock held (see
+     * ValidationSignals::WaitForQueueRoom()). A subscriber that queues what it is told for a thread of its own
+     * returns when its queue has room, so that the queue is bounded. It has to return if shutdown is requested.
+     */
+    virtual void WaitForQueueRoom() {}
     friend class ValidationSignals;
     friend class ValidationInterfaceTest;
 };
@@ -184,6 +190,13 @@ public:
     void FlushBackgroundCallbacks();
 
     size_t CallbacksPending();
+
+    /**
+     * Wait until the subscribers that queue what they are told for a thread of their own have room for more
+     * (CValidationInterface::WaitForQueueRoom()). It is called where validation waits for the scheduler's queue.
+     * No lock may be held, since a subscriber waits for a thread that can need it, such as cs_main.
+     */
+    void WaitForQueueRoom();
 
     /** Register subscriber */
     void RegisterValidationInterface(CValidationInterface* callbacks);
