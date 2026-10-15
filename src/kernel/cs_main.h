@@ -66,19 +66,19 @@ extern RecursiveMutex cs_main;
  * constructor, and the database is safe to use from several threads. What it stores is guarded by this lock, and
  * a batch is built while holding it, see BlockManager::WriteBlockIndexDB().
  *
- * For now, the block and undo writers (BlockManager::WriteBlock, UpdateBlockInfo, WriteBlockUndo and
- * FlushChainstateBlockFile) and everything that changes an existing entry also hold cs_main. The fields are
- * public, so this is not enforced field by field: it is enforced by the function that flags an entry as dirty
- * (BlockManager::MarkDirty()), which requires cs_main and this lock. A change that is not flagged is not written
- * to disk, so it would be a bug anyway.
+ * A block is written and recorded in its entry (BlockManager::StoreBlock()) in one hold of this lock, which does
+ * not need cs_main (AcceptBlock() holds it when it calls it, for now). Everything else that changes an existing
+ * entry also holds cs_main. A change has to be flagged as dirty in the same hold (BlockManager::MarkDirty()), or it
+ * is not written to disk.
  *
- * Pruning depends on this. FindFilesToPrune() selects the files to prune and UnlinkPrunedFiles() unlinks them in
- * the same cs_main critical section of FlushStateToDisk(), so no block or undo data can be written to a file
- * between the two, only because every writer holds cs_main. Whoever lets a writer go without cs_main has to make
- * sure it cannot write to a file that was selected for pruning.
+ * The flush (BlockManager::WriteBlockIndexDB()) flushes the files that blocks are written to and captures the
+ * dirty entries in one hold, so that the entries it writes do not refer to data that is not on disk. FindFilesToPrune()
+ * selects files to prune under cs_main, and the cursors that write to them are moved to a new file in the same
+ * hold (PruneOneBlockFile()), so that no block is written to a file that is unlinked afterwards.
  *
  * The paths that change the block index without cs_main are the insertion of new entries (which are fully built
- * before they become visible), the best header, the last notified header and the prune locks.
+ * before they become visible), the storage of a block, the best header, the last notified header and the prune
+ * locks.
  */
 extern GlobalMutex g_block_index_mutex ACQUIRED_AFTER(::cs_main);
 
