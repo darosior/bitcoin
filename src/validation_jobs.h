@@ -14,6 +14,7 @@
 #include <sync.h>
 #include <validation.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -99,9 +100,12 @@ public:
     using Job = std::variant<ProcessStoredBlock, ProcessTransaction, ReconsiderOrphan, ProcessPackage>;
     using Result = std::variant<StoredBlockProcessed, TxProcessed, OrphanReconsidered, PackageProcessed>;
 
-    /** `post_result` is called with the result of every job, on the thread that does it. */
-    ValidationJobs(ChainstateManager& chainman, CTxMemPool& mempool, std::function<void(Result&&)> post_result)
-        : m_chainman{chainman}, m_mempool{mempool}, m_post_result{std::move(post_result)} {}
+    /** `post_result` is called with the result of every job, on the thread that does it. With `test_delay`, the
+     * thread waits a random time of up to MAX_TEST_DELAY before each job, which shifts the interleavings of the
+     * threads that it works with: for tests that look for races. */
+    ValidationJobs(ChainstateManager& chainman, CTxMemPool& mempool, std::function<void(Result&&)> post_result, bool test_delay = false)
+        : m_chainman{chainman}, m_mempool{mempool}, m_post_result{std::move(post_result)}, m_test_delay{test_delay} {}
+    static constexpr std::chrono::milliseconds MAX_TEST_DELAY{50};
     ~ValidationJobs();
 
     /** Start the thread that does the jobs. The jobs submitted before were done by their submitters. */
@@ -138,6 +142,7 @@ private:
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     const std::function<void(Result&&)> m_post_result;
+    const bool m_test_delay;
 
     mutable Mutex m_mutex;
     std::condition_variable m_cv;

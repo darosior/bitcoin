@@ -29,6 +29,8 @@ void ApplyArgsManOptions(const ArgsManager& argsman, PeerManager::Options& optio
     }
 
     if (auto value{argsman.GetBoolArg("-privatebroadcast")}) options.private_broadcast = *value;
+
+    options.validation_delay = HasTestOption(argsman, "validation_delay");
 }
 
 } // namespace node

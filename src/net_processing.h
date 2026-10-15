@@ -110,6 +110,9 @@ public:
         bool private_broadcast{DEFAULT_PRIVATE_BROADCAST};
         //! Maximum per-second rate for sending transaction inventory to peers.
         unsigned int tx_send_rate{DEFAULT_TX_SEND_RATE};
+        //! Whether the thread of validation waits a random time before each job (this is a test-only option, see
+        //! ValidationJobs::Options).
+        bool validation_delay{false};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,
