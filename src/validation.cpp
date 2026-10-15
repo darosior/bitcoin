@@ -4408,8 +4408,11 @@ bool ChainstateManager::AcceptAndStoreBlock(const std::shared_ptr<const CBlock>&
     }
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
-    // (but if it does not build on our best tip, let the SendMessages loop relay it)
-    if (!IsInitialBlockDownload() && tip == pindex->pprev && m_options.signals) {
+    // (but if it does not build on our best tip, let the SendMessages loop relay it). A block that builds on one
+    // that is stored but may not be connected yet is notified as well, because the tip can be behind: the listener
+    // decides what to do with it.
+    if (!IsInitialBlockDownload() && m_options.signals &&
+        (tip == pindex->pprev || WITH_LOCK(g_block_index_mutex, return pindex->pprev && (pindex->pprev->nStatus & BLOCK_HAVE_DATA)))) {
         m_options.signals->NewPoWValidBlock(pindex, pblock);
     }
 
