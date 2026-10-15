@@ -627,6 +627,7 @@ public:
     };
     void UnitTestMisbehaving(NodeId peer_id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), ""); };
     void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) override EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex);
+    uint64_t WaitForValidationWork() override EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
 
 private:
@@ -1136,6 +1137,11 @@ private:
     //! before that, so none is added anymore.
     Mutex m_validation_events_mutex;
     std::deque<ValidationEvent> m_validation_events GUARDED_BY(m_validation_events_mutex);
+    //! How many events were queued, and how many of them were not processed yet, including those that are being. The
+    //! condition variable is notified when the latter reaches zero.
+    uint64_t m_events_queued GUARDED_BY(m_validation_events_mutex){0};
+    uint64_t m_events_pending GUARDED_BY(m_validation_events_mutex){0};
+    std::condition_variable m_events_pending_cv;
 
     /** Queue an event, and wake up the message handler thread, which processes it. Called from any thread. */
     void QueueValidationEvent(ValidationEvent event) EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
@@ -2299,8 +2305,22 @@ void PeerManagerImpl::QueueValidationEvent(ValidationEvent event)
     {
         LOCK(m_validation_events_mutex);
         m_validation_events.push_back(std::move(event));
+        ++m_events_queued;
+        ++m_events_pending;
     }
     m_connman.WakeMessageHandler();
+}
+
+uint64_t PeerManagerImpl::WaitForValidationWork()
+{
+    WAIT_LOCK(m_validation_events_mutex, lock);
+    while (m_events_pending > 0) {
+        lock.unlock();
+        m_connman.WakeMessageHandler();
+        lock.lock();
+        m_events_pending_cv.wait_for(lock, 100ms, [&]() EXCLUSIVE_LOCKS_REQUIRED(m_validation_events_mutex) { return m_events_pending == 0; });
+    }
+    return m_events_queued;
 }
 
 void PeerManagerImpl::PostValidationResult(ValidationJobs::Result&& result)
@@ -2353,6 +2373,9 @@ void PeerManagerImpl::ProcessPendingEvents()
                 [&](const ValidationJobs::OrphanReconsidered& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnOrphanReconsidered(e); },
                 [&](const ValidationJobs::PackageProcessed& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnPackageProcessed(e); },
             }, event);
+            // Only now is the event done with: what its handler submitted is queued already, if any.
+            LOCK(m_validation_events_mutex);
+            if (--m_events_pending == 0) m_events_pending_cv.notify_all();
         }
     }
 }

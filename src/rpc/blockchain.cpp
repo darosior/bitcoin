@@ -513,7 +513,9 @@ static RPCMethod syncwithvalidationinterfacequeue()
 {
     return RPCMethod{
         "syncwithvalidationinterfacequeue",
-        "Waits for the validation interface queue to catch up on everything that was there when we entered this function.\n",
+        "Waits for the validation interface queue to catch up on everything that was there when we entered this function,\n"
+        "and for the network processing to have handled everything that validation told it as a result, until a round\n"
+        "finds nothing more.\n",
                 {},
                 RPCResult{RPCResult::Type::NONE, "", ""},
                 RPCExamples{
@@ -524,6 +526,16 @@ static RPCMethod syncwithvalidationinterfacequeue()
 {
     NodeContext& node = EnsureAnyNodeContext(request.context);
     CHECK_NONFATAL(node.validation_signals)->SyncWithValidationInterfaceQueue();
+    if (node.peerman) {
+        // What network code handles can make validation notify again, and what it notifies is handled in turn.
+        uint64_t seen{node.peerman->WaitForValidationWork()};
+        while (true) {
+            node.validation_signals->SyncWithValidationInterfaceQueue();
+            const uint64_t now{node.peerman->WaitForValidationWork()};
+            if (now == seen) break;
+            seen = now;
+        }
+    }
     return UniValue::VNULL;
 },
     };

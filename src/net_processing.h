@@ -186,6 +186,14 @@ public:
     virtual void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) = 0;
 
     /**
+     * Wait until everything that validation has told us has been processed, and return the number of events there
+     * were in total. The message handler thread has to run, as it does the processing.
+     * This is for tests: it lets an RPC return only when the effects of the messages sent to the node before it are
+     * visible.
+     */
+    virtual uint64_t WaitForValidationWork() = 0;
+
+    /**
      * Gets the set of service flags which are "desirable" for a given peer.
      *
      * These are the flags which are required for a peer to support for them
