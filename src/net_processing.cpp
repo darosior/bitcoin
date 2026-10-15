@@ -64,6 +64,7 @@
 #include <util/tokenbucket.h>
 #include <util/trace.h>
 #include <validation.h>
+#include <validation_jobs.h>
 
 #include <algorithm>
 #include <array>
@@ -400,6 +401,14 @@ struct Peer {
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
 
+    /** Whether the last list of orphans of this peer that was reconsidered ended without resolving one (all of them
+     * missed inputs), so that the call of ProcessMessages() that acts on it handles a message of the peer before it
+     * submits another list. That is what a call did after the loop over the orphans of the peer when none was
+     * resolved, and without it the triggers that come at every pass could keep the messages of the peer from being
+     * handled. Set by the handler of the result of the list, and cleared by the call of ProcessMessages() that acts on
+     * it, whatever that call does next: it never holds the orphans of the peer for longer than that call. */
+    bool m_message_before_orphans GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+
     /** Protects m_headers_sync **/
     Mutex m_headers_sync_mutex;
     /** Headers-sync state for this peer (eg for initial sync, or syncing large
@@ -711,6 +720,25 @@ private:
     void ProcessValidTx(NodeId nodeid, const CTransactionRef& tx, const std::list<CTransactionRef>& replaced_transactions)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, m_tx_download_mutex, !m_inv_to_send_mutex);
 
+    /** Handle the result of the validation of a transaction a peer sent us: calls ProcessValidTx or ProcessInvalidTx,
+     * and submits the package that ProcessInvalidTx found for it, if any. */
+    void OnTxProcessed(const ValidationJobs::TxProcessed& processed)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+
+    /** Handle the result of the reconsideration of the orphans of a peer: calls ProcessValidTx or ProcessInvalidTx for
+     * the last of them, unless its inputs are still missing, puts the ones that were not tried back in the work set,
+     * and tells the peer whether an orphan was resolved (Peer::m_message_before_orphans). */
+    void OnOrphansReconsidered(const ValidationJobs::OrphansReconsidered& reconsidered)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+
+    /** Handle the result of the check of the transactions that are stale in private broadcast: reattempt the broadcast
+     * of the ones that would be accepted to the mempool, and give up on the others. */
+    void OnTransactionsTestAccepted(const ValidationJobs::TransactionsTestAccepted& accepted);
+
+    /** Handle the result of the validation of a package: calls ProcessPackageResult. */
+    void OnPackageProcessed(const ValidationJobs::PackageProcessed& processed)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+
     /** Handle the results of package validation: calls ProcessValidTx and ProcessInvalidTx for
      * individual transactions, and caches rejection for the package as a group.
      */
@@ -720,16 +748,17 @@ private:
     /**
      * Reconsider orphan transactions after a parent has been accepted to the mempool.
      *
-     * @peer[in]  peer     The peer whose orphan transactions we will reconsider. Generally only
-     *                     one orphan will be reconsidered on each call of this function. If an
-     *                     accepted orphan has orphaned children, those will need to be
-     *                     reconsidered, creating more work, possibly for other peers.
-     * @return             True if meaningful work was done (an orphan was accepted/rejected).
-     *                     If no meaningful work was done, then the work set for this peer
-     *                     will be empty.
+     * @peer[in]  peer     The peer whose orphan transactions we will reconsider: its work set is taken at once and
+     *                     given to validation as one job, which goes through the orphans in order and stops at the
+     *                     first that has a result other than missing inputs (an orphan was accepted or rejected).
+     *                     If an accepted orphan has orphaned children, those will need to be reconsidered, creating
+     *                     more work, possibly for other peers. The orphans that were not tried are put back in the
+     *                     work set when the result is handled (OnOrphansReconsidered()).
+     * @return             True if there was work, and a job was submitted. The result of the job tells whether an
+     *                     orphan was resolved: if none was, Peer::m_message_before_orphans is set when it is handled.
      */
     bool ProcessOrphanTx(Peer& peer)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_validation_events_mutex);
 
     /** Process a single headers message from a peer.
      *
@@ -861,6 +890,8 @@ private:
     BanMan* const m_banman;
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
+    //! The work net_processing asks validation to do, see ValidationJobs. The results are events, see ValidationEvent.
+    const ValidationJobs m_validation;
 
     /** Synchronizes tx download including TxRequestTracker, rejection filters, and TxOrphanage.
      * Lock invariants:
@@ -1081,7 +1112,12 @@ private:
         uint256 block_hash;
         BlockValidationState state;
     };
-    using ValidationEvent = std::variant<ActiveTipChangeEvent, UpdatedBlockTipEvent, BlockCheckedEvent>;
+    //! The results of the jobs that were submitted to validation are events as well, so that they are processed in the
+    //! order that validation produced them in, together with what it notified while it worked.
+    using ValidationEvent = std::variant<ActiveTipChangeEvent, UpdatedBlockTipEvent, BlockCheckedEvent,
+                                         ValidationJobs::StoredBlockProcessed,
+                                         ValidationJobs::TxProcessed, ValidationJobs::OrphansReconsidered, ValidationJobs::PackageProcessed,
+                                         ValidationJobs::TransactionsTestAccepted>;
 
     //! Events that were not processed when the PeerManager is destroyed are dropped with it. Nothing is done with
     //! them then, and they are not dereferenced; the PeerManager is unregistered from the validation interface
@@ -1091,11 +1127,15 @@ private:
 
     /** Queue an event, and wake up the message handler thread, which processes it. Called from any thread. */
     void QueueValidationEvent(ValidationEvent event) EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
+    /** Queue the result of a job. */
+    void PostValidationResult(ValidationJobs::Result&& result) EXCLUSIVE_LOCKS_REQUIRED(!m_validation_events_mutex);
 
     /** Processing of the events. They are what the callbacks of CValidationInterface used to do on the spot. */
     void OnActiveTipChange(const CBlockIndex& new_tip, bool is_ibd) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void OnUpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void OnBlockChecked(const uint256& hash, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    /** What is done once a block was processed, whether or not it was accepted. */
+    void OnBlockProcessed(NodeId from, const uint256& block_hash, bool new_block) LOCKS_EXCLUDED(::cs_main);
 
     /** Process compact block txns  */
     void ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
@@ -1787,31 +1827,11 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 
 void PeerManagerImpl::ReattemptPrivateBroadcast(CScheduler& scheduler)
 {
-    // Resolve stale transactions that are no longer relevant (e.g. already in
-    // the mempool or mined) and count the remaining ones.
-    size_t num_for_rebroadcast{0};
-    const auto stale_txs = m_tx_for_private_broadcast.GetStale();
+    // Stale transactions that are no longer relevant (e.g. already in the mempool or mined) are resolved, and the
+    // remaining ones counted for rebroadcast, when validation has checked them (OnTransactionsTestAccepted()).
+    auto stale_txs = m_tx_for_private_broadcast.GetStale();
     if (!stale_txs.empty()) {
-        for (const auto& stale_tx : stale_txs) {
-            // Only hold lock per single submission
-            LOCK(cs_main);
-            auto mempool_acceptable = m_chainman.ProcessTransaction(stale_tx, /*test_accept=*/true);
-            if (mempool_acceptable.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-                if (!m_tx_for_private_broadcast.TryGrantRetry(stale_tx)) continue;
-                LogDebug(BCLog::PRIVBROADCAST,
-                         "Reattempting broadcast of stale txid=%s wtxid=%s",
-                         stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString());
-                ++num_for_rebroadcast;
-            } else {
-                LogDebug(BCLog::PRIVBROADCAST, "Giving up broadcast attempts for txid=%s wtxid=%s: %s",
-                         stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString(),
-                         mempool_acceptable.m_state.ToString());
-                m_tx_for_private_broadcast.MarkResolved(stale_tx);
-            }
-        }
-
-        // This could overshoot, but that is ok - we will open some private connections in vain.
-        m_connman.m_private_broadcast.NumToOpenAdd(num_for_rebroadcast);
+        m_validation.Submit(ValidationJobs::TestAcceptTransactions{std::move(stale_txs)});
     }
 
     const auto delta{2min + FastRandomContext().randrange<std::chrono::milliseconds>(1min)};
@@ -2188,6 +2208,7 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
       m_banman(banman),
       m_chainman(chainman),
       m_mempool(pool),
+      m_validation{chainman, pool, [this](ValidationJobs::Result&& result) { PostValidationResult(std::move(result)); }},
       m_txdownloadman{node::TxDownloadOptions{pool, opts.deterministic_rng}},
       m_warnings{warnings},
       m_opts{opts},
@@ -2228,6 +2249,11 @@ void PeerManagerImpl::QueueValidationEvent(ValidationEvent event)
     m_connman.WakeMessageHandler();
 }
 
+void PeerManagerImpl::PostValidationResult(ValidationJobs::Result&& result)
+{
+    std::visit([this](auto&& r) { QueueValidationEvent(std::move(r)); }, std::move(result));
+}
+
 void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
 {
     QueueValidationEvent(ActiveTipChangeEvent{&new_tip, is_ibd});
@@ -2263,6 +2289,11 @@ void PeerManagerImpl::ProcessPendingEvents()
                 [&](const ActiveTipChangeEvent& e) { OnActiveTipChange(*e.new_tip, e.is_ibd); },
                 [&](const UpdatedBlockTipEvent& e) { OnUpdatedBlockTip(e.new_tip, e.fork, e.is_ibd); },
                 [&](const BlockCheckedEvent& e) { OnBlockChecked(e.block_hash, e.state); },
+                [&](const ValidationJobs::StoredBlockProcessed& e) { OnBlockProcessed(e.from, e.block_hash, e.new_block); },
+                [&](const ValidationJobs::TxProcessed& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnTxProcessed(e); },
+                [&](const ValidationJobs::OrphansReconsidered& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnOrphansReconsidered(e); },
+                [&](const ValidationJobs::PackageProcessed& e) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) { OnPackageProcessed(e); },
+                [&](const ValidationJobs::TransactionsTestAccepted& e) { OnTransactionsTestAccepted(e); },
             }, event);
         }
     }
@@ -3589,36 +3620,133 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
 bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
 {
     AssertLockHeld(g_msgproc_mutex);
-    LOCK2(::cs_main, m_tx_download_mutex);
+    LOCK(::cs_main);
 
-    while (CTransactionRef porphanTx = m_txdownloadman.GetTxToReconsider(peer.m_id)) {
-        const MempoolAcceptResult result = m_chainman.ProcessTransaction(porphanTx);
-        const TxValidationState& state = result.m_state;
-        const Txid& orphanHash = porphanTx->GetHash();
-        const Wtxid& orphan_wtxid = porphanTx->GetWitnessHash();
+    // The work set is taken now, and not cleared when the result comes: what becomes reconsiderable while the job is
+    // with validation stays so.
+    std::vector<CTransactionRef> txs{WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetTxsToReconsider(peer.m_id))};
+    if (txs.empty()) return false;
 
+    m_validation.Submit(ValidationJobs::ReconsiderOrphans{peer.m_id, std::move(txs)});
+    ProcessPendingEvents();
+    return true;
+}
+
+void PeerManagerImpl::OnOrphansReconsidered(const ValidationJobs::OrphansReconsidered& reconsidered)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
+
+    const NodeId peer_id{reconsidered.from};
+    const MempoolAcceptResult& result{reconsidered.last_result};
+    const TxValidationState& state = result.m_state;
+    // The orphan that has the result is the last that was tried.
+    const CTransactionRef& porphanTx{reconsidered.txs.at(reconsidered.num_tried - 1)};
+    const Txid& orphanHash = porphanTx->GetHash();
+    const Wtxid& orphan_wtxid = porphanTx->GetWitnessHash();
+
+    // The peer may be gone by now.
+    const PeerRef peer{GetPeerRef(peer_id)};
+
+    bool resolved{false};
+    {
+        LOCK(m_tx_download_mutex);
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             LogDebug(BCLog::TXPACKAGES, "   accepted orphan tx %s (wtxid=%s)\n", orphanHash.ToString(), orphan_wtxid.ToString());
-            ProcessValidTx(peer.m_id, porphanTx, result.m_replaced_transactions);
-            return true;
+            ProcessValidTx(peer_id, porphanTx, result.m_replaced_transactions);
+            resolved = true;
         } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
             LogDebug(BCLog::TXPACKAGES, "   invalid orphan tx %s (wtxid=%s) from peer=%d. %s\n",
                 orphanHash.ToString(),
                 orphan_wtxid.ToString(),
-                peer.m_id,
+                peer_id,
                 state.ToString());
 
             if (Assume(state.IsInvalid() &&
                        state.GetResult() != TxValidationResult::TX_UNKNOWN &&
                        state.GetResult() != TxValidationResult::TX_NO_MEMPOOL &&
                        state.GetResult() != TxValidationResult::TX_RESULT_UNSET)) {
-                ProcessInvalidTx(peer.m_id, porphanTx, state, /*first_time_failure=*/false);
+                ProcessInvalidTx(peer_id, porphanTx, state, /*first_time_failure=*/false);
             }
+            resolved = true;
+        }
+        // The orphans that were not tried are reconsidered by the next list.
+        m_txdownloadman.PutBackInWorkSet(peer_id, std::vector<CTransactionRef>(reconsidered.txs.begin() + reconsidered.num_tried, reconsidered.txs.end()));
+    }
+    // If no orphan was resolved, the next call handles a message of the peer before it submits another list.
+    if (peer) peer->m_message_before_orphans = !resolved;
+}
+
+// The reject filters (m_lazy_recent_rejects and its siblings) depend on the tip, and ActiveTipChange resets them.
+// A rejection must not outlive the reset for a tip change that came after it was decided, and that is ensured by the
+// order of the events, not by holding a lock: validation queues the result of a job and the events of the tip changes
+// it makes in the order they happen, under cs_main, and only the message handler thread processes them, in that order.
+// So the reset of a tip change that happened before the mempool decided is processed before the result of the job, and
+// that of a tip change that happens after is processed after it.
+void PeerManagerImpl::OnTxProcessed(const ValidationJobs::TxProcessed& processed)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
+
+    const MempoolAcceptResult& result{processed.result};
+    const TxValidationState& state = result.m_state;
+
+    std::optional<node::PackageToValidate> package_to_validate;
+    {
+        LOCK(m_tx_download_mutex);
+        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+            ProcessValidTx(processed.from, processed.tx, result.m_replaced_transactions);
+        }
+        if (state.IsInvalid()) {
+            package_to_validate = ProcessInvalidTx(processed.from, processed.tx, state, /*first_time_failure=*/true);
+        }
+    }
+    if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+        // The peer may be gone by now.
+        m_connman.ForNode(processed.from, [](CNode* node) {
+            node->m_last_tx_time = GetTime<std::chrono::seconds>();
             return true;
+        });
+    }
+    if (package_to_validate) {
+        LOCK(::cs_main);
+        m_validation.Submit(ValidationJobs::ProcessPackage{processed.from, *package_to_validate});
+    }
+}
+
+void PeerManagerImpl::OnTransactionsTestAccepted(const ValidationJobs::TransactionsTestAccepted& accepted)
+{
+    size_t num_for_rebroadcast{0};
+    for (size_t i{0}; i < accepted.txs.size(); ++i) {
+        const CTransactionRef& stale_tx{accepted.txs.at(i)};
+        const MempoolAcceptResult& mempool_acceptable{accepted.results.at(i)};
+        if (mempool_acceptable.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+            if (!m_tx_for_private_broadcast.TryGrantRetry(stale_tx)) continue;
+            LogDebug(BCLog::PRIVBROADCAST,
+                     "Reattempting broadcast of stale txid=%s wtxid=%s",
+                     stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString());
+            ++num_for_rebroadcast;
+        } else {
+            LogDebug(BCLog::PRIVBROADCAST, "Giving up broadcast attempts for txid=%s wtxid=%s: %s",
+                     stale_tx->GetHash().ToString(), stale_tx->GetWitnessHash().ToString(),
+                     mempool_acceptable.m_state.ToString());
+            m_tx_for_private_broadcast.MarkResolved(stale_tx);
         }
     }
 
-    return false;
+    // This could overshoot, but that is ok - we will open some private connections in vain.
+    m_connman.m_private_broadcast.NumToOpenAdd(num_for_rebroadcast);
+}
+
+void PeerManagerImpl::OnPackageProcessed(const ValidationJobs::PackageProcessed& processed)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
+
+    LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", processed.package.ToString(),
+             processed.result.m_state.IsValid() ? "package accepted" : "package rejected");
+    LOCK(m_tx_download_mutex);
+    ProcessPackageResult(processed.package, processed.result);
 }
 
 bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& node, Peer& peer,
@@ -3785,22 +3913,38 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
 
 void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
 {
-    bool new_block{false};
-    m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
+    // First accept and store the block, as ProcessNewBlock() does: this is done here, by the thread that received it.
+    // Then validation activates the best chain, and the result of that job is what handles the outcome.
+    //
     // The events that validation produced while it worked (BlockChecked, which punishes the peer that sent an invalid
-    // block, ActiveTipChange, which resets the filters of rejected transactions, and the others) are processed first,
-    // so that they take effect before the outcome is handled and before the next message is.
+    // block, ActiveTipChange, which resets the filters of rejected transactions, and the others) come before the result
+    // of the job that caused them, so they take effect before the outcome is handled and before the next message is.
+    const auto accepted{m_chainman.AcceptNewBlock(block, force_processing, min_pow_checked)};
     ProcessPendingEvents();
+    if (!accepted.accepted) {
+        OnBlockProcessed(node.GetId(), block->GetHash(), accepted.new_block);
+        return;
+    }
+    m_validation.Submit(ValidationJobs::ProcessStoredBlock{node.GetId(), block, accepted.new_block});
+    ProcessPendingEvents();
+}
+
+void PeerManagerImpl::OnBlockProcessed(NodeId from, const uint256& block_hash, bool new_block)
+{
     if (new_block) {
-        node.m_last_block_time = GetTime<std::chrono::seconds>();
+        // The peer may be gone by now.
+        m_connman.ForNode(from, [](CNode* node) {
+            node->m_last_block_time = GetTime<std::chrono::seconds>();
+            return true;
+        });
         // In case this block came from a different peer than we requested
         // from, we can erase the block request now anyway (as we just stored
         // this block to disk).
         LOCK(cs_main);
-        RemoveBlockRequest(block->GetHash(), std::nullopt);
+        RemoveBlockRequest(block_hash, std::nullopt);
     } else {
         LOCK(cs_main);
-        mapBlockSource.erase(block->GetHash());
+        mapBlockSource.erase(block_hash);
     }
 }
 
@@ -4844,9 +4988,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                      txid.ToString(), pfrom.LogPeer());
         }
 
-        LOCK2(cs_main, m_tx_download_mutex);
+        LOCK(cs_main);
 
-        const auto& [should_validate, package_to_validate] = m_txdownloadman.ReceivedTx(pfrom.GetId(), ptx);
+        const auto [should_validate, package_to_validate] = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.ReceivedTx(pfrom.GetId(), ptx));
         if (!should_validate) {
             if (pfrom.HasPermission(NetPermissionFlags::ForceRelay)) {
                 // Always relay transactions received from peers with forcerelay
@@ -4863,10 +5007,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             }
 
             if (package_to_validate) {
-                const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_to_validate->m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
-                LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate->ToString(),
-                         package_result.m_state.IsValid() ? "package accepted" : "package rejected");
-                ProcessPackageResult(package_to_validate.value(), package_result);
+                m_validation.Submit(ValidationJobs::ProcessPackage{pfrom.GetId(), *package_to_validate});
+                ProcessPendingEvents();
             }
             return;
         }
@@ -4874,21 +5016,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // ReceivedTx should not be telling us to validate the tx and a package.
         Assume(!package_to_validate.has_value());
 
-        const MempoolAcceptResult result = m_chainman.ProcessTransaction(ptx);
-        const TxValidationState& state = result.m_state;
-
-        if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-            ProcessValidTx(pfrom.GetId(), ptx, result.m_replaced_transactions);
-            pfrom.m_last_tx_time = GetTime<std::chrono::seconds>();
-        }
-        if (state.IsInvalid()) {
-            if (auto package_to_validate{ProcessInvalidTx(pfrom.GetId(), ptx, state, /*first_time_failure=*/true)}) {
-                const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_to_validate->m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
-                LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate->ToString(),
-                         package_result.m_state.IsValid() ? "package accepted" : "package rejected");
-                ProcessPackageResult(package_to_validate.value(), package_result);
-            }
-        }
+        m_validation.Submit(ValidationJobs::ProcessTransaction{pfrom.GetId(), ptx});
+        ProcessPendingEvents();
 
         return;
     }
@@ -5547,12 +5676,16 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
         }
     }
 
-    const bool processed_orphan = ProcessOrphanTx(peer);
+    // The orphans of the peer come first, as always: a list of them is reconsidered, and if one is resolved the call ends
+    // there and the next message of the peer waits for the next call. If none is, a message is handled in this call.
+    const bool processed_orphan{ProcessOrphanTx(peer)};
 
     if (node.fDisconnect)
         return false;
 
-    if (processed_orphan) return true;
+    // The job is done as it is submitted, so its result was handled already, and told whether an orphan was resolved.
+    // If none was, the flag is consumed here, and the call goes on to the message (or to the early return that applies).
+    if (processed_orphan && !std::exchange(peer.m_message_before_orphans, false)) return true;
 
     // this maintains the order of responses
     // and prevents m_getdata_requests to grow unbounded

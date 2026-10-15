@@ -540,4 +540,81 @@ BOOST_FIXTURE_TEST_CASE(orphan_reconsideration_interruptible, TestChain100Setup)
     peerman.FinalizeNode(peer);
 }
 
+// A list of orphans that resolves none must not hold the orphans of the peer for longer than one call, whatever that
+// call does: if it ends early (here, the send buffer is full), the next call starts with the orphans again.
+BOOST_FIXTURE_TEST_CASE(orphans_follow_a_list_that_resolved_none, TestChain100Setup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    const CTxMemPool& mempool = *m_node.mempool;
+
+    const auto make_peer{[&](NodeId id, uint32_t ip_addr) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        auto peer{std::make_unique<CNode>(id,
+                                          /*sock=*/nullptr,
+                                          CAddress(ip(ip_addr), NODE_NONE),
+                                          /*nKeyedNetGroupIn=*/0,
+                                          /*nLocalHostNonceIn=*/0,
+                                          CAddress(),
+                                          /*addrNameIn=*/"",
+                                          ConnectionType::OUTBOUND_FULL_RELAY,
+                                          /*inbound_onion=*/false,
+                                          /*network_key=*/0)};
+        connman.Handshake(
+            /*node=*/*peer,
+            /*successfully_connected=*/true,
+            /*remote_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+            /*local_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+            /*version=*/PROTOCOL_VERSION,
+            /*relay_txs=*/true);
+        return peer;
+    }};
+    auto peer_a{make_peer(0, 0xa0b0c001)};
+    auto peer_b{make_peer(1, 0xa0b0c002)};
+
+    const CScript script{GetScriptForRawPubKey(coinbaseKey.GetPubKey())};
+    const auto parent{MakeTransactionRef(CreateValidMempoolTransaction(
+        {m_coinbase_txns[0]}, {COutPoint{m_coinbase_txns[0]->GetHash(), 0}}, /*input_height=*/1, {coinbaseKey},
+        std::vector<CTxOut>(2, CTxOut{24 * COIN, script}), /*submit=*/false))};
+    const auto other_parent{MakeTransactionRef(CreateValidMempoolTransaction(parent, 1, /*input_height=*/101, coinbaseKey, script, 23 * COIN, /*submit=*/false))};
+    // The orphan spends an output of each parent: it misses inputs until both are in the mempool.
+    const auto orphan{MakeTransactionRef(CreateValidMempoolTransaction(
+        {parent, other_parent}, {COutPoint{parent->GetHash(), 0}, COutPoint{other_parent->GetHash(), 0}}, /*input_height=*/101,
+        {coinbaseKey, coinbaseKey}, {CTxOut{46 * COIN, script}}, /*submit=*/false))};
+
+    const auto call{[&](CNode& peer, const CTransactionRef& tx = nullptr) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        connman.FlushSendBuffer(peer);
+        if (tx) BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx))));
+        const bool more_work{connman.ProcessMessagesOnce(peer)};
+        peerman.ProcessPendingEvents();
+        return more_work;
+    }};
+    peer_a->fPauseSend = false;
+    peer_b->fPauseSend = false;
+
+    // The orphan comes first, then a parent: its list of orphans does not resolve it, as the other parent is missing.
+    call(*peer_a, orphan);
+    BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), 1U);
+    call(*peer_a, parent);
+    BOOST_CHECK_EQUAL(mempool.size(), 1U);
+
+    // The list of that call ends without a resolution, and the call itself ends early as the send buffer is full.
+    peer_a->fPauseSend = true;
+    call(*peer_a);
+    peer_a->fPauseSend = false;
+    BOOST_CHECK_EQUAL(mempool.size(), 1U);
+
+    // Another peer sends the other parent, which makes the orphan reconsiderable again. The next call of the first peer
+    // starts with the orphans, and has no message to handle: the orphan is accepted by this call.
+    call(*peer_b, other_parent);
+    BOOST_CHECK_EQUAL(mempool.size(), 2U);
+    call(*peer_a);
+    BOOST_CHECK_EQUAL(mempool.size(), 3U);
+    BOOST_CHECK(peerman.GetOrphanTransactions().empty());
+
+    peerman.FinalizeNode(*peer_a);
+    peerman.FinalizeNode(*peer_b);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
