@@ -818,8 +818,6 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_chainstate_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
-    /** Set invalidity status to all descendants of a block */
-    void SetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
 
     /** Remove invalidity status from a block, its descendants and ancestors and reconsider them for activation */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main) LOCKS_EXCLUDED(g_block_index_mutex);
@@ -1034,7 +1032,9 @@ private:
     SteadyClock::duration GUARDED_BY(::cs_main) time_post_connect{};
 
 protected:
-    CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
+    //! The invalid block with the most work that is known, which is informational (see
+    //! Chainstate::CheckForkWarningConditions()). It is raised by whoever marks a block as failed.
+    std::atomic<CBlockIndex*> m_best_invalid{nullptr};
 
 public:
     using Options = kernel::ChainstateManagerOpts;
@@ -1463,7 +1463,20 @@ public:
     //! header in our block-index not known to be invalid, recalculate it.
     //! `active_tip` is the fallback, if it has more work. The caller gets it before taking
     //! g_block_index_mutex, since getting it takes cs_main.
-    void RecalculateBestHeader(CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex);
+    void RecalculateBestHeader(CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+
+    /**
+     * Mark a block as failed, and all its descendants, and move the best header off the failed chain if it was on it,
+     * in one hold of g_block_index_mutex: nobody sees a descendant of a failed block that is not failed, or the best
+     * header on a failed chain. Does not need cs_main: it is how the thread that received a block that fails the
+     * checks marks it. `active_tip` is the fallback of the best header (see RecalculateBestHeader()), and any
+     * tip that is not on the failed chain does: the one that is published will do.
+     */
+    void MarkBlockFailed(CBlockIndex* pindex, const CBlockIndex* active_tip) LOCKS_EXCLUDED(g_block_index_mutex);
+    //! Set invalidity status to all descendants of a block
+    void SetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(g_block_index_mutex);
+    //! Raise m_best_invalid if the block has more work.
+    void RaiseBestInvalid(CBlockIndex* pindex);
 
     //! Returns how many blocks the best header is ahead of the current tip,
     //! or nullopt if the best header does not extend the tip.

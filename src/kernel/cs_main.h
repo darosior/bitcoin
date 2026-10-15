@@ -78,8 +78,8 @@ extern RecursiveMutex cs_main;
  * hold (PruneOneBlockFile()), so that no block is written to a file that is unlinked afterwards.
  *
  * The paths that change the block index without cs_main are the insertion of new entries (which are fully built
- * before they become visible), the storage of a block, the best header, the last notified header and the prune
- * locks.
+ * before they become visible), the storage of a block, the marking of a block as failed, the best header, the last
+ * notified header and the prune locks.
  */
 extern GlobalMutex g_block_index_mutex ACQUIRED_AFTER(::cs_main);
 
