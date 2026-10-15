@@ -47,10 +47,6 @@ BOOST_AUTO_TEST_CASE(block_jobs_post_one_result_with_the_node_id)
     BOOST_CHECK(processed->block_hash == block->GetHash());
     BOOST_CHECK(processed->new_block);
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash()) == block->GetHash());
-
-    jobs.Submit(ValidationJobs::ActivateBestChain{block});
-    BOOST_REQUIRE_EQUAL(results.size(), 2U);
-    BOOST_CHECK(std::holds_alternative<ValidationJobs::ChainActivated>(results.back()));
 }
 
 BOOST_AUTO_TEST_CASE(transaction_and_package_jobs_post_one_result_with_the_node_id)

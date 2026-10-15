@@ -58,16 +58,6 @@ public:
         bool new_block;
     };
 
-    /**
-     * Make sure the active chainstate is on its best chain, for requests that must be served from it. `block` is a
-     * block that was recently accepted, if there is one, which saves reading it back from disk.
-     */
-    struct ActivateBestChain {
-        std::shared_ptr<const CBlock> block;
-    };
-    /** The chain was activated, or the activation failed and was logged. */
-    struct ChainActivated {};
-
     /** Submit a transaction that a peer sent us to the mempool. */
     struct ProcessTransaction {
         NodeId from;
@@ -101,8 +91,8 @@ public:
         PackageMempoolAcceptResult result;
     };
 
-    using Job = std::variant<ProcessStoredBlock, ActivateBestChain, ProcessTransaction, ReconsiderOrphan, ProcessPackage>;
-    using Result = std::variant<StoredBlockProcessed, ChainActivated, TxProcessed, OrphanReconsidered, PackageProcessed>;
+    using Job = std::variant<ProcessStoredBlock, ProcessTransaction, ReconsiderOrphan, ProcessPackage>;
+    using Result = std::variant<StoredBlockProcessed, TxProcessed, OrphanReconsidered, PackageProcessed>;
 
     /** `post_result` is called with the result of every job. */
     ValidationJobs(ChainstateManager& chainman, CTxMemPool& mempool, std::function<void(Result&&)> post_result)
