@@ -2535,6 +2535,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
     // queued, so that either the tip read here is the new one, or the event is processed after the block is kept.
     if (pindex->pprev != m_chainman.PublishedTip()) {
         if (!m_pending_fast_announce.index || m_pending_fast_announce.index->nHeight <= pindex->nHeight) {
+            LogDebug(BCLog::CMPCTBLOCK, "Holding the announcement of block %s until its parent is connected\n", pindex->GetBlockHash().ToString());
             m_pending_fast_announce = {pindex, pblock, std::move(pcmpctblock)};
         }
         return;
