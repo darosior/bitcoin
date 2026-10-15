@@ -5,6 +5,7 @@
 #include <validation_jobs.h>
 
 #include <logging.h>
+#include <random.h>
 #include <txmempool.h>
 #include <util/overloaded.h>
 #include <util/thread.h>
@@ -70,6 +71,9 @@ void ValidationJobs::ThreadMain()
             auto& queue{m_block_jobs.empty() ? m_tx_jobs : m_block_jobs};
             job = std::move(queue.front());
             queue.pop_front();
+        }
+        if (m_test_delay) {
+            std::this_thread::sleep_for(FastRandomContext{}.randrange<std::chrono::milliseconds>(MAX_TEST_DELAY));
         }
         Do(job);
     }
