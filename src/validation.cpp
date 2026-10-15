@@ -3329,6 +3329,7 @@ static void LimitValidationInterfaceQueue(ValidationSignals& signals) LOCKS_EXCL
     if (signals.CallbacksPending() > 10) {
         signals.SyncWithValidationInterfaceQueue();
     }
+    signals.WaitForQueueRoom();
 }
 
 bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<const CBlock> pblock)

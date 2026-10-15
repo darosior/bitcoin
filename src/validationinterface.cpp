@@ -109,6 +109,11 @@ size_t ValidationSignals::CallbacksPending()
     return m_internals->m_task_runner->size();
 }
 
+void ValidationSignals::WaitForQueueRoom()
+{
+    m_internals->Iterate([](CValidationInterface& callbacks) { callbacks.WaitForQueueRoom(); });
+}
+
 void ValidationSignals::RegisterSharedValidationInterface(std::shared_ptr<CValidationInterface> callbacks)
 {
     // Each connection captures the shared_ptr to ensure that each callback is
