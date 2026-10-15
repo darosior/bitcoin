@@ -477,6 +477,10 @@ class P2PInterface(P2PConnection):
         # A count of the number of ping messages we've sent to the node
         self.ping_counter = 1
 
+        # The node this connection is to, set when it is added to the node. It is what sync_with_ping() uses to wait
+        # for the node to have processed what validation did for the messages we sent it.
+        self.node = None
+
         # The network services received from the peer
         self.nServices = 0
 
@@ -716,7 +720,16 @@ class P2PInterface(P2PConnection):
         self.sync_with_ping(timeout=timeout)
 
     def sync_with_ping(self, *, timeout=60):
-        """Ensure ProcessMessages and SendMessages is called on this connection"""
+        """Ensure the node processed what we sent it, with its effects, and that SendMessages is called on this connection
+
+        The pong of the first ping is sent once the node processed the messages before it, which does not mean that
+        validation did what they asked for, and that the node handled what it answered. The second ping makes sure that
+        SendMessages is called after that."""
+        if self.node is not None:
+            self.send_without_ping(msg_ping(nonce=self.ping_counter))
+            self.wait_until(lambda: self.last_message.get("pong") and self.last_message["pong"].nonce == self.ping_counter, timeout=timeout)
+            self.ping_counter += 1
+            self.node.syncwithvalidationinterfacequeue()
         # Sending two pings back-to-back, requires that the node calls
         # `ProcessMessage` twice, and thus ensures `SendMessages` must have
         # been called at least once
