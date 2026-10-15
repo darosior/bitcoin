@@ -18,14 +18,6 @@ void ValidationJobs::Submit(Job job) const
             m_chainman.ActivateNewBlock(job.block);
             m_post_result(StoredBlockProcessed{job.from, job.block->GetHash(), job.new_block});
         },
-        [&](const ActivateBestChain& job) {
-            AssertLockNotHeld(::cs_main);
-            BlockValidationState state;
-            if (!m_chainman.ActiveChainstate().ActivateBestChain(state, job.block)) {
-                LogDebug(BCLog::NET, "failed to activate chain (%s)\n", state.ToString());
-            }
-            m_post_result(ChainActivated{});
-        },
         // The results of the jobs for the mempool are posted with cs_main held: a tip change is notified under it, so
         // that their order in the queue is the order of the changes of the chain and of the decisions of the mempool.
         [&](const ProcessTransaction& job) {
