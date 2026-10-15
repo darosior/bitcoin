@@ -1307,6 +1307,18 @@ public:
      *
      * May not be called in a validationinterface callback.
      *
+     * This is the form for the callers that wait for the outcome (the submitblock and generateblock RPCs, loading
+     * blocks from files, the kernel API, tests): the two halves below are done on the calling thread, in sequence,
+     * and the call returns when they are done. Network processing does not use it, it submits the second half
+     * to validation (see ValidationJobs) and does not wait. The two do not exclude each other: the block that
+     * a caller of this stores is made known to chain selection by this call, and the activation is serialized with
+     * the one of validation by the same locks. These callers skip the jobs of validation on purpose, so that a block
+     * that the user gives is considered as soon as possible: it can get a lower nSequenceId than a block that a peer
+     * sent earlier and that validation has not processed yet, which favours it in a tie between the two.
+     *
+     * A possible future improvement is to give these blocks to validation as jobs that come before the others, and
+     * to wait for them to be done.
+     *
      * @param[in]   block The block we want to process.
      * @param[in]   force_processing Process this block even if unrequested; used for non-network block sources.
      * @param[in]   min_pow_checked  True if proof-of-work anti-DoS checks have
