@@ -1810,8 +1810,15 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             if (pindex->nHeight > nWindowEnd) {
                 // We reached the end of the window.
                 if (vBlocks.size() == 0 && waitingfor != peer.m_id) {
-                    // We aren't able to fetch anything, but we would be if the download window was one larger.
-                    if (nodeStaller) *nodeStaller = waitingfor;
+                    // We aren't able to fetch anything, but we would be if the download window was one larger. Unless
+                    // validation is what holds the window, and not a peer: the last common block moved on while we
+                    // looked (validation processed blocks meanwhile), so that this block is in the window now, or the
+                    // first block after it is stored, and validation has yet to process it and the ones after it.
+                    const CBlockIndex* const first{state->pindexBestKnownBlock->GetAncestor(state->pindexLastCommonBlock->nHeight + 1)};
+                    if (nodeStaller && pindex->nHeight > state->pindexLastCommonBlock->nHeight + int(BLOCK_DOWNLOAD_WINDOW) &&
+                        !WITH_LOCK(g_block_index_mutex, return first->nStatus & BLOCK_HAVE_DATA)) {
+                        *nodeStaller = waitingfor;
+                    }
                 }
                 return;
             }
