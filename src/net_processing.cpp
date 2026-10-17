@@ -1752,9 +1752,16 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 return;
             }
 
-            if (WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_HAVE_DATA) || (active_tip && ChainContains(active_tip, *pindex))) {
-                if (active_tip && pindex->HaveNumChainTxs()) {
+            const bool have_data{WITH_LOCK(g_block_index_mutex, return (pindex->nStatus & BLOCK_HAVE_DATA) != 0)};
+            if (have_data || (active_tip && ChainContains(active_tip, *pindex))) {
+                // A block that is stored, with all the blocks before it, is as good as one that validation has
+                // processed (it has its chain transaction count): the window would otherwise start where
+                // validation is, which lags behind what was stored. The window follows as the last common block
+                // moves on, for the rest of the walk.
+                if (active_tip && (pindex->HaveNumChainTxs() || (have_data && pindex->pprev == state->pindexLastCommonBlock))) {
                     state->pindexLastCommonBlock = pindex;
+                    nWindowEnd = pindex->nHeight + BLOCK_DOWNLOAD_WINDOW;
+                    nMaxHeight = std::min<int>(state->pindexBestKnownBlock->nHeight, nWindowEnd + 1);
                 }
                 continue;
             }
