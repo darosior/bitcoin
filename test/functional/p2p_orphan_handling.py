@@ -250,6 +250,8 @@ class OrphanHandlingTest(BitcoinTestFramework):
 
         # parent_normal can be relayed again even though parent1_witness_stripped was rejected
         self.relay_transaction(peer1, parent_normal["tx"])
+        # The child is the orphan of peer2: once the parent is accepted, the node reconsiders it for peer2.
+        peer2.sync_with_ping()
         assert_equal(set(node.getrawmempool()), set([parent_normal["txid"], child_invalid_witness["txid"]]))
 
     @cleanup
