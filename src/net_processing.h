@@ -186,6 +186,16 @@ public:
     virtual void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) = 0;
 
     /**
+     * Start the thread that validates what the message handler submits, which the message handler does not wait
+     * for. To be called before the message handler starts. Until then, and when it is not called, jobs are done by
+     * the thread that submits them.
+     */
+    virtual void StartValidationThread() = 0;
+
+    /** Stop the thread, which drops the jobs it did not start. To be called after the message handler stopped. */
+    virtual void StopValidationThread() = 0;
+
+    /**
      * Gets the set of service flags which are "desirable" for a given peer.
      *
      * These are the flags which are required for a peer to support for them

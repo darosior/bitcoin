@@ -474,8 +474,8 @@ BOOST_AUTO_TEST_CASE(DoS_bantime)
     peerLogic->FinalizeNode(dummyNode);
 }
 
-// Reconsidering orphans must be interruptible: at most one orphan is accepted
-// or rejected per ProcessMessages() call.
+// Reconsidering orphans must be interruptible: at most one orphan is submitted
+// per ProcessMessages() call.
 // See https://bitcoincore.org/en/2024/07/03/disclose-orphan-dos.
 BOOST_FIXTURE_TEST_CASE(orphan_reconsideration_interruptible, TestChain100Setup)
 {
@@ -513,7 +513,9 @@ BOOST_FIXTURE_TEST_CASE(orphan_reconsideration_interruptible, TestChain100Setup)
         connman.FlushSendBuffer(peer); // Drop messages we sent, the transport is shared with the fake peer.
         BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx))));
         peer.fPauseSend = false;
-        return connman.ProcessMessagesOnce(peer);
+        const bool more_work{connman.ProcessMessagesOnce(peer)};
+        peerman.ProcessPendingEvents();
+        return more_work;
     }};
 
     // Children arrive first and become orphans. Half of them pay no fee and will be rejected.
@@ -525,13 +527,16 @@ BOOST_FIXTURE_TEST_CASE(orphan_reconsideration_interruptible, TestChain100Setup)
     BOOST_CHECK_EQUAL(mempool.size(), 0U);
 
     // Accepting the parent schedules all children for reconsideration.
-    BOOST_CHECK(send_tx(parent));
+    send_tx(parent);
     BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children);
     BOOST_CHECK_EQUAL(mempool.size(), 1U);
 
-    // Each call accepts or rejects exactly one orphan, whether it is valid or not.
+    // Each call submits exactly one orphan, whether it is valid or not, which is accepted or rejected once its result
+    // is processed. The peer is paused until then, and has no more work to do.
     for (int i{1}; i <= num_children; ++i) {
-        BOOST_CHECK(connman.ProcessMessagesOnce(peer));
+        BOOST_CHECK(!connman.ProcessMessagesOnce(peer));
+        BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children - i + 1);
+        peerman.ProcessPendingEvents();
         BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children - i);
     }
     BOOST_CHECK_EQUAL(mempool.size(), 1U + num_children / 2);
