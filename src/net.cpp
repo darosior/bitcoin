@@ -4145,6 +4145,13 @@ std::optional<std::pair<CNetMessage, bool>> CNode::PollMessage()
     return std::make_pair(std::move(msgs.front()), !m_msg_process_queue.empty());
 }
 
+std::optional<NodeClock::time_point> CNode::GetNextMsgReceiveTime()
+{
+    LOCK(m_msg_process_queue_mutex);
+    if (m_msg_process_queue.empty()) return std::nullopt;
+    return m_msg_process_queue.front().m_time;
+}
+
 bool CConnman::NodeFullyConnected(const CNode* pnode)
 {
     return pnode && pnode->fSuccessfullyConnected && !pnode->fDisconnect;

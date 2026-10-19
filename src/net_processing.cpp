@@ -5696,15 +5696,24 @@ void PeerManagerImpl::CheckForStaleTipAndEvictPeers()
 
 void PeerManagerImpl::MaybeSendPing(CNode& node_to, Peer& peer, NodeClock::time_point now)
 {
-    if (m_connman.ShouldRunInactivityChecks(node_to, now) &&
-        peer.m_ping_nonce_sent &&
-        now > peer.m_ping_start.load() + TIMEOUT_INTERVAL)
+    if (m_connman.ShouldRunInactivityChecks(node_to, now))
     {
-        // The ping timeout is using mocktime. To disable the check during
-        // testing, increase -peertimeout.
-        LogDebug(BCLog::NET, "ping timeout: %fs, %s", Ticks<SecondsDouble>(now - peer.m_ping_start.load()), node_to.DisconnectMsg());
-        node_to.fDisconnect = true;
-        return;
+        if (peer.m_ping_nonce_sent) {
+            if (now > peer.m_ping_start.load() + TIMEOUT_INTERVAL) {
+                // The ping timeout is using mocktime. To disable the check during
+                // testing, increase -peertimeout.
+                LogDebug(BCLog::NET, "ping timeout: %fs, %s", Ticks<SecondsDouble>(now - peer.m_ping_start.load()), node_to.DisconnectMsg());
+                node_to.fDisconnect = true;
+                return;
+            }
+        } else if (node_to.fPauseSend) {
+            const auto next_msg_time{node_to.GetNextMsgReceiveTime()};
+            if (next_msg_time && now > *next_msg_time + TIMEOUT_INTERVAL) {
+                LogDebug(BCLog::NET, "inactivity timeout: %fs, %s", Ticks<SecondsDouble>(now - *next_msg_time), node_to.DisconnectMsg());
+                node_to.fDisconnect = true;
+                return;
+            }
+        }
     }
 
     bool pingSend = false;
