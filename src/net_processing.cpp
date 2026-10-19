@@ -3113,7 +3113,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
 
     // Only process one BLOCK item per call, since they're uncommon and can be
     // expensive to process.
-    peer.m_getdata_held = false;
+    const bool was_held{std::exchange(peer.m_getdata_held, false)};
     if (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
         const CInv &inv = *it;
         if (!inv.IsGenBlkMsg() || ProcessGetBlockData(pfrom, peer, inv)) {
@@ -3121,6 +3121,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         } else {
             // The block is not connected yet: the request stays at the front of the queue, and stalls what the peer
             // sent after it, until it is.
+            if (!was_held) LogDebug(BCLog::NET, "Holding the request for block %s until validation is done with it, peer=%d\n", inv.hash.ToString(), pfrom.GetId());
             peer.m_getdata_held = true;
         }
         // else: If the first item on the queue is an unknown type, we erase it
