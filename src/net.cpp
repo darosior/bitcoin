@@ -670,7 +670,6 @@ bool CNode::ReceiveMsgBytes(std::span<const uint8_t> msg_bytes, bool& complete)
     complete = false;
     const auto time{NodeClock::now()};
     LOCK(cs_vRecv);
-    m_last_recv = time;
     nRecvBytes += msg_bytes.size();
     while (msg_bytes.size() > 0) {
         // absorb network data
@@ -703,6 +702,7 @@ bool CNode::ReceiveMsgBytes(std::span<const uint8_t> msg_bytes, bool& complete)
             vRecvMsg.push_back(std::move(msg));
 
             complete = true;
+            m_last_recv = time;
         }
     }
 
