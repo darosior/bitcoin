@@ -2052,6 +2052,12 @@ bool CConnman::InactivityCheck(const CNode& node, NodeClock::time_point now) con
     bool has_received{last_recv > NodeClock::epoch};
     bool has_sent{last_send > NodeClock::epoch};
 
+    if (!node.fSuccessfullyConnected && has_sent
+        && node.m_transport->GetInfo().transport_type == TransportProtocolType::DETECTING) {
+        LogDebug(BCLog::NET, "V2 handshake timeout, %s", node.DisconnectMsg());
+        return true;
+    }
+
     if (!has_received || !has_sent) {
         std::string has_never;
         if (!has_received) has_never += ", never received from peer";
@@ -2082,11 +2088,7 @@ bool CConnman::InactivityCheck(const CNode& node, NodeClock::time_point now) con
     }
 
     if (!node.fSuccessfullyConnected) {
-        if (node.m_transport->GetInfo().transport_type == TransportProtocolType::DETECTING) {
-            LogDebug(BCLog::NET, "V2 handshake timeout, %s", node.DisconnectMsg());
-        } else {
-            LogDebug(BCLog::NET, "version handshake timeout, %s", node.DisconnectMsg());
-        }
+        LogDebug(BCLog::NET, "version handshake timeout, %s", node.DisconnectMsg());
         return true;
     }
 
