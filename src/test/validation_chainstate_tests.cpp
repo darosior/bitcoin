@@ -164,14 +164,11 @@ BOOST_FIXTURE_TEST_CASE(chainstate_update_tip, TestChain100Setup)
 
     // TODO: much of this is inlined from ProcessNewBlock(); just reuse PNB()
     // once it is changed to support multiple chainstates.
-    {
-        LOCK(::cs_main);
-        bool checked = CheckBlock(*pblockone, state, chainparams.GetConsensus());
-        BOOST_CHECK(checked);
-        bool accepted = chainman.AcceptBlock(
-            pblockone, state, &pindex, true, nullptr, &newblock, true);
-        BOOST_CHECK(accepted);
-    }
+    bool checked = CheckBlock(*pblockone, state, chainparams.GetConsensus());
+    BOOST_CHECK(checked);
+    bool accepted = chainman.AcceptBlock(
+        pblockone, state, &pindex, true, nullptr, &newblock, true);
+    BOOST_CHECK(accepted);
 
     // UpdateTip is called here
     bool block_added = background_cs.ActivateBestChain(state, pblockone);
@@ -354,7 +351,7 @@ static std::shared_ptr<const CBlock> ReplaceCoinbase(const ChainstateManager& ch
     return std::make_shared<const CBlock>(block);
 }
 
-//! AcceptNewBlock() followed by ActivateNewBlock() does what ProcessNewBlock() does: the same result, the same
+//! AcceptNewBlock(), BlockStored() and ActivateNewBlock() do what ProcessNewBlock() does: the same result, the same
 //! new_block, and the same BlockChecked notification, which is sent at the same point of the processing.
 BOOST_FIXTURE_TEST_CASE(accept_and_activate_block_like_process_new_block, TestChain100Setup)
 {
@@ -372,6 +369,7 @@ BOOST_FIXTURE_TEST_CASE(accept_and_activate_block_like_process_new_block, TestCh
         BOOST_CHECK(accepted.new_block);
         BOOST_CHECK(recorder.m_checked.empty());
         BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), height);
+        WITH_LOCK(::cs_main, chainman.BlockStored(accepted.pindex));
         BOOST_CHECK(chainman.ActivateNewBlock(valid));
         BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), height + 1);
         BOOST_REQUIRE_EQUAL(recorder.m_checked.size(), 1U);

@@ -3843,8 +3843,12 @@ void ChainstateManager::ReceivedBlockTransactions(CBlockIndex* pindexNew)
             }
             pindex->m_chain_tx_count = prev_tx_sum(*pindex);
             pindex->nSequenceId = nBlockSequenceId++;
-            for (const auto& c : m_chainstates) {
-                c->TryAddBlockIndexCandidate(pindex);
+            // The block, or an ancestor, may have been marked as failed since it was stored, by the thread that
+            // received it or the one that got its parent: it is not a candidate then.
+            if (!WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_FAILED_VALID)) {
+                for (const auto& c : m_chainstates) {
+                    c->TryAddBlockIndexCandidate(pindex);
+                }
             }
             std::pair<std::multimap<CBlockIndex*, CBlockIndex*>::iterator, std::multimap<CBlockIndex*, CBlockIndex*>::iterator> range = m_blockman.m_blocks_unlinked.equal_range(pindex);
             while (range.first != range.second) {
@@ -4335,12 +4339,11 @@ void ChainstateManager::ReportHeadersPresync(int64_t height, int64_t timestamp)
 }
 
 /** Store block on disk. If dbp is non-nullptr, the file is known to already reside on disk */
-bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked)
+bool ChainstateManager::AcceptAndStoreBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked)
 {
     const CBlock& block = *pblock;
 
     if (fNewBlock) *fNewBlock = false;
-    AssertLockHeld(cs_main);
 
     CBlockIndex *pindexDummy = nullptr;
     CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
@@ -4357,14 +4360,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // save them to disk. Skip processing of unrequested blocks as an anti-DoS
     // measure, unless the blocks have more work than the active chain tip, and
     // aren't too far ahead of it, so are likely to be attached soon.
+    //
+    // The tip is the published one, read once. It can be behind the active chain, which makes the anti-DoS
+    // checks a little more permissive.
+    const CBlockIndex* const tip{PublishedTip()};
     bool fAlreadyHave = WITH_LOCK(g_block_index_mutex, return pindex->nStatus) & BLOCK_HAVE_DATA;
-    bool fHasMoreOrSameWork = (ActiveTip() ? pindex->nChainWork >= ActiveTip()->nChainWork : true);
+    bool fHasMoreOrSameWork = (tip ? pindex->nChainWork >= tip->nChainWork : true);
     // Blocks that are too out-of-order needlessly limit the effectiveness of
     // pruning, because pruning will not delete block files that contain any
     // blocks which are too close in height to the tip.  Apply this test
     // regardless of whether pruning is enabled; it should generally be safe to
     // not process unrequested blocks.
-    bool fTooFarAhead{pindex->nHeight > ActiveHeight() + int(MIN_BLOCKS_TO_KEEP)};
+    bool fTooFarAhead{pindex->nHeight > (tip ? tip->nHeight : -1) + int(MIN_BLOCKS_TO_KEEP)};
 
     // TODO: Decouple this function from the block download logic by removing fRequested
     // This requires some new chain data structure to efficiently look up if a
@@ -4391,8 +4398,10 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     if (!CheckBlock(block, state, params.GetConsensus()) ||
         !ContextualCheckBlock(block, state, *this, pindex->pprev)) {
-        if (Assume(state.IsInvalid())) {
-            ActiveChainstate().InvalidBlockFound(pindex, state);
+        if (Assume(state.IsInvalid()) && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+            // The block is not a candidate of chain selection, as validation has not seen it. The tip that is used
+            // for the best header is any that is not on the failed chain.
+            MarkBlockFailed(pindex, tip);
         }
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
@@ -4400,20 +4409,56 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
-    if (!IsInitialBlockDownload() && ActiveTip() == pindex->pprev && m_options.signals) {
+    if (!IsInitialBlockDownload() && tip == pindex->pprev && m_options.signals) {
         m_options.signals->NewPoWValidBlock(pindex, pblock);
     }
 
-    // Write block to history file
-    if (fNewBlock) *fNewBlock = true;
+    // Write block to history file. Another thread can have delivered the same block since we looked: only the one
+    // that stores it tells validation of it.
     try {
-        if (m_blockman.StoreBlock(block, *pindex, DeploymentActiveAt(*pindex, *this, Consensus::DEPLOYMENT_SEGWIT), dbp).IsNull()) {
+        const auto stored{m_blockman.StoreBlock(block, *pindex, DeploymentActiveAt(*pindex, *this, Consensus::DEPLOYMENT_SEGWIT), dbp)};
+        if (stored == BlockManager::StoreResult::MARKED_FAILED) {
+            return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid");
+        }
+        if (stored == BlockManager::StoreResult::FAILED) {
             state.Error(strprintf("%s: Failed to find position to write new block to disk", __func__));
             return false;
         }
-        ReceivedBlockTransactions(pindex);
+        if (fNewBlock) *fNewBlock = stored == BlockManager::StoreResult::STORED;
     } catch (const std::runtime_error& e) {
         return FatalError(GetNotifications(), state, strprintf(_("System error while saving block to disk: %s"), e.what()));
+    }
+
+    return true;
+}
+
+void ChainstateManager::BlockStored(CBlockIndex* pindex)
+{
+    AssertLockHeld(cs_main);
+
+    ReceivedBlockTransactions(pindex);
+    // What validation does with a block it is told of, and that CheckBlockIndex() cannot require of a block until
+    // then, as it cannot tell that a block was told of already.
+    if (!pindex->pprev || pindex->pprev->HaveNumChainTxs()) {
+        // The block has a chain transaction count and a sequence id, and it is a candidate of the chainstates that it
+        // can be one of (see Chainstate::TryAddBlockIndexCandidate()).
+        Assume(pindex->HaveNumChainTxs() && pindex->nSequenceId > SEQ_ID_INIT_FROM_DISK);
+        for (const auto& c : m_chainstates) {
+            const CBlockIndex* const tip{c->m_chain.Tip()};
+            const CBlockIndex* const target{c->TargetBlock()};
+            if (c->m_assumeutxo != Assumeutxo::INVALID && tip && !c->setBlockIndexCandidates.value_comp()(pindex, tip) &&
+                (!target || target->GetAncestor(pindex->nHeight) == pindex) &&
+                !WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_FAILED_VALID)) {
+                Assume(c->setBlockIndexCandidates.contains(pindex));
+            }
+        }
+    } else {
+        // Or it waits for its ancestors in the unlinked blocks, unless its parent is not valid, which makes it invalid
+        // as well.
+        LOCK(g_block_index_mutex);
+        const auto range{m_blockman.m_blocks_unlinked.equal_range(pindex->pprev)};
+        Assume(std::any_of(range.first, range.second, [&](const auto& entry) { return entry.second == pindex; }) ||
+               !pindex->pprev->IsValid(BLOCK_VALID_TREE));
     }
 
     // TODO: FlushStateToDisk() handles flushing of both block and chainstate
@@ -4433,8 +4478,19 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     (void)ActiveChainstate().FlushStateToDisk(flush_state_ignore, FlushStateMode::NONE);
 
     CheckBlockIndex();
+}
 
-    return true;
+bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked)
+{
+    AssertLockNotHeld(cs_main);
+
+    CBlockIndex *pindexDummy = nullptr;
+    CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
+    bool new_block{false};
+    const bool accepted{AcceptAndStoreBlock(pblock, state, &pindex, fRequested, dbp, &new_block, min_pow_checked)};
+    if (fNewBlock) *fNewBlock = new_block;
+    if (accepted && new_block) WITH_LOCK(cs_main, BlockStored(pindex));
+    return accepted;
 }
 
 bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block)
@@ -4444,6 +4500,7 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
     const BlockAcceptResult result{AcceptNewBlock(block, force_processing, min_pow_checked)};
     if (new_block) *new_block = result.new_block;
     if (!result.accepted) return false;
+    if (result.new_block) WITH_LOCK(cs_main, BlockStored(result.pindex));
     return ActivateNewBlock(block);
 }
 
@@ -4456,8 +4513,6 @@ ChainstateManager::BlockAcceptResult ChainstateManager::AcceptNewBlock(const std
         CBlockIndex *pindex = nullptr;
         BlockValidationState state;
 
-        LOCK(cs_main);
-
         // Skipping AcceptBlock() for CheckBlock() failures means that we will never mark a block as invalid if
         // CheckBlock() fails.  This is protective against consensus failure if there are any unknown forms of block
         // malleability that cause CheckBlock() to fail; see e.g. CVE-2012-2459 and
@@ -4466,7 +4521,7 @@ ChainstateManager::BlockAcceptResult ChainstateManager::AcceptNewBlock(const std
         bool ret = CheckBlock(*block, state, GetConsensus());
         if (ret) {
             // Store to disk
-            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, &result.new_block, min_pow_checked);
+            ret = AcceptAndStoreBlock(block, state, &pindex, force_processing, nullptr, &result.new_block, min_pow_checked);
         }
         if (!ret) {
             if (m_options.signals) {
@@ -4475,6 +4530,7 @@ ChainstateManager::BlockAcceptResult ChainstateManager::AcceptNewBlock(const std
             LogError("%s: AcceptBlock FAILED (%s)\n", __func__, state.ToString());
             return result;
         }
+        result.pindex = pindex;
     }
 
     NotifyHeaderTip();
@@ -5073,39 +5129,36 @@ void ChainstateManager::LoadExternalBlockFile(
                 nRewind = nBlockPos + nSize;
                 blkdat.SkipTo(nRewind);
 
-                std::shared_ptr<CBlock> pblock{}; // needs to remain available after the cs_main lock is released to avoid duplicate reads from disk
+                std::shared_ptr<CBlock> pblock{}; // needs to remain available after the block was accepted to avoid duplicate reads from disk
 
-                {
-                    LOCK(cs_main);
-                    // detect out of order blocks, and store them for later
-                    if (hash != params.GetConsensus().hashGenesisBlock && !m_blockman.LookupBlockIndex(header.hashPrevBlock)) {
-                        LogDebug(BCLog::REINDEX, "%s: Out of order block %s, parent %s not known\n", __func__, hash.ToString(),
-                                 header.hashPrevBlock.ToString());
-                        if (dbp && blocks_with_unknown_parent) {
-                            blocks_with_unknown_parent->emplace(header.hashPrevBlock, *dbp);
-                        }
-                        continue;
+                // detect out of order blocks, and store them for later
+                if (hash != params.GetConsensus().hashGenesisBlock && !m_blockman.LookupBlockIndex(header.hashPrevBlock)) {
+                    LogDebug(BCLog::REINDEX, "%s: Out of order block %s, parent %s not known\n", __func__, hash.ToString(),
+                             header.hashPrevBlock.ToString());
+                    if (dbp && blocks_with_unknown_parent) {
+                        blocks_with_unknown_parent->emplace(header.hashPrevBlock, *dbp);
                     }
+                    continue;
+                }
 
-                    // process in case the block isn't known yet
-                    const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
-                    if (!pindex || (WITH_LOCK(g_block_index_mutex, return pindex->nStatus) & BLOCK_HAVE_DATA) == 0) {
-                        // This block can be processed immediately; rewind to its start, read and deserialize it.
-                        blkdat.SetPos(nBlockPos);
-                        pblock = std::make_shared<CBlock>();
-                        blkdat >> TX_WITH_WITNESS(*pblock);
-                        nRewind = blkdat.GetPos();
+                // process in case the block isn't known yet
+                const CBlockIndex* pindex = m_blockman.LookupBlockIndex(hash);
+                if (!pindex || (WITH_LOCK(g_block_index_mutex, return pindex->nStatus) & BLOCK_HAVE_DATA) == 0) {
+                    // This block can be processed immediately; rewind to its start, read and deserialize it.
+                    blkdat.SetPos(nBlockPos);
+                    pblock = std::make_shared<CBlock>();
+                    blkdat >> TX_WITH_WITNESS(*pblock);
+                    nRewind = blkdat.GetPos();
 
-                        BlockValidationState state;
-                        if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
-                            nLoaded++;
-                        }
-                        if (state.IsError()) {
-                            break;
-                        }
-                    } else if (hash != params.GetConsensus().hashGenesisBlock && pindex->nHeight % 1000 == 0) {
-                        LogDebug(BCLog::REINDEX, "Block Import: already had block %s at height %d\n", hash.ToString(), pindex->nHeight);
+                    BlockValidationState state;
+                    if (AcceptBlock(pblock, state, nullptr, true, dbp, nullptr, true)) {
+                        nLoaded++;
                     }
+                    if (state.IsError()) {
+                        break;
+                    }
+                } else if (hash != params.GetConsensus().hashGenesisBlock && pindex->nHeight % 1000 == 0) {
+                    LogDebug(BCLog::REINDEX, "Block Import: already had block %s at height %d\n", hash.ToString(), pindex->nHeight);
                 }
 
                 // Activate the genesis block so normal node progress can continue
@@ -5153,7 +5206,6 @@ void ChainstateManager::LoadExternalBlockFile(
                         if (m_blockman.ReadBlock(*pblockrecursive, it->second, {})) {
                             const auto& block_hash{pblockrecursive->GetHash()};
                             LogDebug(BCLog::REINDEX, "%s: Processing out of order child %s of %s", __func__, block_hash.ToString(), head.ToString());
-                            LOCK(cs_main);
                             BlockValidationState dummy;
                             if (AcceptBlock(pblockrecursive, dummy, nullptr, true, &it->second, nullptr, true)) {
                                 nLoaded++;
@@ -5262,11 +5314,31 @@ void ChainstateManager::CheckBlockIndex() const
     const CBlockIndex* pindexFirstNotChainValid = nullptr;        // Oldest ancestor of pindex which does not have BLOCK_VALID_CHAIN (regardless of being valid or not), since assumeutxo snapshot if used.
     const CBlockIndex* pindexFirstNotScriptsValid = nullptr;      // Oldest ancestor of pindex which does not have BLOCK_VALID_SCRIPTS (regardless of being valid or not), since assumeutxo snapshot if used.
 
+    // A block is stored by whoever received it, and validation is told of it after that (see BlockStored()), so the
+    // check can run in between. Such a block has its data and its transactions, but no chain transaction count,
+    // sequence id or place in the candidates, and it is not in m_blocks_unlinked: that is how it is told apart, as a
+    // block that validation was told of has a count or is unlinked, unless its parent is not valid (it is then invalid
+    // as well, and the checks require nothing more of it than of a block validation was not told of). What it
+    // still has to be is checked below. It is treated as a block whose data never arrived, and what is required of
+    // the blocks that build on it is relaxed. BlockStored() checks what this cannot: what validation does with it.
+    //
+    // A pruned block that is stored again has its chain transaction count since it was processed, and is not told
+    // apart. Neither is the snapshot block, which has a count from the metadata of the snapshot whenever it is
+    // stored: see the candidates of the historical chainstate below.
+    const CBlockIndex* pindexFirstUnprocessed = nullptr;
+    auto is_unlinked = [&](const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex) {
+        const auto range{m_blockman.m_blocks_unlinked.equal_range(index->pprev)};
+        return std::any_of(range.first, range.second, [&](const auto& entry) { return entry.second == index; });
+    };
+    auto is_unprocessed = [&](const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, g_block_index_mutex) {
+        return (index->nStatus & BLOCK_HAVE_DATA) && !index->HaveNumChainTxs() && !is_unlinked(index);
+    };
+
     // After checking an assumeutxo snapshot block, reset pindexFirst pointers
     // to earlier blocks that have not been downloaded or validated yet, so
     // checks for later blocks can assume the earlier blocks were validated and
     // be stricter, testing for more requirements.
-    const CBlockIndex *snap_first_missing{}, *snap_first_notx{}, *snap_first_notv{}, *snap_first_nocv{}, *snap_first_nosv{};
+    const CBlockIndex *snap_first_missing{}, *snap_first_notx{}, *snap_first_notv{}, *snap_first_nocv{}, *snap_first_nosv{}, *snap_first_unproc{};
     auto snap_update_firsts = [&] {
         if (pindex == snap_base) {
             std::swap(snap_first_missing, pindexFirstMissing);
@@ -5274,21 +5346,23 @@ void ChainstateManager::CheckBlockIndex() const
             std::swap(snap_first_notv, pindexFirstNotTransactionsValid);
             std::swap(snap_first_nocv, pindexFirstNotChainValid);
             std::swap(snap_first_nosv, pindexFirstNotScriptsValid);
+            std::swap(snap_first_unproc, pindexFirstUnprocessed);
         }
     };
 
     while (pindex != nullptr) {
         nNodes++;
         if (pindexFirstInvalid == nullptr && pindex->nStatus & BLOCK_FAILED_VALID) pindexFirstInvalid = pindex;
-        if (pindexFirstMissing == nullptr && !(pindex->nStatus & BLOCK_HAVE_DATA)) {
+        if (pindexFirstUnprocessed == nullptr && is_unprocessed(pindex)) pindexFirstUnprocessed = pindex;
+        if (pindexFirstMissing == nullptr && (!(pindex->nStatus & BLOCK_HAVE_DATA) || pindex == pindexFirstUnprocessed)) {
             pindexFirstMissing = pindex;
         }
-        if (pindexFirstNeverProcessed == nullptr && pindex->nTx == 0) pindexFirstNeverProcessed = pindex;
+        if (pindexFirstNeverProcessed == nullptr && (pindex->nTx == 0 || pindex == pindexFirstUnprocessed)) pindexFirstNeverProcessed = pindex;
         if (pindex->pprev != nullptr && pindexFirstNotTreeValid == nullptr && (pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE) pindexFirstNotTreeValid = pindex;
 
         if (pindex->pprev != nullptr) {
             if (pindexFirstNotTransactionsValid == nullptr &&
-                    (pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS) {
+                    ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS || pindex == pindexFirstUnprocessed)) {
                 pindexFirstNotTransactionsValid = pindex;
             }
 
@@ -5327,6 +5401,14 @@ void ChainstateManager::CheckBlockIndex() const
             if (pindex->nStatus & BLOCK_HAVE_DATA) assert(pindex->nTx > 0);
         }
         if (pindex->nStatus & BLOCK_HAVE_UNDO) assert(pindex->nStatus & BLOCK_HAVE_DATA);
+        if (is_unprocessed(pindex)) {
+            // A block that validation was not told of yet was stored entirely (its transaction count is checked
+            // above), and validation did nothing more with it: it was never connected, which writes the undo data
+            // and raises the validity. That it has no sequence id and is no candidate is checked below.
+            assert((pindex->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_TRANSACTIONS);
+            assert(!pindex->GetBlockPos().IsNull());
+            assert(!(pindex->nStatus & BLOCK_HAVE_UNDO));
+        }
         if (snap_base && snap_base->GetAncestor(pindex->nHeight) == pindex) {
             // Assumed-valid blocks should connect to the main chain.
             assert((pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TREE);
@@ -5356,8 +5438,9 @@ void ChainstateManager::CheckBlockIndex() const
             // If no previous block, nTx and m_chain_tx_count must be the same.
             assert(pindex->m_chain_tx_count == pindex->nTx);
         } else if (pindex->pprev->m_chain_tx_count > 0 && pindex->nTx > 0) {
-            // If previous m_chain_tx_count is set and number of transactions in block is known, sum must be set.
-            assert(pindex->m_chain_tx_count == pindex->nTx + pindex->pprev->m_chain_tx_count);
+            // If previous m_chain_tx_count is set and number of transactions in block is known, sum must be set,
+            // unless validation has not processed the block yet.
+            if (!is_unprocessed(pindex)) assert(pindex->m_chain_tx_count == pindex->nTx + pindex->pprev->m_chain_tx_count);
         } else {
             // Otherwise m_chain_tx_count should only be set if this is a snapshot
             // block, and must be set if it is.
@@ -5411,7 +5494,13 @@ void ChainstateManager::CheckBlockIndex() const
                         // setBlockIndexCandidates. Otherwise, pindex only
                         // needs to be added if it is an ancestor of the target
                         // block.
-                        if (!c_target_block || c_target_block->GetAncestor(pindex->nHeight) == pindex) {
+                        //
+                        // The snapshot block is the exception, for a historical chainstate: it can be stored
+                        // before validation is told of it, which cannot be told apart (see above) but by its
+                        // sequence id, which it has from then on, or if the block index was loaded from disk.
+                        const bool untold_snapshot_block{pindex == c_target_block && pindex == snap_base &&
+                                                         pindex->nSequenceId <= SEQ_ID_INIT_FROM_DISK};
+                        if ((!c_target_block || c_target_block->GetAncestor(pindex->nHeight) == pindex) && !untold_snapshot_block) {
                             assert(c.setBlockIndexCandidates.contains(pindex));
                         }
                     }
@@ -5433,8 +5522,9 @@ void ChainstateManager::CheckBlockIndex() const
                 foundInUnlinked = true;
             }
         }
-        if (pindex->pprev && (pindex->nStatus & BLOCK_HAVE_DATA) && pindexFirstNeverProcessed != nullptr && pindexFirstInvalid == nullptr) {
-            // If this block has block data available, some parent was never received, and has no invalid parents, it must be in m_blocks_unlinked.
+        if (pindex->pprev && (pindex->nStatus & BLOCK_HAVE_DATA) && pindexFirstNeverProcessed != nullptr && pindexFirstInvalid == nullptr && pindexFirstUnprocessed == nullptr) {
+            // If this block has block data available, some parent was never received, and has no invalid parents, it must be in m_blocks_unlinked,
+            // unless it or a parent is waiting for validation to process it.
             assert(foundInUnlinked);
         }
         if (!(pindex->nStatus & BLOCK_HAVE_DATA)) assert(!foundInUnlinked); // Can't be in m_blocks_unlinked if we don't HAVE_DATA
@@ -5488,6 +5578,7 @@ void ChainstateManager::CheckBlockIndex() const
             if (pindex == pindexFirstInvalid) pindexFirstInvalid = nullptr;
             if (pindex == pindexFirstMissing) pindexFirstMissing = nullptr;
             if (pindex == pindexFirstNeverProcessed) pindexFirstNeverProcessed = nullptr;
+            if (pindex == pindexFirstUnprocessed) pindexFirstUnprocessed = nullptr;
             if (pindex == pindexFirstNotTreeValid) pindexFirstNotTreeValid = nullptr;
             if (pindex == pindexFirstNotTransactionsValid) pindexFirstNotTransactionsValid = nullptr;
             if (pindex == pindexFirstNotChainValid) pindexFirstNotChainValid = nullptr;

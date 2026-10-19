@@ -39,7 +39,7 @@ BOOST_AUTO_TEST_CASE(block_jobs_post_one_result_with_the_node_id)
     BOOST_REQUIRE(accepted.new_block);
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash() == block->hashPrevBlock));
 
-    jobs.Submit(ValidationJobs::ProcessStoredBlock{PEER, block, accepted.new_block});
+    jobs.Submit(ValidationJobs::ProcessStoredBlock{PEER, block, accepted.pindex, accepted.new_block});
     BOOST_REQUIRE_EQUAL(results.size(), 1U);
     const auto* processed{std::get_if<ValidationJobs::StoredBlockProcessed>(&results.back())};
     BOOST_REQUIRE(processed);

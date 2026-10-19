@@ -40,12 +40,15 @@ class ValidationJobs
 {
 public:
     /**
-     * Activate the best chain after a block was accepted and stored by whoever received it (see
-     * ChainstateManager::AcceptNewBlock()): the second half of ChainstateManager::ProcessNewBlock().
+     * Validation's half of the processing of a block that was accepted and stored by whoever received it (see
+     * ChainstateManager::AcceptNewBlock()): if the block is new, its chain selection bookkeeping, then the activation of
+     * the best chain (the second half of ChainstateManager::ProcessNewBlock()).
      */
     struct ProcessStoredBlock {
         NodeId from;
         std::shared_ptr<const CBlock> block;
+        //! The entry of the block.
+        CBlockIndex* pindex;
         //! Whether the block was first received, and stored, by whoever received it.
         bool new_block;
     };

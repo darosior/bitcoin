@@ -16,6 +16,7 @@ void ValidationJobs::Submit(Job job) const
     std::visit(util::Overloaded{
         [&](const ProcessStoredBlock& job) {
             AssertLockNotHeld(::cs_main);
+            if (job.new_block) WITH_LOCK(::cs_main, m_chainman.BlockStored(job.pindex));
             m_chainman.ActivateNewBlock(job.block);
             m_post_result(StoredBlockProcessed{job.from, job.block->GetHash(), job.new_block});
         },

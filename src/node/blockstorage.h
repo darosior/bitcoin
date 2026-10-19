@@ -495,12 +495,18 @@ public:
      * Write a block of the entry `index`, or if `dbp` is set (during a reindex or the import of a block file) take
      * its position as the one of the block, which must be on disk already, and record it in the entry (see
      * RecordBlockData()). All of it is one hold of g_block_index_mutex: nobody sees a block that is written but not
-     * recorded, a flush captures either all of it or none, and a second delivery of the block sees the data.
+     * recorded, and a flush captures either all of it or none. If the entry has the data already, because the same
+     * block was delivered by another thread in the meantime, nothing is done: of the callers that store a block,
+     * only one stores it.
      * Can be called without any other lock.
-     *
-     * @returns the position of the block, or an empty FlatFilePos if it could not be written
      */
-    FlatFilePos StoreBlock(const CBlock& block, CBlockIndex& index, bool opt_witness, const FlatFilePos* dbp) LOCKS_EXCLUDED(g_block_index_mutex);
+    enum class StoreResult {
+        STORED,         //!< The block was written, and recorded in its entry.
+        ALREADY_STORED, //!< The entry had the data of the block.
+        MARKED_FAILED,  //!< The entry was marked as failed in the meantime, which keeps its validity from being raised.
+        FAILED,         //!< The block could not be written.
+    };
+    StoreResult StoreBlock(const CBlock& block, CBlockIndex& index, bool opt_witness, const FlatFilePos* dbp) LOCKS_EXCLUDED(g_block_index_mutex);
 
     /** Whether running in -prune mode. */
     [[nodiscard]] bool IsPruneMode() const { return m_prune_mode; }
