@@ -6475,15 +6475,24 @@ bool PeerManagerImpl::SendMessages(CNode& node)
         // instead. Once the last new block was received, give the peer a grace period to answer the ping.
         if (state.vBlocksInFlight.empty() &&
             now > NodeSeconds{node.m_last_block_time.load()} + POST_BLOCK_PONG_GRACE &&
-            m_connman.ShouldRunInactivityChecks(node, now) &&
-            peer.m_ping_nonce_sent &&
-            now > peer.m_ping_start.load() + TIMEOUT_INTERVAL)
+            m_connman.ShouldRunInactivityChecks(node, now))
         {
-            // The ping timeout is using mocktime. To disable the check during
-            // testing, increase -peertimeout.
-            LogDebug(BCLog::NET, "ping timeout: %fs, %s", Ticks<SecondsDouble>(now - peer.m_ping_start.load()), node.DisconnectMsg());
-            node.fDisconnect = true;
-            return true;
+            if (peer.m_ping_nonce_sent) {
+                if (now > peer.m_ping_start.load() + TIMEOUT_INTERVAL) {
+                    // The ping timeout is using mocktime. To disable the check during
+                    // testing, increase -peertimeout.
+                    LogDebug(BCLog::NET, "ping timeout: %fs, %s", Ticks<SecondsDouble>(now - peer.m_ping_start.load()), node.DisconnectMsg());
+                    node.fDisconnect = true;
+                    return true;
+                }
+            } else if (node.fPauseSend) {
+                const auto next_msg_time{node.GetNextMsgReceiveTime()};
+                if (next_msg_time && now > *next_msg_time + TIMEOUT_INTERVAL) {
+                    LogDebug(BCLog::NET, "inactivity timeout: %fs, %s", Ticks<SecondsDouble>(now - *next_msg_time), node.DisconnectMsg());
+                    node.fDisconnect = true;
+                    return true;
+                }
+            }
         }
         // Check for headers sync timeouts
         if (state.fSyncStarted && peer.m_headers_sync_timeout < std::chrono::microseconds::max()) {
