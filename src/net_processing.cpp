@@ -398,6 +398,9 @@ struct Peer {
     /** Work queue of items requested by this peer **/
     std::deque<CInv> m_getdata_requests GUARDED_BY(m_getdata_requests_mutex);
 
+    /** Whether the first of m_getdata_requests, a block, waits for validation to connect or reject it. */
+    bool m_getdata_held GUARDED_BY(m_getdata_requests_mutex){false};
+
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
 
@@ -1111,7 +1114,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, !tx_relay.m_tx_inventory_mutex);
 
     void ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
     /** Process a new block. Perform any post-processing housekeeping */
@@ -1217,8 +1220,9 @@ private:
      */
     bool BlockRequestAllowed(const CBlockIndex& block_index, const CBlockIndex* tip);
     bool AlreadyHaveBlock(const uint256& block_hash);
-    void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
-        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex, !m_validation_events_mutex, !m_tx_download_mutex, !m_peer_mutex, !m_net_state_mutex);
+    /** Serve a request for a block. Returns false if the request has to wait for validation, and be handled again. */
+    bool ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
 
     /**
      * Validation logic for compact filters request handling.
@@ -2740,14 +2744,14 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
     }
 }
 
-void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
+bool PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
 {
     // First perform the stateless checks:
     // A filtered-block can only ever be requested if we offer NODE_BLOOM
     if (inv.IsMsgFilteredBlk() && !(peer.m_our_services & NODE_BLOOM)) {
         LogDebug(BCLog::NET, "filtered block request received when NODE_BLOOM service disabled, %s", pfrom.DisconnectMsg());
         pfrom.fDisconnect = true;
-        return;
+        return true;
     }
 
     std::shared_ptr<const CBlock> a_recent_block;
@@ -2758,28 +2762,29 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         a_recent_compact_block = m_most_recent_compact_block;
     }
 
-    bool need_activate_chain = false;
-    {
+    // A block that validation is not done with is served once it is: BIP 152 says "nodes SHOULD delay responding to
+    // GETDATA requests for the block until validation has completed, stalling all message processing for the
+    // associated peer", which is what upstream does by activating the best chain here. We do not wait for validation:
+    // the request stays in the queue of the peer, and is handled again when the events of validation are processed.
+    // Once validation is done, the block is served if it was connected, and the request is dropped if not, as any
+    // request for a block that is not valid.
+    //
+    // A block that a peer sent is accepted and given to validation by this thread, in the call that received it, and
+    // the job is done as it is submitted, so a request that this thread handles never finds one that validation is not
+    // done with. A block that we did not get from a peer (submitblock, generateblock, the mining interface) is
+    // validated by the thread that submitted it. The one that a peer can ask for before validation is done with it is
+    // the one that we announced, which is in the cache of the most recent block: it is announced only if it builds on
+    // the tip, and it is announced before it is written (see NewPoWValidBlock()), so it may not even be stored yet.
+    // While its parent is still the tip and it is neither connected nor failed, validation has not finished with it: it
+    // ends by connecting it, by failing it, or by connecting another block on the tip, and each of those is an event.
+    //
+    // A request for any other block is handled at once.
+    if (a_recent_block && a_recent_block->GetHash() == inv.hash) {
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
-        if (pindex) {
-            LOCK(g_block_index_mutex);
-            if (pindex->HaveNumChainTxs() && !pindex->IsValid(BLOCK_VALID_SCRIPTS) &&
-                    pindex->IsValid(BLOCK_VALID_TREE)) {
-                // If we have the block and all of its parents, but have not yet validated it,
-                // we might be in the middle of connecting it (ie in the unlock of cs_main
-                // before ActivateBestChain but after AcceptBlock).
-                // In this case, we need to run ActivateBestChain prior to checking the relay
-                // conditions below.
-                need_activate_chain = true;
-            }
+        if (pindex && pindex->pprev == m_chainman.PublishedTip() &&
+            !WITH_LOCK(g_block_index_mutex, return pindex->nStatus & BLOCK_FAILED_VALID)) {
+            return false;
         }
-    }
-    if (need_activate_chain) {
-        BlockValidationState state;
-        if (!m_chainman.ActiveChainstate().ActivateBestChain(state, a_recent_block)) {
-            LogDebug(BCLog::NET, "failed to activate chain (%s)\n", state.ToString());
-        }
-        ProcessPendingEvents();
     }
 
     const CBlockIndex* pindex{nullptr};
@@ -2790,11 +2795,11 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         tip = m_chainman.PublishedTip();
         pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
         if (!pindex) {
-            return;
+            return true;
         }
         if (!BlockRequestAllowed(*pindex, tip)) {
             LogDebug(BCLog::NET, "%s: ignoring request from peer=%i for old block that isn't in the main chain\n", __func__, pfrom.GetId());
-            return;
+            return true;
         }
         // disconnect node in case we have reached the outbound limit for serving historical blocks
         const CBlockIndex* const best_header{WITH_LOCK(g_block_index_mutex, return m_chainman.m_best_header)};
@@ -2804,7 +2809,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         ) {
             LogDebug(BCLog::NET, "historical block serving limit reached, %s", pfrom.DisconnectMsg());
             pfrom.fDisconnect = true;
-            return;
+            return true;
         }
         // Avoid leaking prune-height by never sending blocks below the NODE_NETWORK_LIMITED threshold
         if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && (
@@ -2813,14 +2818,14 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             LogDebug(BCLog::NET, "Ignore block request below NODE_NETWORK_LIMITED threshold, %s", pfrom.DisconnectMsg());
             //disconnect node and prevent it from stalling (would otherwise wait for the missing block)
             pfrom.fDisconnect = true;
-            return;
+            return true;
         }
         // Pruned nodes may have deleted the block, so check whether
         // it's available before trying to send.
         {
             LOCK(g_block_index_mutex);
             if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
-                return;
+                return true;
             }
             block_pos = pindex->GetBlockPos();
         }
@@ -2842,7 +2847,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                 LogError("Cannot load block from disk, %s", pfrom.DisconnectMsg());
             }
             pfrom.fDisconnect = true;
-            return;
+            return true;
         }
         // Don't set pblock as we've sent the block
     } else {
@@ -2855,7 +2860,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                 LogError("Cannot load block from disk, %s", pfrom.DisconnectMsg());
             }
             pfrom.fDisconnect = true;
-            return;
+            return true;
         }
         pblock = pblockRead;
     }
@@ -2918,6 +2923,8 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             peer.m_continuation_block.SetNull();
         }
     }
+
+    return true;
 }
 
 CTransactionRef PeerManagerImpl::FindTxForGetData(const Peer::TxRelay& tx_relay, const GenTxid& gtxid)
@@ -2982,10 +2989,15 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
 
     // Only process one BLOCK item per call, since they're uncommon and can be
     // expensive to process.
+    peer.m_getdata_held = false;
     if (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
-        const CInv &inv = *it++;
-        if (inv.IsGenBlkMsg()) {
-            ProcessGetBlockData(pfrom, peer, inv);
+        const CInv &inv = *it;
+        if (!inv.IsGenBlkMsg() || ProcessGetBlockData(pfrom, peer, inv)) {
+            ++it;
+        } else {
+            // The block is not connected yet: the request stays at the front of the queue, and stalls what the peer
+            // sent after it, until it is.
+            peer.m_getdata_held = true;
         }
         // else: If the first item on the queue is an unknown type, we erase it
         // and continue processing the queue on the next call.
@@ -4809,26 +4821,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        // We might have announced the currently-being-connected tip using a
-        // compact block, which resulted in the peer sending a getblocks
-        // request, which we would otherwise respond to without the new block.
-        // To avoid this situation we simply verify that we are on our best
-        // known chain now. This is super overkill, but we handle it better
-        // for getheaders requests, and there are no known nodes which support
-        // compact blocks but still use getblocks to request blocks.
-        {
-            std::shared_ptr<const CBlock> a_recent_block;
-            {
-                LOCK(m_most_recent_block_mutex);
-                a_recent_block = m_most_recent_block;
-            }
-            BlockValidationState state;
-            if (!m_chainman.ActiveChainstate().ActivateBestChain(state, a_recent_block)) {
-                LogDebug(BCLog::NET, "failed to activate chain (%s)\n", state.ToString());
-            }
-            ProcessPendingEvents();
-        }
-
+        // We might have announced the currently-being-connected tip using a compact block, which resulted in the peer
+        // sending a getblocks request, which is answered without the new block, from the published tip. We do not
+        // wait for validation to catch up: the peer learns of the block as any other peer does. There are no known
+        // nodes which support compact blocks but still use getblocks to request blocks.
         const CBlockIndex* const tip{m_chainman.PublishedTip()};
 
         // Find the last block the caller has in the main chain
@@ -5761,7 +5757,9 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     // and prevents m_getdata_requests to grow unbounded
     {
         LOCK(peer.m_getdata_requests_mutex);
-        if (!peer.m_getdata_requests.empty()) return true;
+        // There is no more work to do if the first request waits for validation: the events of validation, which
+        // wake up the message handler, make it handle the request again.
+        if (!peer.m_getdata_requests.empty()) return !peer.m_getdata_held;
     }
 
     // Don't bother if send buffer is too full to respond anyway
@@ -5794,7 +5792,7 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
         if (interruptMsgProc) return false;
         {
             LOCK(peer.m_getdata_requests_mutex);
-            if (!peer.m_getdata_requests.empty()) fMoreWork = true;
+            if (!peer.m_getdata_requests.empty() && !peer.m_getdata_held) fMoreWork = true;
         }
         // Does this peer have an orphan ready to reconsider?
         // (Note: we may have provided a parent for an orphan provided
