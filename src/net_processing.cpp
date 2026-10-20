@@ -1059,6 +1059,12 @@ private:
     };
     PendingFastAnnounce m_pending_fast_announce GUARDED_BY(m_net_state_mutex);
 
+    /**
+     * The blocks that were given to validation as a job (ValidationJobs::ProcessStoredBlock), once per job, until the
+     * result of the job is processed: until then a request for one of them waits (see ProcessGetBlockData()).
+     */
+    std::multiset<uint256> m_blocks_in_validation GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+
     /** Announce a block that builds on the tip to the peers that want it, using BIP 152 high-bandwidth mode. */
     void AnnounceCompactBlock(const CBlockIndex* pindex, const std::shared_ptr<const CBlock>& block, std::shared_ptr<const CBlockHeaderAndShortTxIDs> compact_block)
         EXCLUSIVE_LOCKS_REQUIRED(m_net_state_mutex, !m_most_recent_block_mutex);
@@ -2829,16 +2835,16 @@ bool PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     // Once validation is done, the block is served if it was connected, and the request is dropped if not, as any
     // request for a block that is not valid.
     //
-    // A block that a peer sent is accepted and given to validation by this thread, in the call that received it, and
-    // the job is done as it is submitted, so a request that this thread handles never finds one that validation is not
-    // done with. A block that we did not get from a peer (submitblock, generateblock, the mining interface) is
-    // validated by the thread that submitted it. The one that a peer can ask for before validation is done with it is
-    // the one that we announced, which is in the cache of the most recent block: it is announced only if it builds on
-    // the tip, and it is announced before it is written (see NewPoWValidBlock()), so it may not even be stored yet.
-    // While its parent is still the tip and it is neither connected nor failed, validation has not finished with it: it
-    // ends by connecting it, by failing it, or by connecting another block on the tip, and each of those is an event.
+    // Validation tells when it is done with a block that a peer sent: the result of its job comes. A block that we
+    // did not get from a peer (submitblock, generateblock, the mining interface) has no job, and is validated by the
+    // thread that submitted it. The one that a peer can ask for before validation is done with it is the one that we
+    // announced, which is in the cache of the most recent block: it is announced only if it builds on the tip, and
+    // it is announced before it is written (see NewPoWValidBlock()), so it may not even be stored yet. While its
+    // parent is still the tip and it is neither connected nor failed, validation has not finished with it: it ends by
+    // connecting it, by failing it, or by connecting another block on the tip, and each of those is an event.
     //
     // A request for any other block is handled at once.
+    if (m_blocks_in_validation.contains(inv.hash)) return false;
     if (a_recent_block && a_recent_block->GetHash() == inv.hash) {
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
         if (pindex && pindex->pprev == m_chainman.PublishedTip() &&
@@ -4050,6 +4056,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, Peer& peer, const std::shared_pt
         return;
     }
     peer.m_job_in_flight = true;
+    m_blocks_in_validation.insert(block->GetHash());
     m_validation.Submit(ValidationJobs::ProcessStoredBlock{node.GetId(), block, accepted.pindex, accepted.new_block});
     ProcessPendingEvents();
 }
@@ -4058,6 +4065,9 @@ void PeerManagerImpl::OnStoredBlockProcessed(const ValidationJobs::StoredBlockPr
 {
     // The peer may be gone by now.
     if (const PeerRef peer{GetPeerRef(processed.from)}) peer->m_job_in_flight = false;
+    if (const auto it{m_blocks_in_validation.find(processed.block_hash)}; it != m_blocks_in_validation.end()) {
+        m_blocks_in_validation.erase(it);
+    }
     OnBlockProcessed(processed.from, processed.block_hash, processed.new_block);
 }
 
