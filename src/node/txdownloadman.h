@@ -127,7 +127,7 @@ public:
     /** Creates a new PeerInfo. Saves the connection info to calculate tx announcement delays later. */
     void ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info);
 
-    /** Deletes all txrequest announcements and orphans for a given peer. */
+    /** Deletes all txrequest announcements, orphans and pending validations for a given peer. */
     void DisconnectedPeer(NodeId nodeid);
 
     /** Consider adding this tx hash to txrequest. Should be called whenever a new inv has been received.
@@ -154,6 +154,17 @@ public:
      * Return a bool indicating whether this tx should be validated. If false, optionally, a
      * PackageToValidate. */
     std::pair<bool, std::optional<PackageToValidate>> ReceivedTx(NodeId nodeid, const CTransactionRef& ptx);
+
+    /** Note that a transaction that ReceivedTx() said to validate waits for the mempool, or is being validated,
+     * and that the result was not handled yet. Until ValidationDone() (or until the peer is gone), the copies that
+     * other peers send are dropped by ReceivedTx(), and the transaction is not requested again, though the
+     * announcements of it are kept: if it turns out to be an orphan, the peers that announced it are the ones to ask
+     * for its parents. */
+    void ValidationPending(NodeId nodeid, const Wtxid& wtxid);
+
+    /** The result of the validation of a transaction that was pending was handled (see MempoolAcceptedTx() and
+     * MempoolRejectedTx()), or it will not be validated. Does nothing if it was not pending. */
+    void ValidationDone(const Wtxid& wtxid);
 
     /** Whether there are any orphans to reconsider for this peer. */
     bool HaveMoreWork(NodeId nodeid) const;

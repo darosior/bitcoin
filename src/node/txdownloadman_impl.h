@@ -15,6 +15,7 @@
 #include <policy/packages.h>
 #include <random.h>
 #include <txrequest.h>
+#include <util/hasher.h>
 
 class CTxMemPool;
 namespace node {
@@ -151,6 +152,9 @@ public:
     /** Number of wtxid relay peers we have in m_peer_info. */
     uint32_t m_num_wtxid_peers{0};
 
+    /** The transactions that wait for validation, and the peers that sent them. */
+    std::unordered_map<Wtxid, NodeId, SaltedWtxidHasher> m_validation_pending;
+
     void ActiveTipChange();
     void BlockConnected(const std::shared_ptr<const CBlock>& pblock);
     void BlockDisconnected();
@@ -189,6 +193,8 @@ public:
 
     std::pair<bool, std::optional<PackageToValidate>> ReceivedTx(NodeId nodeid, const CTransactionRef& ptx);
 
+    void ValidationPending(NodeId nodeid, const Wtxid& wtxid);
+    void ValidationDone(const Wtxid& wtxid);
     bool HaveMoreWork(NodeId nodeid);
     CTransactionRef GetTxToReconsider(NodeId nodeid);
     std::vector<CTransactionRef> GetTxsToReconsider(NodeId nodeid);
