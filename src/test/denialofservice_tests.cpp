@@ -513,7 +513,9 @@ BOOST_FIXTURE_TEST_CASE(orphan_reconsideration_interruptible, TestChain100Setup)
         connman.FlushSendBuffer(peer); // Drop messages we sent, the transport is shared with the fake peer.
         BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx))));
         peer.fPauseSend = false;
-        return connman.ProcessMessagesOnce(peer);
+        const bool more_work{connman.ProcessMessagesOnce(peer)};
+        peerman.ProcessPendingEvents();
+        return more_work;
     }};
 
     // Children arrive first and become orphans. Half of them pay no fee and will be rejected.
@@ -525,13 +527,17 @@ BOOST_FIXTURE_TEST_CASE(orphan_reconsideration_interruptible, TestChain100Setup)
     BOOST_CHECK_EQUAL(mempool.size(), 0U);
 
     // Accepting the parent schedules all children for reconsideration.
-    BOOST_CHECK(send_tx(parent));
+    send_tx(parent);
     BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children);
     BOOST_CHECK_EQUAL(mempool.size(), 1U);
 
-    // Each call accepts or rejects exactly one orphan, whether it is valid or not.
+    // Each call submits the work set as one job, which accepts or rejects exactly one orphan, whether it is valid or not,
+    // since the result of each of them is other than missing inputs. The orphan is accepted or rejected once the result
+    // is processed. The peer is paused until then, and has no more work to do.
     for (int i{1}; i <= num_children; ++i) {
-        BOOST_CHECK(connman.ProcessMessagesOnce(peer));
+        BOOST_CHECK(!connman.ProcessMessagesOnce(peer));
+        BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children - i + 1);
+        peerman.ProcessPendingEvents();
         BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children - i);
     }
     BOOST_CHECK_EQUAL(mempool.size(), 1U + num_children / 2);
@@ -599,15 +605,19 @@ BOOST_FIXTURE_TEST_CASE(orphans_follow_a_list_that_resolved_none, TestChain100Se
     call(*peer_a, parent);
     BOOST_CHECK_EQUAL(mempool.size(), 1U);
 
-    // The list of that call ends without a resolution, and the call itself ends early as the send buffer is full.
+    // The list of that call ends without a resolution, and its result is processed after the call. The call itself
+    // submits the list and the peer is paused until the result.
     peer_a->fPauseSend = true;
     call(*peer_a);
     peer_a->fPauseSend = false;
     BOOST_CHECK_EQUAL(mempool.size(), 1U);
 
-    // Another peer sends the other parent, which makes the orphan reconsiderable again. The next call of the first peer
-    // starts with the orphans, and has no message to handle: the orphan is accepted by this call.
+    // Another peer sends the other parent, which makes the orphan reconsiderable again. The result of the list has set
+    // the flag that lets a message through, and the next call of the first peer consumes it: it has no message to
+    // handle, and does not submit a list. The call after that starts with the orphans again, and accepts it.
     call(*peer_b, other_parent);
+    BOOST_CHECK_EQUAL(mempool.size(), 2U);
+    call(*peer_a);
     BOOST_CHECK_EQUAL(mempool.size(), 2U);
     call(*peer_a);
     BOOST_CHECK_EQUAL(mempool.size(), 3U);

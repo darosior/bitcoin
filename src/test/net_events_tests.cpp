@@ -68,9 +68,11 @@ struct PeerManagerSetup : public TestChain100Setup {
         return peer;
     }
 
-    //! Send a message to the peer, and have it processed.
+    //! Send a message to the peer, and have it processed in a pass of the message handler: what validation told us
+    //! is processed first, and what it tells while the message is handled is processed by the next pass.
     void Send(CNode& peer, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
     {
+        peerman->ProcessPendingEvents();
         connman->FlushSendBuffer(peer); // Drop messages we sent, the transport is shared with the fake peer.
         BOOST_REQUIRE(connman->ReceiveMsgFrom(peer, std::move(msg)));
         peer.fPauseSend = false;
@@ -144,9 +146,9 @@ BOOST_AUTO_TEST_CASE(events_from_another_thread_are_processed_on_drain_in_order)
     BOOST_CHECK(peerman->GetDesirableServiceFlags(limited) == full);
 }
 
-//! When a peer sends an invalid block, BlockChecked punishes it while its message is processed, and not later: it is
-//! discouraged as soon as the processing of its next message has finished.
-BOOST_AUTO_TEST_CASE(block_checked_punishes_the_peer_before_its_next_message)
+//! When a peer sends an invalid block, BlockChecked punishes it at the start of the next pass of the message handler,
+//! before any message is processed.
+BOOST_AUTO_TEST_CASE(block_checked_punishes_the_peer_at_the_next_pass)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
     const auto peer{MakePeer(0)};
@@ -158,16 +160,18 @@ BOOST_AUTO_TEST_CASE(block_checked_punishes_the_peer_before_its_next_message)
 
     BOOST_CHECK(!banman->IsDiscouraged(addr));
     Send(*peer, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(*bad_block)));
-    // No call to ProcessPendingEvents() in between: the message processing handled the event on its own.
+    // The event is not processed before the next pass starts.
+    BOOST_CHECK(!banman->IsDiscouraged(addr));
+    peerman->ProcessPendingEvents();
     BOOST_CHECK(peerman->SendMessages(*peer));
     BOOST_CHECK(banman->IsDiscouraged(addr));
     peerman->FinalizeNode(*peer);
 }
 
-//! When a peer sends a block that changes the tip, ActiveTipChange resets the filter of rejected transactions
-//! while its message is processed, so that the next message of the peer is evaluated with the new tip: here, a
-//! transaction that was not final yet is accepted when the peer sends it again.
-BOOST_AUTO_TEST_CASE(active_tip_change_resets_the_reject_filter_before_the_next_message)
+//! When a peer sends a block that changes the tip, ActiveTipChange resets the filter of rejected transactions at the
+//! start of the next pass of the message handler, so that the next message of the peer is evaluated with the new tip:
+//! here, a transaction that was not final yet is accepted when the peer sends it again.
+BOOST_AUTO_TEST_CASE(active_tip_change_resets_the_reject_filter_at_the_next_pass)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
     const auto peer{MakePeer(0)};
@@ -198,7 +202,7 @@ BOOST_AUTO_TEST_CASE(active_tip_change_resets_the_reject_filter_before_the_next_
     Send(*peer, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(*block)));
     BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return m_node.chainman->ActiveHeight()), height + 1);
 
-    // No call to ProcessPendingEvents(): the next message of the peer already sees the filter reset.
+    // The pass of the next message processes the event first.
     Send(*peer, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx)));
     BOOST_CHECK(m_node.mempool->exists(tx->GetHash()));
     peerman->FinalizeNode(*peer);

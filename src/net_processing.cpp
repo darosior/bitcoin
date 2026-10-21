@@ -60,6 +60,7 @@
 #include <util/hasher.h>
 #include <util/strencodings.h>
 #include <util/overloaded.h>
+#include <util/signalinterrupt.h>
 #include <util/time.h>
 #include <util/tokenbucket.h>
 #include <util/trace.h>
@@ -592,6 +593,8 @@ public:
     PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     BanMan* banman, ChainstateManager& chainman,
                     CTxMemPool& pool, node::Warnings& warnings, Options opts);
+    //! The thread of validation posts to the members that are declared after it.
+    ~PeerManagerImpl() override { m_validation.Stop(); }
 
     /** Overridden from CValidationInterface.
      * ActiveTipChange, UpdatedBlockTip and BlockChecked only queue an event, which is processed by the message
@@ -641,6 +644,8 @@ public:
     };
     void UnitTestMisbehaving(NodeId peer_id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), ""); };
     void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) override EXCLUSIVE_LOCKS_REQUIRED(!m_net_state_mutex);
+    void StartValidationThread() override { m_validation.Start(); }
+    void StopValidationThread() override { m_validation.Stop(); }
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
 
 private:
@@ -903,7 +908,7 @@ private:
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     //! The work net_processing asks validation to do, see ValidationJobs. The results are events, see ValidationEvent.
-    const ValidationJobs m_validation;
+    ValidationJobs m_validation;
 
     /** Synchronizes tx download including TxRequestTracker, rejection filters, and TxOrphanage.
      * Lock invariants:
@@ -1064,7 +1069,8 @@ private:
 
     /**
      * The blocks that were given to validation as a job (ValidationJobs::ProcessStoredBlock), once per job, until the
-     * result of the job is processed: until then a request for one of them waits (see ProcessGetBlockData()).
+     * result of the job is processed: until then a request for one of them waits (see ProcessGetBlockData()). A block
+     * that is rejected before it is stored has no job, but a result that stands for one, and is here until then too.
      */
     std::multiset<uint256> m_blocks_in_validation GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
@@ -1964,6 +1970,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         LOCK(m_tx_download_mutex);
         m_txdownloadman.DisconnectedPeer(nodeid);
     }
+    m_validation.Drop(nodeid);
     if (m_txreconciliation) m_txreconciliation->ForgetPeer(nodeid);
     m_num_preferred_download_peers -= state->fPreferredDownload;
     m_peers_downloading_from -= (!state->vBlocksInFlight.empty());
@@ -3772,7 +3779,6 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
     // while that job is with validation, so the peer has at most one job with validation.
     peer.m_job_in_flight = true;
     m_validation.Submit(ValidationJobs::ReconsiderOrphans{peer.m_id, std::move(txs)});
-    ProcessPendingEvents();
     return true;
 }
 
@@ -4076,21 +4082,20 @@ void PeerManagerImpl::ProcessBlock(CNode& node, Peer& peer, const std::shared_pt
 
     // First accept and store the block: this is done here, by the thread that received it, which does not wait for
     // validation. Then validation does its half, and activates the best chain, as ProcessNewBlock() does; the result
-    // of that job is what handles the outcome. The peer is not asked for its next message until then.
+    // of that job is what handles the outcome, and so is the event that stands for it if the block was rejected. The
+    // peer is not asked for its next message until then.
     //
     // The events that validation produced while it worked (BlockChecked, which punishes the peer that sent an invalid
     // block, ActiveTipChange, which resets the filters of rejected transactions, and the others) come before the result
-    // of the job that caused them, so they take effect before the outcome is handled and before the next message is.
+    // of the job that caused them, so they take effect before the outcome is handled.
     const auto accepted{m_chainman.AcceptNewBlock(block, force_processing, min_pow_checked)};
-    ProcessPendingEvents();
-    if (!accepted.accepted) {
-        OnBlockProcessed(node.GetId(), block->GetHash(), accepted.new_block);
-        return;
-    }
     peer.m_job_in_flight = true;
     m_blocks_in_validation.insert(block->GetHash());
+    if (!accepted.accepted) {
+        QueueValidationEvent(ValidationJobs::StoredBlockProcessed{node.GetId(), block->GetHash(), accepted.new_block});
+        return;
+    }
     m_validation.Submit(ValidationJobs::ProcessStoredBlock{node.GetId(), block, accepted.pindex, accepted.new_block});
-    ProcessPendingEvents();
 }
 
 void PeerManagerImpl::OnStoredBlockProcessed(const ValidationJobs::StoredBlockProcessed& processed)
@@ -5179,7 +5184,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             if (package_to_validate) {
                 peer.m_job_in_flight = true;
                 m_validation.Submit(ValidationJobs::ProcessPackage{pfrom.GetId(), *package_to_validate});
-                ProcessPendingEvents();
             }
             return;
         }
@@ -5190,7 +5194,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         WITH_LOCK(m_tx_download_mutex, m_txdownloadman.ValidationPending(pfrom.GetId(), wtxid));
         peer.m_job_in_flight = true;
         m_validation.Submit(ValidationJobs::ProcessTransaction{pfrom.GetId(), ptx});
-        ProcessPendingEvents();
 
         return;
     }
@@ -5930,6 +5933,9 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     } catch (...) {
         LogDebug(BCLog::NET, "%s(%s, %u bytes): Unknown exception caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size);
     }
+
+    // A peer whose job is with validation is not asked for more: the result wakes up the message handler.
+    if (peer.m_job_in_flight) fMoreWork = false;
 
     return fMoreWork;
 }

@@ -340,6 +340,9 @@ void Shutdown(NodeContext& node)
     // using the other before destroying them.
     if (node.peerman && node.validation_signals) node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     if (node.connman) node.connman->Stop();
+    // The message handler submits the jobs of validation, and does not wait for them. The job in progress, if any,
+    // returns when shutdown was requested.
+    if (node.peerman) node.peerman->StopValidationThread();
 
     if (node.tor_controller) {
         node.tor_controller->Join();
@@ -2003,6 +2006,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                      *node.mempool, *node.warnings,
                                      peerman_opts);
     validation_signals.RegisterValidationInterface(node.peerman.get());
+    node.peerman->StartValidationThread();
 
     // ********************************************************* Step 8: start indexers
 
