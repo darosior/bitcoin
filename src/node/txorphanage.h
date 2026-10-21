@@ -77,6 +77,20 @@ public:
      */
     virtual CTransactionRef GetTxToReconsider(NodeId peer) = 0;
 
+    /** Extract all the transactions of a peer's work set at once, in the order that GetTxToReconsider() returns them,
+     *  and flip all of them back to non-reconsiderable. Returns an empty vector if there are no transactions to work on.
+     *  Transactions that become reconsiderable after this call (AddChildrenToWorkSet()) are in the work set again,
+     *  also if they were in the one that was extracted.
+     */
+    virtual std::vector<CTransactionRef> GetTxsToReconsider(NodeId peer) = 0;
+
+    /** Make the announcements by a peer of these orphans reconsiderable again, for the ones that were extracted with
+     *  GetTxsToReconsider() and not worked on. An orphan whose announcement by the peer is gone (erased by a block,
+     *  evicted, or the peer disconnected) is skipped, and so is one that is reconsiderable already, from this peer
+     *  or another: it was added to a work set again since it was extracted.
+     */
+    virtual void PutBackInWorkSet(NodeId peer, const std::vector<CTransactionRef>& txs) = 0;
+
     /** Erase an orphan by wtxid, including all announcements if there are multiple.
      * Returns true if an orphan was erased, false if no tx with this wtxid exists. */
     virtual bool EraseTx(const Wtxid& wtxid) = 0;

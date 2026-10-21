@@ -870,4 +870,78 @@ BOOST_AUTO_TEST_CASE(peer_worksets)
         }
     }
 }
+
+BOOST_AUTO_TEST_CASE(take_all_and_put_back)
+{
+    const NodeId node0{0};
+    const NodeId node1{1};
+    FastRandomContext det_rand{true};
+    std::unique_ptr<node::TxOrphanage> orphanage{node::MakeTxOrphanage()};
+
+    // Four orphans of node0, each with its own parent, added in this order.
+    std::vector<CTransactionRef> parents;
+    std::vector<CTransactionRef> children;
+    for (unsigned int i{0}; i < 4; ++i) {
+        parents.emplace_back(MakeTransactionSpending({}, det_rand));
+        children.emplace_back(MakeTransactionSpending({COutPoint{parents.back()->GetHash(), 0}}, det_rand));
+        BOOST_CHECK(orphanage->AddTx(children.back(), node0));
+    }
+    // Nothing to take, and taking nothing is not an error.
+    BOOST_CHECK(orphanage->GetTxsToReconsider(node0).empty());
+    orphanage->PutBackInWorkSet(node0, {});
+
+    // The work set is taken at once, in the order that GetTxToReconsider() returns it: older orphans first, whatever
+    // the order in which they were made reconsiderable.
+    for (unsigned int i : {3, 1, 0, 2}) {
+        BOOST_CHECK_EQUAL(orphanage->AddChildrenToWorkSet(*parents.at(i), det_rand).size(), 1);
+    }
+    auto taken = orphanage->GetTxsToReconsider(node0);
+    BOOST_CHECK(taken == children);
+    BOOST_CHECK(!orphanage->HaveTxToReconsider(node0));
+    BOOST_CHECK_EQUAL(orphanage->GetTxToReconsider(node0), nullptr);
+    BOOST_CHECK(orphanage->GetTxsToReconsider(node0).empty());
+    orphanage->SanityCheck();
+
+    // The ones that were not worked on are put back, and come out in the same order again.
+    orphanage->PutBackInWorkSet(node0, {children.at(1), children.at(3)});
+    BOOST_CHECK(orphanage->HaveTxToReconsider(node0));
+    BOOST_CHECK_EQUAL(orphanage->GetTxToReconsider(node0), children.at(1));
+    BOOST_CHECK_EQUAL(orphanage->GetTxToReconsider(node0), children.at(3));
+    BOOST_CHECK_EQUAL(orphanage->GetTxToReconsider(node0), nullptr);
+    orphanage->SanityCheck();
+
+    // A trigger that comes while the work set is out is not lost, and is not duplicated by the put back.
+    BOOST_CHECK_EQUAL(orphanage->AddChildrenToWorkSet(*parents.at(2), det_rand).size(), 1);
+    orphanage->PutBackInWorkSet(node0, {children.at(2), children.at(0)});
+    BOOST_CHECK(orphanage->GetTxsToReconsider(node0) == (std::vector<CTransactionRef>{children.at(0), children.at(2)}));
+    orphanage->SanityCheck();
+
+    // An orphan that is reconsiderable from another peer is not put back for this one.
+    BOOST_CHECK(!orphanage->AddTx(children.at(0), node1));
+    BOOST_CHECK_EQUAL(orphanage->AddChildrenToWorkSet(*parents.at(0), det_rand).size(), 1);
+    const bool assigned_to_node1{orphanage->HaveTxToReconsider(node1)};
+    orphanage->PutBackInWorkSet(node0, {children.at(0)});
+    BOOST_CHECK_EQUAL(orphanage->HaveTxToReconsider(node0), !assigned_to_node1);
+    BOOST_CHECK_EQUAL(orphanage->HaveTxToReconsider(node1), assigned_to_node1);
+    orphanage->GetTxsToReconsider(node0);
+    orphanage->GetTxsToReconsider(node1);
+    orphanage->SanityCheck();
+
+    // The announcement is gone: a block erased the orphan, the orphan was erased, or the peer disconnected.
+    orphanage->PutBackInWorkSet(node0, {parents.at(0)}); // never announced
+    BOOST_CHECK(!orphanage->HaveTxToReconsider(node0));
+    BOOST_CHECK_EQUAL(orphanage->EraseTx(children.at(1)->GetWitnessHash()), 1);
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(CMutableTransaction{}));
+    CMutableTransaction spend_parent3;
+    spend_parent3.vin.emplace_back(COutPoint{parents.at(3)->GetHash(), 0}); // conflicts with children.at(3)
+    block.vtx.push_back(MakeTransactionRef(spend_parent3));
+    orphanage->EraseForBlock(block);
+    BOOST_CHECK(!orphanage->HaveTx(children.at(3)->GetWitnessHash()));
+    orphanage->EraseForPeer(node0);
+    orphanage->PutBackInWorkSet(node0, {children.at(0), children.at(1), children.at(2), children.at(3)});
+    BOOST_CHECK(!orphanage->HaveTxToReconsider(node0));
+    BOOST_CHECK(orphanage->GetTxsToReconsider(node0).empty());
+    orphanage->SanityCheck();
+}
 BOOST_AUTO_TEST_SUITE_END()

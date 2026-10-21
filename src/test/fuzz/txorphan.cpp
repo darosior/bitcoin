@@ -565,7 +565,7 @@ FUZZ_TARGET(txorphanage_sim)
     //
 
     LIMITED_WHILE (provider.remaining_bytes() > 0, 200) {
-        int command = provider.ConsumeIntegralInRange<uint8_t>(0, 15);
+        int command = provider.ConsumeIntegralInRange<uint8_t>(0, 17);
         while (true) {
             if (sim_announcements.size() < MAX_ANN && command-- == 0) {
                 // AddTx
@@ -681,6 +681,46 @@ FUZZ_TARGET(txorphanage_sim)
                     // No reconsiderable transaction was found from peer. Verify that it does not
                     // have any.
                     assert(!have_reconsider_fn(peer));
+                }
+                break;
+            } else if (command-- == 0) {
+                // GetTxsToReconsider.
+                auto peer = read_peer_fn();
+                // The reconsiderable announcements of peer, oldest first, are what has to be returned.
+                std::vector<Wtxid> expected;
+                for (auto& ann : sim_announcements) {
+                    if (ann.announcer == peer && ann.reconsider) expected.push_back(txn[ann.tx]->GetWitnessHash());
+                }
+                auto result = real->GetTxsToReconsider(peer);
+                assert(result.size() == expected.size());
+                for (size_t i = 0; i < result.size(); ++i) {
+                    assert(result[i]->GetWitnessHash() == expected[i]);
+                    // Make it non-reconsiderable.
+                    auto sim_ann_it = find_announce_wtxid_fn(expected[i], peer);
+                    assert(sim_ann_it != sim_announcements.end());
+                    sim_ann_it->reconsider = false;
+                }
+                assert(!have_reconsider_fn(peer));
+                break;
+            } else if (command-- == 0) {
+                // PutBackInWorkSet.
+                auto peer = read_peer_fn();
+                std::vector<unsigned> indexes;
+                std::vector<CTransactionRef> txs;
+                for (unsigned tx = 0; tx < NUM_TX; ++tx) {
+                    if (provider.ConsumeBool()) {
+                        indexes.push_back(tx);
+                        txs.push_back(txn[tx]);
+                    }
+                }
+                real->PutBackInWorkSet(peer, txs);
+                for (unsigned tx : indexes) {
+                    // Nothing is put back for an announcement that is gone, or for a transaction that is
+                    // reconsiderable already, from any peer.
+                    if (have_reconsiderable_fn(tx)) continue;
+                    auto sim_ann_it = find_announce_fn(tx, peer);
+                    if (sim_ann_it == sim_announcements.end()) continue;
+                    sim_ann_it->reconsider = true;
                 }
                 break;
             }

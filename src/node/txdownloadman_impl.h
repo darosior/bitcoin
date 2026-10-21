@@ -191,6 +191,8 @@ public:
 
     bool HaveMoreWork(NodeId nodeid);
     CTransactionRef GetTxToReconsider(NodeId nodeid);
+    std::vector<CTransactionRef> GetTxsToReconsider(NodeId nodeid);
+    void PutBackInWorkSet(NodeId nodeid, const std::vector<CTransactionRef>& txs);
 
     void CheckIsEmpty();
     void CheckIsEmpty(NodeId nodeid);

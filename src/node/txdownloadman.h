@@ -161,6 +161,13 @@ public:
     /** Returns next orphan tx to consider, or nullptr if none exist. */
     CTransactionRef GetTxToReconsider(NodeId nodeid);
 
+    /** Returns all the orphan txs to consider for this peer at once, in the order GetTxToReconsider() returns them. */
+    std::vector<CTransactionRef> GetTxsToReconsider(NodeId nodeid);
+
+    /** Orphans that were returned by GetTxsToReconsider() and not considered are to be considered again, unless the
+     * peer's announcement of them is gone. */
+    void PutBackInWorkSet(NodeId nodeid, const std::vector<CTransactionRef>& txs);
+
     /** Check that all data structures are empty. */
     void CheckIsEmpty() const;
 

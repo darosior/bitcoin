@@ -224,6 +224,8 @@ public:
     bool HaveTx(const Wtxid& wtxid) const override;
     bool HaveTxFromPeer(const Wtxid& wtxid, NodeId peer) const override;
     CTransactionRef GetTxToReconsider(NodeId peer) override;
+    std::vector<CTransactionRef> GetTxsToReconsider(NodeId peer) override;
+    void PutBackInWorkSet(NodeId peer, const std::vector<CTransactionRef>& txs) override;
     bool EraseTx(const Wtxid& wtxid) override;
     void EraseForPeer(NodeId peer) override;
     void EraseForBlock(const CBlock& block) override;
@@ -605,6 +607,29 @@ CTransactionRef TxOrphanageImpl::GetTxToReconsider(NodeId peer)
         return it->m_tx;
     }
     return nullptr;
+}
+
+std::vector<CTransactionRef> TxOrphanageImpl::GetTxsToReconsider(NodeId peer)
+{
+    std::vector<CTransactionRef> ret;
+    while (CTransactionRef tx{GetTxToReconsider(peer)}) ret.push_back(std::move(tx));
+    return ret;
+}
+
+void TxOrphanageImpl::PutBackInWorkSet(NodeId peer, const std::vector<CTransactionRef>& txs)
+{
+    auto& index_by_wtxid = m_orphans.get<ByWtxid>();
+    for (const auto& tx : txs) {
+        const auto& wtxid{tx->GetWitnessHash()};
+        // There is exactly one m_reconsider announcement per reconsiderable wtxid: if there is one already, the orphan
+        // was added to a work set since it was extracted, and is reconsidered from there.
+        if (m_reconsiderable_wtxids.contains(wtxid)) continue;
+        auto it = index_by_wtxid.find(ByWtxidView{wtxid, peer});
+        if (it == index_by_wtxid.end()) continue;
+        static constexpr auto mark_reconsidered_modifier = [](auto& ann) { ann.m_reconsider = true; };
+        index_by_wtxid.modify(it, mark_reconsidered_modifier);
+        m_reconsiderable_wtxids.insert(wtxid);
+    }
 }
 
 /** Return whether there is a tx that can be reconsidered. */

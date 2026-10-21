@@ -75,6 +75,14 @@ CTransactionRef TxDownloadManager::GetTxToReconsider(NodeId nodeid)
 {
     return m_impl->GetTxToReconsider(nodeid);
 }
+std::vector<CTransactionRef> TxDownloadManager::GetTxsToReconsider(NodeId nodeid)
+{
+    return m_impl->GetTxsToReconsider(nodeid);
+}
+void TxDownloadManager::PutBackInWorkSet(NodeId nodeid, const std::vector<CTransactionRef>& txs)
+{
+    m_impl->PutBackInWorkSet(nodeid, txs);
+}
 void TxDownloadManager::CheckIsEmpty() const
 {
     m_impl->CheckIsEmpty();
@@ -565,6 +573,16 @@ bool TxDownloadManagerImpl::HaveMoreWork(NodeId nodeid)
 CTransactionRef TxDownloadManagerImpl::GetTxToReconsider(NodeId nodeid)
 {
     return m_orphanage->GetTxToReconsider(nodeid);
+}
+
+std::vector<CTransactionRef> TxDownloadManagerImpl::GetTxsToReconsider(NodeId nodeid)
+{
+    return m_orphanage->GetTxsToReconsider(nodeid);
+}
+
+void TxDownloadManagerImpl::PutBackInWorkSet(NodeId nodeid, const std::vector<CTransactionRef>& txs)
+{
+    m_orphanage->PutBackInWorkSet(nodeid, txs);
 }
 
 void TxDownloadManagerImpl::CheckIsEmpty(NodeId nodeid)
