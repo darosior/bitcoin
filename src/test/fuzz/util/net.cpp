@@ -525,11 +525,6 @@ Sock::Event FuzzedSock::ConsumeOccurred(Event requested) const
         return 0;
     }
 
-    // Urgent data happened before the timeout (which wakes select() when RecvEvent is requested).
-    if ((requested & RecvEvent) != 0 && m_fuzzed_data_provider.ConsumeBool()) {
-        return ConsumeSubset(requested) | ErrorEvent;
-    }
-
     // A subset of requested events happened before the timeout.
     if (m_fuzzed_data_provider.ConsumeBool()) {
         return ConsumeSubset(requested);

@@ -188,11 +188,6 @@ BOOST_AUTO_TEST_CASE(recv_until_terminator_limit)
  */
 namespace {
 
-#ifdef USE_POLL
-constexpr bool POLL{true};
-#else
-constexpr bool POLL{false};
-#endif
 #ifdef WIN32
 constexpr bool WINDOWS{true};
 #else
@@ -203,16 +198,26 @@ constexpr bool LINUX{true};
 #else
 constexpr bool LINUX{false};
 #endif
-// poll() reports a reset connection (POLLERR, POLLHUP) whatever was requested, even nothing.
-// select() reports it only through the read and write sets.
-constexpr bool RESET_REPORTS_ERROR{POLL};
-// Windows' select() fails if no socket requests any event, as all three sets are then empty.
-constexpr bool NOTHING_REQUESTED_FAILS{!POLL && WINDOWS};
+#ifdef __APPLE__
+constexpr bool APPLE{true};
+#else
+constexpr bool APPLE{false};
+#endif
+// Linux and Windows report a reset connection with POLLERR, so as ErrorEvent to a wait for
+// anything. Other systems only report POLLHUP, which hides POLLOUT: a wait reports it as RecvEvent
+// when receiving was requested, and as ErrorEvent otherwise.
+constexpr bool RESET_REPORTS_POLLERR{LINUX || WINDOWS};
+// Windows reports the end of the peer's stream with POLLHUP, also to a wait that does not request
+// receiving, which then reports ErrorEvent. Callers then disconnect.
+constexpr bool END_OF_STREAM_REPORTS_HANGUP{WINDOWS};
+// macOS reports the end of the peer's stream with POLLHUP to a wait that requests receiving, which
+// hides POLLOUT. Callers then read the end of the stream.
+constexpr bool END_OF_STREAM_HIDES_SEND{APPLE};
 // What a failed non-blocking connect() reports. Callers only check that something occurred and
-// then read SO_ERROR. Windows' select() signals it only in exceptfds.
-constexpr Sock::Event FAILED_CONNECT_EVENTS{POLL    ? Sock::RecvEvent | Sock::SendEvent | Sock::ErrorEvent :
-                                            WINDOWS ? Sock::ErrorEvent :
-                                                      Sock::RecvEvent | Sock::SendEvent};
+// then read SO_ERROR. macOS reports it with POLLHUP, which hides POLLOUT.
+constexpr Sock::Event FAILED_CONNECT_EVENTS{RESET_REPORTS_POLLERR ? Sock::RecvEvent | Sock::SendEvent | Sock::ErrorEvent :
+                                            APPLE                 ? Sock::RecvEvent :
+                                                                    Sock::RecvEvent | Sock::SendEvent};
 
 /*
  * Where platforms differ in the sockets that accept() returns. CreateSockOS() sockets are
@@ -488,8 +493,21 @@ struct Scenario {
                 e.may |= Sock::SendEvent;
             }
         }
-        if (Reset() && RESET_REPORTS_ERROR) {
-            e.must |= Sock::ErrorEvent;
+        // A hang-up that hides SendEvent.
+        const bool send_hidden{(Reset() && !RESET_REPORTS_POLLERR) || (EndOfStream() && END_OF_STREAM_HIDES_SEND && (requested & Sock::RecvEvent))};
+        if (send_hidden && (requested & Sock::SendEvent)) {
+            e.must &= ~Sock::SendEvent;
+            e.may |= Sock::SendEvent;
+        }
+        // A hang-up or an error that is not reported as RecvEvent. A socket that requests nothing may
+        // or may not be told about a reset.
+        const bool recv_requested{(requested & Sock::RecvEvent) != 0};
+        if ((Reset() && (RESET_REPORTS_POLLERR || !recv_requested)) || (EndOfStream() && END_OF_STREAM_REPORTS_HANGUP && !recv_requested)) {
+            if (requested == 0 && Reset()) {
+                e.may |= Sock::ErrorEvent;
+            } else {
+                e.must |= Sock::ErrorEvent;
+            }
         }
         return e;
     }
@@ -557,25 +575,16 @@ BOOST_AUTO_TEST_CASE(readiness)
         Sock::EventsPerSock events_per_sock;
         for (auto& s : scenarios) {
             const auto& sock{*s.conn->sock};
-            if (requested == 0 && NOTHING_REQUESTED_FAILS) {
-                BOOST_CHECK_MESSAGE(!sock.Wait(0ms, requested), s.Name(requested));
-            } else {
-                const Sock::Event occurred{AwaitEvents(sock, requested, s.Expect(requested).must)};
-                s.Check(requested, occurred);
-                s.occurred_any |= occurred;
-            }
+            const Sock::Event occurred{AwaitEvents(sock, requested, s.Expect(requested).must)};
+            s.Check(requested, occurred);
+            s.occurred_any |= occurred;
             Sock::Events events{requested};
             events.occurred = 0xff; // Make sure WaitMany overwrites it, rather than add to it.
             events_per_sock.emplace(s.conn->sock, events);
         }
 
         // All of them in a single WaitMany(). Everything that must occur is ready already.
-        const bool ok{listener.sock.WaitMany(0ms, events_per_sock)};
-        if (requested == 0 && NOTHING_REQUESTED_FAILS) {
-            BOOST_CHECK(!ok);
-            continue;
-        }
-        BOOST_REQUIRE(ok);
+        BOOST_REQUIRE(listener.sock.WaitMany(0ms, events_per_sock));
         for (const auto& s : scenarios) {
             const Sock::Event occurred{events_per_sock.at(s.conn->sock).occurred};
             s.Check(requested, occurred, " (WaitMany)");
@@ -648,7 +657,9 @@ BOOST_AUTO_TEST_CASE(wait_many_attribution)
     for (const auto& e : entries) {
         Sock::Event possible{Sock::SendEvent};
         if (e.state != State::IDLE) possible |= Sock::RecvEvent;
-        const auto expected{static_cast<Sock::Event>(e.requested & possible)};
+        auto expected{static_cast<Sock::Event>(e.requested & possible)};
+        if (e.state == State::END_OF_STREAM && END_OF_STREAM_REPORTS_HANGUP && !(e.requested & Sock::RecvEvent)) expected |= Sock::ErrorEvent;
+        if (e.state == State::END_OF_STREAM && END_OF_STREAM_HIDES_SEND && e.requested == (Sock::RecvEvent | Sock::SendEvent)) expected &= ~Sock::SendEvent;
         BOOST_CHECK_EQUAL(EventsStr(events_per_sock.at(e.conn->sock).occurred), EventsStr(expected));
     }
 }
