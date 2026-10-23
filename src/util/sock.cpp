@@ -22,7 +22,9 @@
 #include <utility>
 #include <vector>
 
-#ifdef USE_POLL
+#ifdef WIN32
+#include <winsock2.h>
+#else
 #include <poll.h>
 #endif
 
@@ -178,7 +180,12 @@ bool Sock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per
         }
     }
 
-    if (poll(pfds.data(), pfds.size(), count_milliseconds(timeout)) == SOCKET_ERROR) {
+#ifdef WIN32
+    const int ret{WSAPoll(pfds.data(), pfds.size(), count_milliseconds(timeout))};
+#else
+    const int ret{poll(pfds.data(), pfds.size(), count_milliseconds(timeout))};
+#endif
+    if (ret == SOCKET_ERROR) {
         return false;
     }
 
