@@ -129,7 +129,6 @@ void ResetFuzzedSockets()
 FuzzedSock::FuzzedSock(FuzzedDataProvider& fuzzed_data_provider, FakeSteadyClock& clock)
     : Sock{g_next_fuzzed_socket--},
       m_fuzzed_data_provider{fuzzed_data_provider},
-      m_selectable{fuzzed_data_provider.ConsumeBool()},
       m_clock{clock}
 {
     g_used_fuzzed_socket = true;
@@ -475,11 +474,6 @@ bool FuzzedSock::SetNonBlocking() const
         return false;
     }
     return true;
-}
-
-bool FuzzedSock::IsSelectable() const
-{
-    return m_selectable;
 }
 
 bool FuzzedSock::Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred) const

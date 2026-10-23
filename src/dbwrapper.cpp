@@ -114,10 +114,10 @@ public:
 static void SetMaxOpenFiles(leveldb::Options *options) {
     // On most platforms the default setting of max_open_files (which is 1000)
     // is optimal. On Windows using a large file count is OK because the handles
-    // do not interfere with select() loops. On 64-bit Unix hosts this value is
-    // also OK, because up to that amount LevelDB will use an mmap
-    // implementation that does not use extra file descriptors (the fds are
-    // closed after being mmap'ed).
+    // are not socket descriptors and do not count against any socket limit. On
+    // 64-bit Unix hosts this value is also OK, because up to that amount LevelDB
+    // will use an mmap implementation that does not use extra file descriptors
+    // (the fds are closed after being mmap'ed).
     //
     // Increasing the value beyond the default is dangerous because LevelDB will
     // fall back to a non-mmap implementation when the file count is too large.

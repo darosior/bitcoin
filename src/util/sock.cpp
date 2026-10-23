@@ -131,15 +131,6 @@ bool Sock::SetNonBlocking() const
     return true;
 }
 
-bool Sock::IsSelectable() const
-{
-#if defined(USE_POLL) || defined(WIN32)
-    return true;
-#else
-    return m_socket < FD_SETSIZE;
-#endif
-}
-
 bool Sock::Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred) const
 {
     // We need a `shared_ptr` holding `this` for `WaitMany()`, but don't want
@@ -166,7 +157,6 @@ bool Sock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per
 {
     timeout = std::min<std::chrono::milliseconds>(timeout, MAX_WAIT_TIMEOUT);
 
-#ifdef USE_POLL
     std::vector<pollfd> pfds;
     for (const auto& [sock, events] : events_per_sock) {
         pfds.emplace_back();
@@ -212,54 +202,6 @@ bool Sock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per
     }
 
     return true;
-#else
-    fd_set recv;
-    fd_set send;
-    fd_set err;
-    FD_ZERO(&recv);
-    FD_ZERO(&send);
-    FD_ZERO(&err);
-    SOCKET socket_max{0};
-
-    for (const auto& [sock, events] : events_per_sock) {
-        if (!sock->IsSelectable()) {
-            return false;
-        }
-        const auto& s = sock->m_socket;
-        if (events.requested & RecvEvent) {
-            FD_SET(s, &recv);
-            FD_SET(s, &err);
-        }
-        if (events.requested & SendEvent) {
-            FD_SET(s, &send);
-        }
-        if (events.requested & (RecvEvent | SendEvent)) {
-            socket_max = std::max(socket_max, s);
-        }
-    }
-
-    timeval tv = MillisToTimeval(timeout);
-
-    if (select(socket_max + 1, &recv, &send, &err, &tv) == SOCKET_ERROR) {
-        return false;
-    }
-
-    for (auto& [sock, events] : events_per_sock) {
-        const auto& s = sock->m_socket;
-        events.occurred = 0;
-        if (FD_ISSET(s, &recv)) {
-            events.occurred |= RecvEvent;
-        }
-        if (FD_ISSET(s, &send)) {
-            events.occurred |= SendEvent;
-        }
-        if (FD_ISSET(s, &err)) {
-            events.occurred |= ErrorEvent;
-        }
-    }
-
-    return true;
-#endif /* USE_POLL */
 }
 
 void Sock::SendComplete(std::span<const unsigned char> data,
