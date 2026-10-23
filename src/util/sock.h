@@ -137,12 +137,6 @@ public:
      */
     [[nodiscard]] virtual bool SetNonBlocking() const;
 
-    /**
-     * Check if the underlying socket can be used for `select(2)` (or the `Wait()` method).
-     * @return true if selectable
-     */
-    [[nodiscard]] virtual bool IsSelectable() const;
-
     using Event = uint8_t;
 
     /**
@@ -164,8 +158,7 @@ public:
     /**
      * Maximum timeout supported by `Wait()` and `WaitMany()` (about 24.8 days).
      * Longer timeouts are capped because `poll()` takes an `int` timeout in
-     * milliseconds, and `select()` rejects large timeouts on some platforms
-     * (e.g. macOS). Expressed in seconds so that callers can use the same value.
+     * milliseconds. Expressed in seconds so that callers can use the same value.
      */
     static constexpr std::chrono::seconds MAX_WAIT_TIMEOUT{std::numeric_limits<int>::max() / 1000};
 
@@ -173,8 +166,7 @@ public:
      * Wait for readiness for input (recv) or output (send).
      * @param[in] timeout Wait this much for at least one of the requested events to occur.
      * Capped at `MAX_WAIT_TIMEOUT`.
-     * @param[in] requested Wait for those events, bitwise-or of `RecvEvent` and `SendEvent`,
-     * optionally with `ErrorEvent`.
+     * @param[in] requested Wait for those events, bitwise-or of `RecvEvent` and `SendEvent`.
      * @param[out] occurred If not nullptr and the function returns `true`, then this
      * indicates which of the requested events occurred. `ErrorEvent` may be added
      * without being requested.

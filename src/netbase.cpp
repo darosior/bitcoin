@@ -537,13 +537,6 @@ std::unique_ptr<Sock> CreateSockOS(int domain, int type, int protocol)
         return sock;
     }
 
-    // Ensure that waiting for I/O on this socket won't result in undefined
-    // behavior.
-    if (!sock->IsSelectable()) {
-        LogWarnThenDebug(BCLog::NET, "Cannot create connection: non-selectable socket created (fd >= FD_SETSIZE ?)");
-        return nullptr;
-    }
-
 #ifdef SO_NOSIGPIPE
     int set = 1;
     // Set the no-sigpipe option on the socket for BSD systems, other UNIXes
@@ -602,9 +595,9 @@ static bool ConnectToSocket(const Sock& sock,
         if (nErr == WSAEINPROGRESS || nErr == WSAEWOULDBLOCK || nErr == WSAEINVAL)
         {
             // Connection didn't actually fail, but is being established
-            // asynchronously. Thus, use async I/O api (select/poll)
+            // asynchronously. Thus, use async I/O api (poll)
             // synchronously to check for successful connection with a timeout.
-            const Sock::Event requested = Sock::RecvEvent | Sock::SendEvent | Sock::ErrorEvent;
+            const Sock::Event requested = Sock::RecvEvent | Sock::SendEvent;
             Sock::Event occurred;
             if (!sock.Wait(timeout, requested, &occurred)) {
                 LogDebug(BCLog::NET, "wait for connect to %s failed: %s",

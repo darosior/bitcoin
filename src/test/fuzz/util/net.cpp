@@ -114,7 +114,6 @@ template CAddress::SerParams ConsumeDeserializationParams(FuzzedDataProvider&) n
 FuzzedSock::FuzzedSock(FuzzedDataProvider& fuzzed_data_provider, FakeSteadyClock& clock)
     : Sock{fuzzed_data_provider.ConsumeIntegralInRange<SOCKET>(INVALID_SOCKET - 1, INVALID_SOCKET)},
       m_fuzzed_data_provider{fuzzed_data_provider},
-      m_selectable{fuzzed_data_provider.ConsumeBool()},
       m_clock{clock}
 {
 }
@@ -397,11 +396,6 @@ bool FuzzedSock::SetNonBlocking() const
         return false;
     }
     return true;
-}
-
-bool FuzzedSock::IsSelectable() const
-{
-    return m_selectable;
 }
 
 bool FuzzedSock::Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred) const

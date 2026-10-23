@@ -861,13 +861,6 @@ HTTPServer::Id HTTPServer::GetNewId()
 
 void HTTPServer::NewSockAccepted(std::unique_ptr<Sock>&& sock, const CService& addr)
 {
-    if (!sock->IsSelectable()) {
-        LogDebug(BCLog::HTTP,
-                 "connection from %s dropped: non-selectable socket",
-                 addr.ToStringAddrPort());
-        return;
-    }
-
     // According to the internet TCP_NODELAY is not carried into accepted sockets
     // on all platforms.  Set it again here just to be sure.
     if (sock->SetSockOpt(IPPROTO_TCP, TCP_NODELAY, &SOCKET_OPTION_TRUE, sizeof(SOCKET_OPTION_TRUE)) == SOCKET_ERROR) {
@@ -1065,9 +1058,8 @@ void HTTPServer::ThreadSocketHandler()
 {
     while (!m_interrupt_net) {
         // Check for the readiness of the already connected sockets and the
-        // listening sockets in one call ("readiness" as in poll(2) or
-        // select(2)). If none are ready, wait for a short while and return
-        // empty sets.
+        // listening sockets in one call ("readiness" as in poll(2)). If none
+        // are ready, wait for a short while and return empty sets.
         auto io_readiness{GenerateWaitSockets()};
         if (io_readiness.events_per_sock.empty() ||
             // WaitMany() may as well be a static method, the context of the first Sock in the vector is not relevant.

@@ -1812,11 +1812,6 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         return;
     }
 
-    if (!sock->IsSelectable()) {
-        LogInfo("connection from %s dropped: non-selectable socket\n", addr.ToStringAddrPort());
-        return;
-    }
-
     // According to the internet TCP_NODELAY is not carried into accepted sockets
     // on all platforms.  Set it again here just to be sure.
     const int on{1};
@@ -2154,9 +2149,8 @@ void CConnman::SocketHandler()
         const auto timeout = std::chrono::milliseconds(SELECT_TIMEOUT_MILLISECONDS);
 
         // Check for the readiness of the already connected sockets and the
-        // listening sockets in one call ("readiness" as in poll(2) or
-        // select(2)). If none are ready, wait for a short while and return
-        // empty sets.
+        // listening sockets in one call ("readiness" as in poll(2)). If none
+        // are ready, wait for a short while and return empty sets.
         events_per_sock = GenerateWaitSockets(snap.Nodes());
         if (events_per_sock.empty() || !events_per_sock.begin()->first->WaitMany(timeout, events_per_sock)) {
             m_interrupt_net->sleep_for(timeout);
@@ -4282,7 +4276,7 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
 
         // If there was nothing to send before, and there is now (predicted by the "more" value
         // returned by the GetBytesToSend call above), attempt "optimistic write":
-        // because the poll/select loop may pause for SELECT_TIMEOUT_MILLISECONDS before actually
+        // because the poll loop may pause for SELECT_TIMEOUT_MILLISECONDS before actually
         // doing a send, try sending from the calling thread if the queue was empty before.
         // With a V1Transport, more will always be true here, because adding a message always
         // results in sendable bytes there, but with V2Transport this is not the case (it may
