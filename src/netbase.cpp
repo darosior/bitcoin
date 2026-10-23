@@ -536,13 +536,6 @@ std::unique_ptr<Sock> CreateSockOS(int domain, int type, int protocol)
         return sock;
     }
 
-    // Ensure that waiting for I/O on this socket won't result in undefined
-    // behavior.
-    if (!sock->IsSelectable()) {
-        LogWarnThenDebug(BCLog::NET, "Cannot create connection: non-selectable socket created (fd >= FD_SETSIZE ?)");
-        return nullptr;
-    }
-
 #ifdef SO_NOSIGPIPE
     int set = 1;
     // Set the no-sigpipe option on the socket for BSD systems, other UNIXes

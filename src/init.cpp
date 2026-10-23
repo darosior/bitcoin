@@ -175,9 +175,7 @@ static constexpr bool DEFAULT_I2P_ACCEPT_INCOMING{true};
 static constexpr bool DEFAULT_STOPAFTERBLOCKIMPORT{false};
 
 #ifdef WIN32
-// Win32 LevelDB doesn't use filedescriptors, and the ones used for
-// accessing block files don't count towards the fd_set size limit
-// anyway.
+// Win32 LevelDB doesn't use filedescriptors.
 #define MIN_LEVELDB_FDS 0
 #else
 #define MIN_LEVELDB_FDS 150
@@ -1140,10 +1138,6 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     // Try raising the FD limit to what the user wants (available_fds may be smaller than the requested amount if this fails)
     available_fds = RaiseFileDescriptorLimit(static_cast<int>(total_fds));
-    // If we are using select instead of poll, our actual limit may be even smaller
-#ifndef USE_POLL
-    available_fds = std::min(FD_SETSIZE, available_fds);
-#endif
     // The system can't support our bare minimum
     if (available_fds < min_required_fds)
         return InitError(strprintf(_("Not enough file descriptors available. %d available, %d required."), available_fds, min_required_fds));

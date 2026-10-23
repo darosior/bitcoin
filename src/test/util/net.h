@@ -192,8 +192,6 @@ public:
 
     bool SetNonBlocking() const override;
 
-    bool IsSelectable() const override;
-
     bool Wait(std::chrono::milliseconds timeout,
               Event requested,
               Event* occurred = nullptr) const override;
