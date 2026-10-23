@@ -6,14 +6,7 @@
 #ifndef BITCOIN_COMPAT_COMPAT_H
 #define BITCOIN_COMPAT_COMPAT_H
 
-// Windows defines FD_SETSIZE to 64 (see _fd_types.h in mingw-w64),
-// which is too small for our usage, but allows us to redefine it safely.
-// We redefine it to be 1024, to match glibc, see typesizes.h.
 #ifdef WIN32
-#ifdef FD_SETSIZE
-#undef FD_SETSIZE
-#endif
-#define FD_SETSIZE 1024
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <cstdint>
@@ -97,10 +90,6 @@ typedef SSIZE_T ssize_t;
 #else
 #define MAIN_FUNCTION int main(int argc, char* argv[])
 #endif
-
-// Use poll(2) (WSAPoll() on Windows) on all platforms. Unlike select(),
-// poll() imposes no FD_SETSIZE limit on the socket descriptor value.
-#define USE_POLL
 
 // MSG_NOSIGNAL is not available on some platforms, if it doesn't exist define it as 0
 #if !defined(MSG_NOSIGNAL)
