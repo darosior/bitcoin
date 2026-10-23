@@ -172,13 +172,6 @@ class FuzzedSock : public Sock
     mutable std::vector<uint8_t> m_peek_data;
 
     /**
-     * Whether to pretend that the socket is select(2)-able. This is randomly set in the
-     * constructor. It should remain constant so that repeated calls to `IsSelectable()`
-     * return the same value.
-     */
-    const bool m_selectable;
-
-    /**
      * Externally-provided context used to mock the steady clock in methods
      * waiting for a given duration. It is a reference (rather than an owned
      * member) so that several FuzzedSock instances sharing a test case (e.g.
@@ -213,8 +206,6 @@ public:
     int GetSockName(sockaddr* name, socklen_t* name_len) const override;
 
     bool SetNonBlocking() const override;
-
-    bool IsSelectable() const override;
 
     bool Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred = nullptr) const override;
 

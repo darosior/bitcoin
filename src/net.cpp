@@ -1806,11 +1806,6 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         return;
     }
 
-    if (!sock->IsSelectable()) {
-        LogInfo("connection from %s dropped: non-selectable socket\n", addr.ToStringAddrPort());
-        return;
-    }
-
     // According to the internet TCP_NODELAY is not carried into accepted sockets
     // on all platforms.  Set it again here just to be sure.
     const int on{1};

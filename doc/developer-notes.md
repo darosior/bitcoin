@@ -1195,13 +1195,12 @@ you must be aware of.
 ### File Descriptor Counts
 
 In most configurations, we use the default LevelDB value for `max_open_files`,
-which is 1000 at the time of this writing. If LevelDB actually uses this many
-file descriptors, it will cause problems with Bitcoin's `select()` loop, because
-it may cause new sockets to be created where the fd value is >= 1024. For this
-reason, on 64-bit Unix systems, we rely on an internal LevelDB optimization that
-uses `mmap()` + `close()` to open table files without actually retaining
-references to the table file descriptors. If you are upgrading LevelDB, you must
-sanity check the changes to make sure that this assumption remains valid.
+which is 1000 at the time of this writing. We rely on an internal LevelDB
+optimization that uses `mmap()` + `close()` to open table files without actually
+retaining references to the table file descriptors, which keeps our
+file-descriptor usage down on 64-bit Unix systems. If you are upgrading LevelDB,
+you must sanity check the changes to make sure that this assumption remains
+valid.
 
 In addition to reviewing the upstream changes in `env_posix.cc`, you can use `lsof` to
 check this. For example, on Linux this command will show open `.ldb` file counts:

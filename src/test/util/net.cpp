@@ -215,8 +215,6 @@ int ZeroSock::GetSockName(sockaddr* name, socklen_t* name_len) const
 
 bool ZeroSock::SetNonBlocking() const { return true; }
 
-bool ZeroSock::IsSelectable() const { return true; }
-
 bool ZeroSock::Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred) const
 {
     if (occurred != nullptr) {
