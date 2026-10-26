@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -145,19 +146,21 @@ void FillSendBuffer(const Sock& sock)
     BOOST_REQUIRE(sock.SetNonBlocking());
     const std::vector<char> data(1024, 'x');
     size_t sent{0};
-    // The buffer is only really full if the writes keep failing: on some systems the first
-    // refusals are transient, until the peer has acknowledged what was sent so far.
-    for (int refused{0}; refused < 3;) {
+    // The buffer is only really full if the writes keep failing for a while: the first refusals
+    // can be transient, until the peer has acknowledged what was sent so far or has opened its
+    // receive window again, which on Windows can take more than a second.
+    std::optional<std::chrono::steady_clock::time_point> refused_since;
+    while (!refused_since || std::chrono::steady_clock::now() - *refused_since < 2500ms) {
         // Far more than any sane socket buffer.
         BOOST_REQUIRE_LT(sent, 64 * 1024 * 1024);
         const ssize_t n{sock.Send(data.data(), data.size(), MSG_NOSIGNAL)};
         if (n >= 0) {
             sent += n;
-            refused = 0;
+            refused_since.reset();
         } else {
             BOOST_REQUIRE(!IOErrorIsPermanent(WSAGetLastError()));
-            ++refused;
-            std::this_thread::sleep_for(100ms);
+            if (!refused_since) refused_since = std::chrono::steady_clock::now();
+            std::this_thread::sleep_for(50ms);
         }
     }
 }
