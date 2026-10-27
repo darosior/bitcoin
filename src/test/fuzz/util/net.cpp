@@ -111,19 +111,42 @@ P ConsumeDeserializationParams(FuzzedDataProvider& fuzzed_data_provider) noexcep
 template CNetAddr::SerParams ConsumeDeserializationParams(FuzzedDataProvider&) noexcept;
 template CAddress::SerParams ConsumeDeserializationParams(FuzzedDataProvider&) noexcept;
 
+namespace {
+/** Number of FuzzedSock objects alive. */
+size_t g_fuzzed_socks_alive{0};
+/** Number of FuzzedSock objects created since none was alive. */
+SOCKET g_fuzzed_socks_created{0};
+
+/**
+ * Pick the socket of a new FuzzedSock. Live sockets have distinct descriptors, as on the real OS,
+ * where Sock::EventsPerSock tells sockets apart by their descriptor. Numbering restarts when no
+ * FuzzedSock is alive, so that it is the same for every run of a fuzz input.
+ */
+SOCKET NewFuzzedSocket(FuzzedDataProvider& fuzzed_data_provider)
+{
+    // Kept for the sake of existing fuzz inputs, which used it to pick the socket.
+    (void)fuzzed_data_provider.ConsumeIntegralInRange<SOCKET>(INVALID_SOCKET - 1, INVALID_SOCKET);
+    if (g_fuzzed_socks_alive == 0) g_fuzzed_socks_created = 0;
+    // Far from the descriptors in use, which FuzzedSock never closes anyway.
+    return INVALID_SOCKET - 1 - g_fuzzed_socks_created++;
+}
+} // namespace
+
 FuzzedSock::FuzzedSock(FuzzedDataProvider& fuzzed_data_provider, FakeSteadyClock& clock)
-    : Sock{fuzzed_data_provider.ConsumeIntegralInRange<SOCKET>(INVALID_SOCKET - 1, INVALID_SOCKET)},
+    : Sock{NewFuzzedSocket(fuzzed_data_provider)},
       m_fuzzed_data_provider{fuzzed_data_provider},
       m_selectable{fuzzed_data_provider.ConsumeBool()},
       m_clock{clock}
 {
+    ++g_fuzzed_socks_alive;
 }
 
 FuzzedSock::~FuzzedSock()
 {
+    --g_fuzzed_socks_alive;
     // Sock::~Sock() will be called after FuzzedSock::~FuzzedSock() and it will call
     // close(m_socket) if m_socket is not INVALID_SOCKET.
-    // Avoid closing an arbitrary file descriptor (m_socket is just a random very high number which
+    // Avoid closing an arbitrary file descriptor (m_socket is just a made-up number which
     // theoretically may concide with a real opened file descriptor).
     m_socket = INVALID_SOCKET;
 }
