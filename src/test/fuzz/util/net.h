@@ -187,8 +187,35 @@ class FuzzedSock : public Sock
      */
     FakeSteadyClock& m_clock;
 
+    /** Whether `Listen()` succeeded. A listening socket has no connection that can fail. */
+    mutable bool m_listening{false};
+
+    /**
+     * Whether the connection failed, as reported by a wait with `ErrorEvent`. From then on, waits
+     * report it, `Recv()` returns at most `m_failed_recv_budget` more bytes (what was buffered
+     * before) and then fails for good, and `Send()` fails.
+     */
+    mutable bool m_failed{false};
+    mutable size_t m_failed_recv_budget{0};
+    mutable bool m_failed_recv_error_returned{false};
+
+    /** Number of `Recv()` calls, for fuzz targets to check who reads from the socket. */
+    mutable uint64_t m_recv_calls{0};
+
+    /** At most this much is buffered when a connection fails: what a receive buffer can hold. */
+    static constexpr size_t MAX_FAILED_RECV_BYTES{256 * 1024};
+
+    /** Pick what a wait reports for this socket, among what the real OS can report. */
+    Event ConsumeOccurred(Event requested) const;
+
+    ssize_t RecvAfterFailure(void* buf, size_t len, int flags) const;
+
 public:
     explicit FuzzedSock(FuzzedDataProvider& fuzzed_data_provider, FakeSteadyClock& clock);
+
+    bool Failed() const { return m_failed; }
+
+    uint64_t RecvCalls() const { return m_recv_calls; }
 
     ~FuzzedSock() override;
 

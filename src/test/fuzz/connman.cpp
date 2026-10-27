@@ -19,6 +19,8 @@
 #include <util/translation.h>
 
 #include <cstdint>
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -282,7 +284,28 @@ FUZZ_TARGET(connman, .init = initialize_connman)
                 connman.InitBindsPublic(options);
             },
             [&] {
+                // The message handler pauses receiving from a peer whose queue of received
+                // messages is too large, and resumes it, from its own thread.
+                const auto nodes{connman.TestNodes()};
+                if (!nodes.empty()) PickValue(fuzzed_data_provider, nodes)->fPauseRecv = fuzzed_data_provider.ConsumeBool();
+            },
+            [&] {
+                // A peer paused for receiving is not read from, so that what it sends stays in
+                // the OS buffers, unless its connection failed: then only what was already
+                // buffered can be read.
+                std::vector<std::pair<std::shared_ptr<const FuzzedSock>, uint64_t>> paused;
+                for (CNode* node : connman.TestNodes()) {
+                    if (!node->fPauseRecv) continue;
+                    LOCK(node->m_sock_mutex);
+                    if (!node->m_sock) continue;
+                    auto sock{std::dynamic_pointer_cast<const FuzzedSock>(node->m_sock)};
+                    assert(sock);
+                    paused.emplace_back(sock, sock->RecvCalls());
+                }
                 connman.SocketHandlerPublic();
+                for (const auto& [sock, recv_calls] : paused) {
+                    assert(sock->RecvCalls() == recv_calls || sock->Failed());
+                }
             });
     }
     connman.ForEachNode([](CNode* pnode) {
