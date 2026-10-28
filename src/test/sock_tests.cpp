@@ -161,17 +161,6 @@ BOOST_AUTO_TEST_CASE(send_and_receive)
     socks_moved.send_and_receive();
 }
 
-BOOST_AUTO_TEST_CASE(wait)
-{
-    TcpSocketPair socks = TcpSocketPair{};
-
-    std::thread waiter([&socks]() { (void)socks.receiver.Wait(24h, Sock::RecvEvent); });
-
-    BOOST_REQUIRE_EQUAL(socks.sender.Send("a", 1, 0), 1);
-
-    waiter.join();
-}
-
 BOOST_AUTO_TEST_CASE(recv_until_terminator_limit)
 {
     constexpr auto timeout = 1min; // High enough so that it is never hit.
@@ -646,7 +635,68 @@ BOOST_AUTO_TEST_CASE(wait_many_attribution)
     }
 }
 
+// Without events, the wait lasts for the timeout and returns true with nothing occurred, also
+// when a socket on which nothing is requested is readable. Callers rely on it to pace their loops
+// (net.cpp, httpserver.cpp) and to detect a timeout (netbase.cpp's connect, i2p.cpp, pcp.cpp).
+BOOST_AUTO_TEST_CASE(timeout)
+{
+    Listener listener;
+    Connection idle{listener};
+    Connection readable{listener};
+    readable.PeerSend("data");
+    readable.AwaitReadable();
+
+    constexpr auto TIMEOUT{300ms};
+    // Allow for the coarse timers of some platforms.
+    constexpr auto MIN_ELAPSED{TIMEOUT * 9 / 10};
+
+    auto start{std::chrono::steady_clock::now()};
+    Sock::Event occurred{0xff};
+    BOOST_REQUIRE(idle.sock->Wait(TIMEOUT, RECV, &occurred));
+    BOOST_CHECK_GE(std::chrono::steady_clock::now() - start, MIN_ELAPSED);
+    BOOST_CHECK_EQUAL(occurred, NONE);
+
+    Sock::EventsPerSock events_per_sock;
+    events_per_sock.emplace(Key(*idle.sock), Sock::Events{RECV});
+    events_per_sock.emplace(Key(*readable.sock), Sock::Events{NONE});
+    start = std::chrono::steady_clock::now();
+    BOOST_REQUIRE(listener.sock.WaitMany(TIMEOUT, events_per_sock));
+    BOOST_CHECK_GE(std::chrono::steady_clock::now() - start, MIN_ELAPSED);
+    BOOST_CHECK_EQUAL(events_per_sock.at(Key(*idle.sock)).occurred, NONE);
+    BOOST_CHECK_EQUAL(events_per_sock.at(Key(*readable.sock)).occurred, NONE);
+}
+
+// Timeouts longer than MAX_WAIT_TIMEOUT are capped rather than making the wait fail. bitcoin-cli
+// waits for MAX_WAIT_TIMEOUT with -rpcclienttimeout=0.
+BOOST_AUTO_TEST_CASE(large_timeout)
+{
+    Listener listener;
+    for (const std::chrono::milliseconds timeout : {std::chrono::milliseconds{Sock::MAX_WAIT_TIMEOUT},
+                                                    std::chrono::milliseconds{Sock::MAX_WAIT_TIMEOUT + 1s},
+                                                    std::chrono::milliseconds::max()}) {
+        Connection conn{listener};
+        // Make it readable while waiting. If the wait failed to wait, it fails before that.
+        ssize_t sent{0};
+        std::thread peer{[&] {
+            std::this_thread::sleep_for(100ms);
+            sent = send(conn.peer, "x", 1, 0);
+        }};
+        Sock::Event occurred{0xff};
+        const bool ok{conn.sock->Wait(timeout, RECV, &occurred)};
+        peer.join();
+        BOOST_REQUIRE_EQUAL(sent, 1);
+        BOOST_CHECK(ok);
+        BOOST_CHECK_EQUAL(occurred, RECV);
+
+        Sock::EventsPerSock events_per_sock;
+        events_per_sock.emplace(Key(*conn.sock), Sock::Events{RECV});
+        BOOST_CHECK(conn.sock->WaitMany(timeout, events_per_sock));
+        BOOST_CHECK_EQUAL(events_per_sock.begin()->second.occurred, RECV);
+    }
+}
+
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
+// Not tested: a negative timeout. poll() would wait forever and select() fails; no caller passes one.
 
 BOOST_AUTO_TEST_SUITE_END()
