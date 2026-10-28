@@ -13,6 +13,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -226,6 +227,11 @@ constexpr bool WINDOWS{true};
 #else
 constexpr bool WINDOWS{false};
 #endif
+#ifdef __linux__
+constexpr bool LINUX{true};
+#else
+constexpr bool LINUX{false};
+#endif
 // poll() reports a reset connection (POLLERR, POLLHUP) whatever was requested, even nothing.
 // select() reports it only through the read and write sets.
 constexpr bool RESET_REPORTS_ERROR{POLL};
@@ -241,6 +247,17 @@ constexpr bool NOTHING_REQUESTED_FAILS{!POLL && WINDOWS};
 // What a failed non-blocking connect() reports. Callers only check that something occurred and
 // then read SO_ERROR. Windows' select() signals it only in exceptfds.
 constexpr Sock::Event FAILED_CONNECT_EVENTS{POLL ? RECV | SEND | ERR : WINDOWS ? ERR : RECV | SEND};
+
+
+/*
+ * Where platforms differ in the sockets that accept() returns. CreateSockOS() sockets are
+ * non-blocking, with TCP_NODELAY, SO_OOBINLINE and, where it exists, SO_NOSIGPIPE.
+ */
+// Linux's accept() does not pass O_NONBLOCK on to the new socket, unlike macOS, the BSDs and
+// Windows. net.cpp and httpserver.cpp do not set it again: they pass MSG_DONTWAIT instead.
+constexpr bool ACCEPT_INHERITS_NONBLOCKING{!LINUX};
+// Where MSG_DONTWAIT does not exist (Windows), accepted sockets must be non-blocking by themselves.
+static_assert(MSG_DONTWAIT != 0 || ACCEPT_INHERITS_NONBLOCKING);
 
 // Wait this long for something that is expected to happen. A wait ends as soon as it happens.
 constexpr auto LONG_WAIT{60s};
@@ -378,7 +395,13 @@ struct Connection {
     SOCKET peer;
     std::unique_ptr<AcceptedSock> sock;
 
-    explicit Connection(const Listener& listener) : peer{CreateSocket()}
+    /**
+     * @param[in] set_options Set the options that net.cpp and httpserver.cpp do not set on an
+     *                        accepted socket but that the tests rely on: O_NONBLOCK, and
+     *                        TCP_NODELAY in case it was not inherited. Without it, our socket is
+     *                        as accept() returned it, except for a small send buffer.
+     */
+    explicit Connection(const Listener& listener, bool set_options = true) : peer{CreateSocket()}
     {
         // Set before connecting: the receive window is negotiated in the handshake.
         SetIntOption(peer, SOL_SOCKET, SO_RCVBUF, SMALL_BUFFER);
@@ -388,10 +411,10 @@ struct Connection {
         auto accepted{listener.sock.Accept(nullptr, nullptr)};
         BOOST_REQUIRE(accepted);
         sock = std::make_unique<AcceptedSock>(std::move(*accepted));
-        // Other options are inherited from the listening socket, but not O_NONBLOCK on Linux, nor
-        // TCP_NODELAY everywhere, which net.cpp and httpserver.cpp set again.
-        BOOST_REQUIRE(sock->SetNonBlocking());
-        SetIntOption(sock->Fd(), IPPROTO_TCP, TCP_NODELAY, 1);
+        if (set_options) {
+            BOOST_REQUIRE(sock->SetNonBlocking());
+            SetIntOption(sock->Fd(), IPPROTO_TCP, TCP_NODELAY, 1);
+        }
         SetIntOption(sock->Fd(), SOL_SOCKET, SO_SNDBUF, SMALL_BUFFER);
     }
 
@@ -429,12 +452,12 @@ struct Connection {
     }
 
     /** Write to our socket until it would block. */
-    void FillSendBuffer() const
+    void FillSendBuffer(int flags = MSG_NOSIGNAL) const
     {
         const std::vector<char> data(SMALL_BUFFER, 'x');
         size_t sent{0};
         for (;;) {
-            const ssize_t ret{sock->Send(data.data(), data.size(), MSG_NOSIGNAL)};
+            const ssize_t ret{sock->Send(data.data(), data.size(), flags)};
             if (ret < 0) {
                 BOOST_REQUIRE(WouldBlock(ret));
                 return;
@@ -723,6 +746,64 @@ BOOST_AUTO_TEST_CASE(large_timeout)
         BOOST_CHECK_EQUAL(events_per_sock.begin()->second.occurred, RECV);
     }
 }
+
+// The options that CreateSockOS() sets, and those that a socket accepted from it inherits. A
+// socket that is not non-blocking makes a call without MSG_DONTWAIT wait, here until the test
+// times out, rather than return would-block.
+BOOST_AUTO_TEST_CASE(socket_options)
+{
+    const auto get{[](const Sock& sock, int level, int name) {
+        int value{0};
+        socklen_t len{sizeof(value)};
+        BOOST_REQUIRE_EQUAL(sock.GetSockOpt(level, name, &value, &len), 0);
+        return value != 0;
+    }};
+
+    Listener listener;
+    const auto unconnected{CreateOurSock()};
+    for (const Sock* sock : std::array<const Sock*, 2>{&listener.sock, unconnected.get()}) {
+        BOOST_CHECK(sock->IsSelectable());
+        BOOST_CHECK(get(*sock, IPPROTO_TCP, TCP_NODELAY));
+        BOOST_CHECK(get(*sock, SOL_SOCKET, SO_OOBINLINE));
+#ifdef SO_NOSIGPIPE
+        BOOST_CHECK(get(*sock, SOL_SOCKET, SO_NOSIGPIPE));
+#endif
+    }
+    BOOST_CHECK(!listener.sock.Accept(nullptr, nullptr));
+    BOOST_CHECK(WouldBlock(-1));
+
+    const Connection conn{listener, /*set_options=*/false};
+    const Sock& accepted{*conn.sock};
+    BOOST_CHECK(get(accepted, IPPROTO_TCP, TCP_NODELAY));
+    BOOST_CHECK(get(accepted, SOL_SOCKET, SO_OOBINLINE));
+#ifdef SO_NOSIGPIPE
+    BOOST_CHECK(get(accepted, SOL_SOCKET, SO_NOSIGPIPE));
+#endif
+#ifndef WIN32
+    const int flags{fcntl(conn.sock->Fd(), F_GETFL)};
+    BOOST_REQUIRE_NE(flags, -1);
+    BOOST_CHECK_EQUAL((flags & O_NONBLOCK) != 0, ACCEPT_INHERITS_NONBLOCKING);
+#endif
+    if (ACCEPT_INHERITS_NONBLOCKING) {
+        char c;
+        BOOST_CHECK(WouldBlock(accepted.Recv(&c, 1, 0)));
+    }
+}
+
+// Recv() and Send() with MSG_DONTWAIT return would-block rather than wait on a socket as accept()
+// returns it, which net.cpp and httpserver.cpp rely on: it is blocking on Linux, and MSG_DONTWAIT
+// is 0 on Windows (see ACCEPT_INHERITS_NONBLOCKING).
+BOOST_AUTO_TEST_CASE(accepted_socket_dontwait)
+{
+    Listener listener;
+    Connection conn{listener, /*set_options=*/false};
+    char c;
+    BOOST_CHECK(WouldBlock(conn.sock->Recv(&c, 1, MSG_DONTWAIT)));
+    conn.FillSendBuffer(MSG_NOSIGNAL | MSG_DONTWAIT);
+    BOOST_CHECK(WouldBlock(conn.sock->Send("x", 1, MSG_NOSIGNAL | MSG_DONTWAIT)));
+}
+// Not relied on: on macOS, send() with MSG_DONTWAIT waits on a blocking socket. Accepted sockets
+// are non-blocking there.
 
 // A listening socket reports RecvEvent when accept() will succeed. net.cpp accepts one connection
 // per wake-up and httpserver.cpp accepts until accept() fails.
