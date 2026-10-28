@@ -695,6 +695,33 @@ BOOST_AUTO_TEST_CASE(large_timeout)
     }
 }
 
+// A listening socket reports RecvEvent when accept() will succeed. net.cpp accepts one connection
+// per wake-up and httpserver.cpp accepts until accept() fails.
+BOOST_AUTO_TEST_CASE(listening_socket)
+{
+    Listener listener;
+    BOOST_CHECK_EQUAL(AwaitEvents(listener.sock, RECV, NONE), NONE);
+    BOOST_CHECK(!listener.sock.Accept(nullptr, nullptr));
+
+    std::vector<SOCKET> clients;
+    for (int i{0}; i < 3; ++i) {
+        clients.push_back(CreateSocket());
+        BOOST_REQUIRE_EQUAL(connect(clients.back(), reinterpret_cast<const sockaddr*>(&listener.addr), sizeof(listener.addr)), 0);
+    }
+    for (size_t i{0}; i < clients.size(); ++i) {
+        BOOST_CHECK_EQUAL(AwaitEvents(listener.sock, RECV, RECV), RECV);
+        BOOST_CHECK(listener.sock.Accept(nullptr, nullptr));
+    }
+    BOOST_CHECK_EQUAL(AwaitEvents(listener.sock, RECV, NONE), NONE);
+    BOOST_CHECK(!listener.sock.Accept(nullptr, nullptr));
+    // Not because of an error.
+    BOOST_CHECK(WouldBlock(-1));
+
+    for (const SOCKET s : clients) CloseSocket(s);
+}
+// Not tested: a connection reset before it is accepted may leave the listening socket readable
+// while accept() fails, on some platforms. Callers then just wait again.
+
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
 // Not tested: a negative timeout. poll() would wait forever and select() fails; no caller passes one.
