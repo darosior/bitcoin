@@ -25,6 +25,10 @@
 #include <vector>
 
 #ifndef WIN32
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/select.h>
 #include <unistd.h>
 #endif
 
@@ -231,6 +235,9 @@ constexpr bool URGENT_DATA_REPORTS_ERROR{!POLL && !WINDOWS};
 // Windows' select() fails if no socket requests any event, as all three sets are then empty.
 // Callers sleep for their timeout when the wait fails.
 constexpr bool NOTHING_REQUESTED_FAILS{!POLL && WINDOWS};
+// select() only supports descriptors below FD_SETSIZE, except on Windows where an fd_set is an
+// array of handles. Callers drop the sockets for which IsSelectable() is false.
+[[maybe_unused]] constexpr bool HIGH_DESCRIPTOR_WAITABLE{POLL || WINDOWS};
 // What a failed non-blocking connect() reports. Callers only check that something occurred and
 // then read SO_ERROR. Windows' select() signals it only in exceptfds.
 constexpr Sock::Event FAILED_CONNECT_EVENTS{POLL ? RECV | SEND | ERR : WINDOWS ? ERR : RECV | SEND};
@@ -970,8 +977,66 @@ BOOST_AUTO_TEST_CASE(level_triggered)
     BOOST_CHECK_EQUAL(conn.sock->Recv(&c, 1, 0), 0);
 }
 
+#ifndef WIN32
+// A socket whose descriptor is not below FD_SETSIZE can be waited on only if IsSelectable(). Else
+// the whole wait fails, which is why callers drop such sockets (net.cpp, httpserver.cpp,
+// netbase.cpp) and why init.cpp caps the number of descriptors at FD_SETSIZE without USE_POLL.
+BOOST_AUTO_TEST_CASE(high_descriptor)
+{
+    constexpr int HIGH_FD{1100};
+    static_assert(HIGH_FD >= FD_SETSIZE);
+
+    rlimit limit;
+    BOOST_REQUIRE_EQUAL(getrlimit(RLIMIT_NOFILE, &limit), 0);
+    const rlimit original{limit};
+    if (limit.rlim_max != RLIM_INFINITY && limit.rlim_max <= HIGH_FD) {
+        BOOST_TEST_MESSAGE("The hard limit on the number of descriptors is too low, skipping");
+        return;
+    }
+    if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur <= HIGH_FD) {
+        limit.rlim_cur = HIGH_FD + 1;
+        if (setrlimit(RLIMIT_NOFILE, &limit) != 0) {
+            BOOST_TEST_MESSAGE("Could not raise the limit on the number of descriptors, skipping");
+            return;
+        }
+    }
+
+    {
+        Listener listener;
+        Connection conn{listener};
+        conn.PeerSend("data");
+        conn.AwaitReadable();
+        // Do not clobber a descriptor in use.
+        if (fcntl(HIGH_FD, F_GETFD) != -1 || errno != EBADF) {
+            BOOST_TEST_MESSAGE("Descriptor " << HIGH_FD << " is in use, skipping");
+        } else {
+            BOOST_REQUIRE_EQUAL(dup2(static_cast<int>(conn.sock->Fd()), HIGH_FD), HIGH_FD);
+            // This owns and closes the duplicate. The connection stays open through the original.
+            const Sock high{static_cast<SOCKET>(HIGH_FD)};
+            BOOST_CHECK_EQUAL(high.IsSelectable(), HIGH_DESCRIPTOR_WAITABLE);
+            Sock::Event occurred{0xff};
+            BOOST_CHECK_EQUAL(high.Wait(0ms, RECV, &occurred), HIGH_DESCRIPTOR_WAITABLE);
+            if (HIGH_DESCRIPTOR_WAITABLE) BOOST_CHECK_EQUAL(occurred, RECV);
+
+            Sock::EventsPerSock events_per_sock;
+            events_per_sock.emplace(Key(*conn.sock), Sock::Events{RECV});
+            events_per_sock.emplace(Key(high), Sock::Events{SEND});
+            BOOST_CHECK_EQUAL(high.WaitMany(0ms, events_per_sock), HIGH_DESCRIPTOR_WAITABLE);
+            if (HIGH_DESCRIPTOR_WAITABLE) {
+                BOOST_CHECK_EQUAL(events_per_sock.at(Key(*conn.sock)).occurred, RECV);
+                BOOST_CHECK_EQUAL(events_per_sock.at(Key(high)).occurred, SEND);
+            }
+        }
+    }
+
+    BOOST_REQUIRE_EQUAL(setrlimit(RLIMIT_NOFILE, &original), 0);
+}
+#endif // WIN32
+
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
+// Not tested, as it needs more than FD_SETSIZE sockets: on Windows, FD_SET() silently ignores
+// sockets beyond FD_SETSIZE in a set. init.cpp caps the number of descriptors at FD_SETSIZE.
 // Not tested: a negative timeout. poll() would wait forever and select() fails; no caller passes one.
 
 BOOST_AUTO_TEST_SUITE_END()
