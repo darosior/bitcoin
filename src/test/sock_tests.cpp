@@ -945,6 +945,31 @@ BOOST_AUTO_TEST_CASE(is_connected)
     }
 }
 
+// Readiness is level-triggered: what is left after a partial read, and then the end of the
+// stream, are reported again. net.cpp reads at most 64 KiB per wake-up and relies on this.
+BOOST_AUTO_TEST_CASE(level_triggered)
+{
+    Listener listener;
+    Connection conn{listener};
+    constexpr size_t SIZE{3000};
+    conn.PeerSend(std::string(SIZE, 'x'));
+    conn.PeerShutdown();
+
+    size_t received{0};
+    for (;;) {
+        BOOST_REQUIRE_EQUAL(AwaitEvents(*conn.sock, RECV, RECV), RECV);
+        char buf[1000];
+        const ssize_t ret{conn.sock->Recv(buf, sizeof(buf), 0)};
+        BOOST_REQUIRE_GE(ret, 0);
+        if (ret == 0) break;
+        received += ret;
+    }
+    BOOST_CHECK_EQUAL(received, SIZE);
+    BOOST_CHECK_EQUAL(AwaitEvents(*conn.sock, RECV, RECV), RECV);
+    char c;
+    BOOST_CHECK_EQUAL(conn.sock->Recv(&c, 1, 0), 0);
+}
+
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
 // Not tested: a negative timeout. poll() would wait forever and select() fails; no caller passes one.
