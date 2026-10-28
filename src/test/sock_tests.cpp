@@ -230,14 +230,19 @@ constexpr bool URGENT_DATA_REPORTS_ERROR{!POLL && !WINDOWS};
 // Windows' select() fails if no socket requests any event, as all three sets are then empty.
 // Callers sleep for their timeout when the wait fails.
 constexpr bool NOTHING_REQUESTED_FAILS{!POLL && WINDOWS};
+// What a failed non-blocking connect() reports. Callers only check that something occurred and
+// then read SO_ERROR. Windows' select() signals it only in exceptfds.
+constexpr Sock::Event FAILED_CONNECT_EVENTS{POLL ? RECV | SEND | ERR : WINDOWS ? ERR : RECV | SEND};
 
 // Wait this long for something that is expected to happen. A wait ends as soon as it happens.
 constexpr auto LONG_WAIT{60s};
 
 #ifdef WIN32
 constexpr int SHUT_WRITE{SD_SEND};
+constexpr int CONNECTION_REFUSED{WSAECONNREFUSED};
 #else
 constexpr int SHUT_WRITE{SHUT_WR};
+constexpr int CONNECTION_REFUSED{ECONNREFUSED};
 #endif
 
 std::string EventsStr(Sock::Event events)
@@ -721,6 +726,56 @@ BOOST_AUTO_TEST_CASE(listening_socket)
 }
 // Not tested: a connection reset before it is accepted may leave the listening socket readable
 // while accept() fails, on some platforms. Callers then just wait again.
+
+// A non-blocking connect() that succeeds wakes up a wait for RecvEvent | SendEvent with SendEvent
+// and SO_ERROR is 0, as netbase.cpp's ConnectToSocket() expects.
+BOOST_AUTO_TEST_CASE(connect_succeeds)
+{
+    Listener listener;
+    const auto sock_ptr{CreateOurSock()};
+    const Sock& sock{*sock_ptr};
+    if (sock.Connect(reinterpret_cast<const sockaddr*>(&listener.addr), sizeof(listener.addr)) != 0) {
+        const int err{WSAGetLastError()};
+        BOOST_REQUIRE(err == WSAEINPROGRESS || err == WSAEWOULDBLOCK);
+    }
+    BOOST_CHECK_EQUAL(EventsStr(AwaitEvents(sock, RECV | SEND, SEND)), EventsStr(SEND));
+    int error{-1};
+    socklen_t len{sizeof(error)};
+    BOOST_REQUIRE_EQUAL(sock.GetSockOpt(SOL_SOCKET, SO_ERROR, &error, &len), 0);
+    BOOST_CHECK_EQUAL(error, 0);
+}
+
+// A non-blocking connect() that fails wakes up a wait for RecvEvent | SendEvent and SO_ERROR
+// tells why, as netbase.cpp's ConnectToSocket() expects.
+BOOST_AUTO_TEST_CASE(connect_refused)
+{
+    // A port that nothing is bound to: macOS does not answer a connection to a port that is bound
+    // without listening. Something else could bind to it and listen in between, but that is unlikely.
+    sockaddr_in addr;
+    {
+        Listener listener;
+        addr = listener.addr;
+    }
+
+    const auto sock_ptr{CreateOurSock()};
+    const Sock& sock{*sock_ptr};
+    BOOST_REQUIRE_NE(sock.Connect(reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)), 0);
+    const int err{WSAGetLastError()};
+    if (err != WSAEINPROGRESS && err != WSAEWOULDBLOCK) {
+        // Refused right away, without waiting.
+        BOOST_TEST_MESSAGE("connect() was refused right away");
+        BOOST_CHECK_EQUAL(err, CONNECTION_REFUSED);
+        return;
+    }
+    // Windows retries for about two seconds before giving up.
+    BOOST_CHECK_EQUAL(EventsStr(AwaitEvents(sock, RECV | SEND, FAILED_CONNECT_EVENTS)), EventsStr(FAILED_CONNECT_EVENTS));
+    int error{-1};
+    socklen_t len{sizeof(error)};
+    BOOST_REQUIRE_EQUAL(sock.GetSockOpt(SOL_SOCKET, SO_ERROR, &error, &len), 0);
+    BOOST_CHECK_EQUAL(error, CONNECTION_REFUSED);
+}
+// Not tested, as it needs a peer that does not answer: a connect() that is still in progress is
+// not reported, or ConnectToSocket() would take it for an established connection.
 
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
