@@ -911,6 +911,40 @@ BOOST_AUTO_TEST_CASE(recv_until_terminator)
     }
 }
 
+// IsConnected() tells a live connection from one that the peer closed or reset. Tor control
+// checks it when waiting for data times out, I2P before reusing its control socket.
+BOOST_AUTO_TEST_CASE(is_connected)
+{
+    Listener listener;
+    std::string errmsg;
+    {
+        Connection conn{listener};
+        BOOST_CHECK(conn.sock->IsConnected(errmsg));
+        conn.PeerSend("data");
+        conn.AwaitReadable();
+        BOOST_CHECK(conn.sock->IsConnected(errmsg));
+    }
+    {
+        Connection conn{listener};
+        conn.PeerSendUrgent();
+        conn.AwaitReadable();
+        BOOST_CHECK(conn.sock->IsConnected(errmsg));
+    }
+    {
+        Connection conn{listener};
+        conn.PeerShutdown();
+        conn.AwaitReadable();
+        BOOST_CHECK(!conn.sock->IsConnected(errmsg));
+        BOOST_CHECK_EQUAL(errmsg, "closed");
+    }
+    {
+        Connection conn{listener};
+        conn.ResetPeer();
+        conn.AwaitReadable();
+        BOOST_CHECK(!conn.sock->IsConnected(errmsg));
+    }
+}
+
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
 // Not tested: a negative timeout. poll() would wait forever and select() fails; no caller passes one.
