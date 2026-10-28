@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -305,7 +306,7 @@ bool WouldBlock(ssize_t ret)
     return ret < 0 && !IOErrorIsPermanent(WSAGetLastError());
 }
 
-/** Our end of a Connection. */
+/** Our end of a Connection. It counts calls, to detect busy loops in its higher level methods. */
 class AcceptedSock : public Sock
 {
 public:
@@ -313,6 +314,22 @@ public:
     using Sock::operator=;
 
     SOCKET Fd() const { return m_socket; }
+
+    bool Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred = nullptr) const override
+    {
+        ++m_waits;
+        return Sock::Wait(timeout, requested, occurred);
+    }
+
+    ssize_t Send(const void* data, size_t len, int flags) const override
+    {
+        const ssize_t ret{Sock::Send(data, len, flags)};
+        if (WouldBlock(ret)) ++m_blocked_sends;
+        return ret;
+    }
+
+    mutable int m_waits{0};
+    mutable int m_blocked_sends{0};
 };
 
 /**
@@ -811,6 +828,87 @@ BOOST_AUTO_TEST_CASE(urgent_data)
     }
     BOOST_CHECK_EQUAL(received, "abUcd");
     BOOST_CHECK_EQUAL(EventsStr(AwaitEvents(*conn.sock, RECV, NONE)), EventsStr(NONE));
+}
+
+// SendComplete() waits for room in the send buffer between attempts, without spinning, also when
+// the peer has shut down its sending side, and fails at once on a reset connection. Tor control
+// and I2P SAM commands are sent with it.
+BOOST_AUTO_TEST_CASE(send_complete)
+{
+    Listener listener;
+    CThreadInterrupt interrupt;
+    // More than can ever be buffered while the peer does not read.
+    const std::vector<unsigned char> data(16 << 20, 'x');
+
+    {
+        Connection conn{listener};
+        conn.FillSendBuffer();
+        conn.PeerShutdown();
+        conn.AwaitReadable();
+        conn.sock->m_blocked_sends = 0;
+        constexpr auto TIMEOUT{1500ms};
+        const auto start{std::chrono::steady_clock::now()};
+        try {
+            conn.sock->SendComplete(data, TIMEOUT, interrupt);
+            // Windows keeps finding room for more data on a loopback connection, even when the
+            // peer does not read.
+        } catch (const std::runtime_error& e) {
+            BOOST_CHECK_EQUAL(std::string{e.what()}.rfind("Send timeout", 0), 0U);
+            BOOST_CHECK_GE(std::chrono::steady_clock::now() - start, TIMEOUT * 9 / 10);
+        }
+        // After a send() that would block, it waits until there is room again, or for at most
+        // MAX_WAIT_FOR_IO. A busy loop would retry thousands of times.
+        BOOST_CHECK_LE(conn.sock->m_blocked_sends, 10);
+    }
+
+    {
+        Connection conn{listener};
+        conn.FillSendBuffer();
+        conn.ResetPeer();
+        conn.AwaitReadable();
+        BOOST_CHECK_EXCEPTION(conn.sock->SendComplete(data, LONG_WAIT, interrupt), std::runtime_error, HasReason("send(): "));
+    }
+}
+
+// RecvUntilTerminator() waits for data between attempts and fails at once at the end of the
+// stream or on a reset. I2P SAM replies are read with it.
+BOOST_AUTO_TEST_CASE(recv_until_terminator)
+{
+    Listener listener;
+    CThreadInterrupt interrupt;
+    constexpr size_t MAX_DATA{1000};
+
+    {
+        Connection conn{listener};
+        conn.PeerSend("abc");
+        conn.PeerShutdown();
+        conn.AwaitReadable();
+        conn.sock->m_waits = 0;
+        BOOST_CHECK_EXCEPTION((void)conn.sock->RecvUntilTerminator('\n', LONG_WAIT, interrupt, MAX_DATA), std::runtime_error,
+                              HasReason("Connection unexpectedly closed by peer"));
+        BOOST_CHECK_LE(conn.sock->m_waits, 1);
+    }
+
+    {
+        Connection conn{listener};
+        conn.ResetPeer();
+        conn.AwaitReadable();
+        conn.sock->m_waits = 0;
+        BOOST_CHECK_EXCEPTION((void)conn.sock->RecvUntilTerminator('\n', LONG_WAIT, interrupt, MAX_DATA), std::runtime_error,
+                              HasReason("recv(): "));
+        BOOST_CHECK_EQUAL(conn.sock->m_waits, 0);
+    }
+
+    {
+        // Urgent data is returned inline. Each wait ends when more data has arrived.
+        Connection conn{listener};
+        conn.PeerSend("ab");
+        conn.PeerSendUrgent();
+        conn.PeerSend("c\n");
+        conn.sock->m_waits = 0;
+        BOOST_CHECK_EQUAL(conn.sock->RecvUntilTerminator('\n', LONG_WAIT, interrupt, MAX_DATA), "abUc");
+        BOOST_CHECK_LE(conn.sock->m_waits, 10);
+    }
 }
 
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
