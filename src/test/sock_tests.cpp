@@ -777,6 +777,42 @@ BOOST_AUTO_TEST_CASE(connect_refused)
 // Not tested, as it needs a peer that does not answer: a connect() that is still in progress is
 // not reported, or ConnectToSocket() would take it for an established connection.
 
+// Urgent data is received inline, like normal data. A lone urgent byte is reported to a wait for
+// RecvEvent with RecvEvent and the next recv() returns it, so that a caller that was woken up does
+// not spin. It is not reported to a wait without RecvEvent, so that it does not wake up a peer that
+// is paused for receiving. Once read, it is not reported anymore. See URGENT_DATA_REPORTS_ERROR.
+BOOST_AUTO_TEST_CASE(urgent_data)
+{
+    Listener listener;
+    Connection conn{listener};
+    const Sock::Event urgent_error{URGENT_DATA_REPORTS_ERROR ? ERR : NONE};
+
+    conn.PeerSendUrgent();
+    conn.AwaitReadable();
+    BOOST_CHECK_EQUAL(EventsStr(AwaitEvents(*conn.sock, SEND, SEND)), EventsStr(SEND));
+    BOOST_CHECK_EQUAL(EventsStr(AwaitEvents(*conn.sock, RECV, RECV | urgent_error)), EventsStr(RECV | urgent_error));
+    char c{0};
+    BOOST_CHECK_EQUAL(conn.sock->Recv(&c, 1, 0), 1);
+    BOOST_CHECK_EQUAL(c, 'U');
+    BOOST_CHECK_EQUAL(EventsStr(AwaitEvents(*conn.sock, RECV, NONE)), EventsStr(NONE));
+    BOOST_CHECK(WouldBlock(conn.sock->Recv(&c, 1, 0)));
+
+    // In the middle of normal data, it is received in order.
+    conn.PeerSend("ab");
+    conn.PeerSendUrgent();
+    conn.PeerSend("cd");
+    std::string received;
+    while (received.size() < 5) {
+        BOOST_REQUIRE(AwaitEvents(*conn.sock, RECV, RECV) & RECV);
+        char buf[16];
+        const ssize_t ret{conn.sock->Recv(buf, sizeof(buf), 0)};
+        BOOST_REQUIRE_GT(ret, 0);
+        received.append(buf, ret);
+    }
+    BOOST_CHECK_EQUAL(received, "abUcd");
+    BOOST_CHECK_EQUAL(EventsStr(AwaitEvents(*conn.sock, RECV, NONE)), EventsStr(NONE));
+}
+
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
 // Not tested: a negative timeout. poll() would wait forever and select() fails; no caller passes one.
