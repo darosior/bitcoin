@@ -611,6 +611,41 @@ BOOST_AUTO_TEST_CASE(readiness)
     }
 }
 
+// WaitMany() reports each socket's own events, for many sockets in random states.
+BOOST_AUTO_TEST_CASE(wait_many_attribution)
+{
+    enum class State { IDLE, DATA, END_OF_STREAM };
+    struct Entry {
+        State state;
+        Sock::Event requested;
+        std::unique_ptr<Connection> conn;
+    };
+
+    Listener listener;
+    std::vector<Entry> entries;
+    for (int i{0}; i < 100; ++i) {
+        const auto state{static_cast<State>(m_rng.randrange(3))};
+        // At least one socket requests something, see NOTHING_REQUESTED_FAILS.
+        const auto requested{i == 0 ? RECV_SEND : static_cast<Sock::Event>(m_rng.randrange(4))};
+        entries.push_back({state, requested, std::make_unique<Connection>(listener)});
+        if (state == State::DATA) entries.back().conn->PeerSend("data");
+        if (state == State::END_OF_STREAM) entries.back().conn->PeerShutdown();
+    }
+    for (const auto& e : entries) {
+        if (e.state != State::IDLE) e.conn->AwaitReadable();
+    }
+
+    Sock::EventsPerSock events_per_sock;
+    for (const auto& e : entries) {
+        events_per_sock.emplace(Key(*e.conn->sock), Sock::Events{e.requested});
+    }
+    BOOST_REQUIRE(listener.sock.WaitMany(LONG_WAIT, events_per_sock));
+    for (const auto& e : entries) {
+        const Sock::Event expected{static_cast<Sock::Event>((e.requested & SEND) | (e.state != State::IDLE ? e.requested & RECV : 0))};
+        BOOST_CHECK_EQUAL(EventsStr(events_per_sock.at(Key(*e.conn->sock)).occurred), EventsStr(expected));
+    }
+}
+
 // Not tested, as the timing of signals is racy: a wait interrupted by a signal (EINTR) returns
 // false. Callers treat that like a failed wait (net.cpp and httpserver.cpp sleep, others give up).
 
