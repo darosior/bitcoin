@@ -319,7 +319,7 @@ FUZZ_TARGET(connman, .init = initialize_connman)
                     // Check we only ever read (/send) data when Recv (/send) was reported. The converse
                     // does not always hold (for instance we may skip a recv() when we have too much to
                     // send).
-                    Assert(!sock->m_last_recv || (sock->m_last_occurred & (Sock::RecvEvent | Sock::ErrorEvent)));
+                    Assert(!sock->m_last_recv || (sock->m_last_occurred & Sock::RecvEvent));
                     Assert(!sock->m_last_send || (sock->m_last_occurred & Sock::SendEvent));
 
                     // Check that we never request a Recv for fPauseRecv peers.
