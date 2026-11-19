@@ -187,13 +187,18 @@ bool Sock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per
     for (auto& [sock, events] : events_per_sock) {
         assert(sock->m_socket == static_cast<SOCKET>(pfds[i].fd));
         events.occurred = 0;
-        if (pfds[i].revents & POLLRDNORM) {
+        // A hang-up leaves data that the peer sent before it readable. Report it as such when
+        // receiving was requested, so that the data and the end of the stream are read. Otherwise
+        // report it as an error, which the caller must not read on.
+        const bool hangup{(pfds[i].revents & POLLHUP) != 0};
+        const bool recv_requested{(events.requested & RecvEvent) != 0};
+        if (pfds[i].revents & POLLRDNORM || (hangup && recv_requested)) {
             events.occurred |= RecvEvent;
         }
         if (pfds[i].revents & POLLOUT) {
             events.occurred |= SendEvent;
         }
-        if (pfds[i].revents & (POLLERR | POLLHUP)) {
+        if (pfds[i].revents & POLLERR || (hangup && !recv_requested)) {
             events.occurred |= ErrorEvent;
         }
         ++i;
