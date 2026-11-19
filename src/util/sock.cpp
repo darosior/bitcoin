@@ -187,13 +187,18 @@ bool Sock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per
     for (auto& [sock, events] : events_per_sock) {
         assert(sock->m_socket == static_cast<SOCKET>(pfds[i].fd));
         events.occurred = 0;
-        if (pfds[i].revents & POLLRDNORM) {
+        // Always return an event when poll raised one, to avoid introducing a spin. On a hang-up
+        // or an error, return a readable event if the caller requested it, so they can drain the
+        // socket before disconnecting.
+        const bool is_err{(pfds[i].revents & (POLLHUP | POLLERR)) != 0};
+        const bool recv_requested{(events.requested & RecvEvent) != 0};
+        if (pfds[i].revents & POLLRDNORM || (is_err && recv_requested)) {
             events.occurred |= RecvEvent;
         }
         if (pfds[i].revents & POLLOUT) {
             events.occurred |= SendEvent;
         }
-        if (pfds[i].revents & (POLLERR | POLLHUP)) {
+        if (is_err && !recv_requested) {
             events.occurred |= ErrorEvent;
         }
         ++i;
