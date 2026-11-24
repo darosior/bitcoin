@@ -150,8 +150,8 @@ public:
     static constexpr Event SendEvent = 0b010;
 
     /**
-     * Could be set in the occurred events. This happens when the socket has
-     * an error or has been disconnected, whichever events were requested.
+     * Signals an unrecoverable error. Callers must disconnect when an ErrorEvent is
+     * reported for a socket. Ignored if passed to `Wait()`.
      */
     static constexpr Event ErrorEvent = 0b100;
 
@@ -168,9 +168,10 @@ public:
      * Capped at `MAX_WAIT_TIMEOUT`.
      * @param[in] requested Wait for those events, bitwise-or of `RecvEvent` and `SendEvent`.
      * @param[out] occurred If not nullptr and the function returns `true`, then this
-     * indicates which of the requested events occurred. `ErrorEvent` may be added
-     * without being requested.
-     * A timeout is indicated by return value of `true` and `occurred` being set to 0.
+     * indicates which of the requested events occurred, as well as whether an unrecoverable
+     * error occurred (ErrorEvent). Outside of ErrorEvent, an event is guaranteed to only be
+     * set if it was requested. Callers must check for ErrorEvent. A timeout is indicated by
+     * return value of `true` and `occurred` being set to 0.
      * @return true on success (or timeout, if `occurred` of 0 is returned), false otherwise
      */
     [[nodiscard]] virtual bool Wait(std::chrono::milliseconds timeout,
@@ -222,7 +223,9 @@ public:
      * @param[in] timeout Wait this long for at least one of the requested events to occur.
      * Capped at `MAX_WAIT_TIMEOUT`.
      * @param[in,out] events_per_sock Wait for the requested events on these sockets and set
-     * `occurred` for the events that actually occurred.
+     * `occurred` for the events that actually occurred. Callers must check for ErrorEvent on
+     * each socket. Outside of ErrorEvent, an event is guaranteed to only be set if it was
+     * requested.
      * @return true on success (or timeout, if all `what[].occurred` are returned as 0),
      * false otherwise
      */

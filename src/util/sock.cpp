@@ -183,6 +183,11 @@ bool Sock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per
     size_t i{0};
     for (auto& [sock, events] : events_per_sock) {
         assert(sock->m_socket == static_cast<SOCKET>(pfds[i].fd));
+        // poll() may only report the events we request, plus POLLERR and POLLHUP. Technically it
+        // could also report POLLNVAL but in our situation it is impossible short of a bug: each
+        // Sock must be kept alive (and its fd open) for the whole wait.
+        Assume((pfds[i].revents & ~(POLLRDNORM | POLLOUT | POLLERR | POLLHUP)) == 0);
+
         events.occurred = 0;
         // Always return an event when poll raised one, to avoid introducing a spin. On a hang-up
         // or an error, return a readable event if the caller requested it, so they can drain the
@@ -190,9 +195,11 @@ bool Sock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_per
         const bool is_err{(pfds[i].revents & (POLLHUP | POLLERR)) != 0};
         const bool recv_requested{(events.requested & RecvEvent) != 0};
         if (pfds[i].revents & POLLRDNORM || (is_err && recv_requested)) {
+            Assume(recv_requested);
             events.occurred |= RecvEvent;
         }
         if (pfds[i].revents & POLLOUT) {
+            Assume((events.requested & SendEvent) != 0);
             events.occurred |= SendEvent;
         }
         if (is_err && !recv_requested) {
